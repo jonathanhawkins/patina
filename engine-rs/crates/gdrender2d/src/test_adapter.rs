@@ -13,11 +13,16 @@ use gdserver2d::viewport::Viewport;
 /// Captures a frame by rendering the viewport with the given renderer.
 pub fn capture_frame(renderer: &mut SoftwareRenderer, viewport: &Viewport) -> FrameBuffer {
     let frame = renderer.render_frame(viewport);
-    FrameBuffer {
-        width: frame.width,
-        height: frame.height,
-        pixels: frame.pixels,
-    }
+    // Built through `FrameBuffer::new` rather than a struct literal: a captured
+    // frame is finished pixels, and every piece of per-frame render state
+    // (scissor, blend mode, sampling modes) wants its neutral default here
+    // anyway — per-item state was already applied and unwound during
+    // `render_frame` (pat-0q2kx.86). Going through the constructor also means
+    // adding such a field cannot silently break this adapter, which is exactly
+    // what a struct literal did when blend/sampling state landed (pat-0q2kx.131).
+    let mut fb = FrameBuffer::new(frame.width, frame.height, Color::BLACK);
+    fb.pixels = frame.pixels;
+    fb
 }
 
 /// Returns the color at `(x, y)` in the framebuffer.
@@ -68,11 +73,10 @@ pub fn save_ppm(fb: &FrameBuffer, path: &str) -> std::io::Result<()> {
 
 /// Converts a [`FrameData`] into a [`FrameBuffer`].
 pub fn frame_data_to_buffer(frame: &FrameData) -> FrameBuffer {
-    FrameBuffer {
-        width: frame.width,
-        height: frame.height,
-        pixels: frame.pixels.clone(),
-    }
+    // Constructor, not a struct literal — same reasoning as `capture_frame`.
+    let mut fb = FrameBuffer::new(frame.width, frame.height, Color::BLACK);
+    fb.pixels = frame.pixels.clone();
+    fb
 }
 
 #[cfg(test)]

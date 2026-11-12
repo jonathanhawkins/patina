@@ -1,0 +1,268 @@
+{
+  "_doc": "Godot-parity baselines for node scripts/playtest-gate.mjs --godot. Lower is better. Re-record ONLY as a person or the coordinator: node scripts/playtest-gate.mjs --godot-only --update-godot-baselines",
+  "games": {
+    "dodge_the_creeps": {
+      "scenario_key": "7e09d6176af7888a",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "521f110",
+      "traces": {
+        "/root/Main/Player:position": {
+          "compared": 319,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 192
+        }
+      },
+      "images": {
+        "f18": {
+          "mismatch_pct": 0.259,
+          "mean_delta": 1.742,
+          "coarse_mismatch_pct": 0
+        },
+        "f168": {
+          "mismatch_pct": 0.114,
+          "mean_delta": 1.565,
+          "coarse_mismatch_pct": 0
+        },
+        "f258": {
+          "mismatch_pct": 0.127,
+          "mean_delta": 1.521,
+          "coarse_mismatch_pct": 0
+        },
+        "f318": {
+          "mismatch_pct": 1.019,
+          "mean_delta": 2.455,
+          "coarse_mismatch_pct": 0.87
+        }
+      }
+    },
+    "platformer": {
+      "scenario_key": "eab60a154d4a7143",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "50f5674",
+      "traces": {
+        "/root/Game/Level/Player:position": {
+          "compared": 301,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 153
+        }
+      },
+      "images": {
+        "f60": {
+          "mismatch_pct": 4.477,
+          "mean_delta": 7.022,
+          "coarse_mismatch_pct": 0.467
+        },
+        "f150": {
+          "mismatch_pct": 8.264,
+          "mean_delta": 12.898,
+          "coarse_mismatch_pct": 0.733
+        },
+        "f168": {
+          "mismatch_pct": 2.205,
+          "mean_delta": 3.698,
+          "coarse_mismatch_pct": 0.75
+        },
+        "f210": {
+          "mismatch_pct": 4.209,
+          "mean_delta": 6.606,
+          "coarse_mismatch_pct": 0.65
+        },
+        "f300": {
+          "mismatch_pct": 12.995,
+          "mean_delta": 22.062,
+          "coarse_mismatch_pct": 5.15
+        }
+      }
+    },
+    "platformer_3d": {
+      "scenario_key": "f2736ee492903c6f",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "50f5674",
+      "traces": {
+        "/root/Game/Player:position": {
+          "compared": 349,
+          "first_divergence": 288,
+          "max_error": 0.0477,
+          "max_error_frame": 348
+        }
+      },
+      "images": {
+        "f90": {
+          "mismatch_pct": 1.303,
+          "mean_delta": 3.945,
+          "coarse_mismatch_pct": 0.874
+        },
+        "f180": {
+          "mismatch_pct": 8.636,
+          "mean_delta": 13.148,
+          "coarse_mismatch_pct": 3.884
+        },
+        "f240": {
+          "mismatch_pct": 7.855,
+          "mean_delta": 13.603,
+          "coarse_mismatch_pct": 6.19
+        },
+        "f300": {
+          "mismatch_pct": 4.241,
+          "mean_delta": 9.836,
+          "coarse_mismatch_pct": 3.549
+        },
+        "f318": {
+          "mismatch_pct": 3.391,
+          "mean_delta": 9.177,
+          "coarse_mismatch_pct": 3.309
+        },
+        "f348": {
+          "mismatch_pct": 1.322,
+          "mean_delta": 7.221,
+          "coarse_mismatch_pct": 0.9
+        }
+      }
+    },
+    "pong": {
+      "scenario_key": "8048329905e3a83f",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "521f110",
+      "traces": {
+        "/root/Pong/Left:position": {
+          "compared": 229,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 52
+        },
+        "/root/Pong/Right:position": {
+          "compared": 229,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 0
+        },
+        "/root/Pong/Ball:position": {
+          "compared": 229,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 24
+        }
+      },
+      "images": {
+        "f48": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f108": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f168": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f228": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        }
+      }
+    },
+    "spark_keeper": {
+      "scenario_key": "f86827054863d476",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "521f110",
+      "traces": {
+        "/root/Main/Player:position": {
+          "compared": 235,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 179
+        }
+      },
+      "images": {
+        "f48": {
+          "mismatch_pct": 1.758,
+          "mean_delta": 4.203,
+          "coarse_mismatch_pct": 0.111
+        },
+        "f66": {
+          "mismatch_pct": 0.633,
+          "mean_delta": 5.08,
+          "coarse_mismatch_pct": 0.611
+        },
+        "f114": {
+          "mismatch_pct": 0.64,
+          "mean_delta": 6.437,
+          "coarse_mismatch_pct": 0.611
+        },
+        "f174": {
+          "mismatch_pct": 0.645,
+          "mean_delta": 6.364,
+          "coarse_mismatch_pct": 0.611
+        },
+        "f234": {
+          "mismatch_pct": 0.649,
+          "mean_delta": 3.233,
+          "coarse_mismatch_pct": 0.611
+        }
+      }
+    },
+    "truck_town": {
+      "scenario_key": "1dee248d8f842e0b",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "521f110",
+      "traces": {
+        "/root/TownScene/InstancePos/car/Body:position": {
+          "compared": 583,
+          "first_divergence": 400,
+          "max_error": 0.3448,
+          "max_error_frame": 575
+        }
+      },
+      "images": {
+        "f90": {
+          "mismatch_pct": 1.452,
+          "mean_delta": 4.042,
+          "coarse_mismatch_pct": 0.249
+        },
+        "f108": {
+          "mismatch_pct": 1.453,
+          "mean_delta": 5.964,
+          "coarse_mismatch_pct": 0.274
+        },
+        "f258": {
+          "mismatch_pct": 16.072,
+          "mean_delta": 24.256,
+          "coarse_mismatch_pct": 15.595
+        },
+        "f408": {
+          "mismatch_pct": 32.862,
+          "mean_delta": 38.541,
+          "coarse_mismatch_pct": 29.235
+        },
+        "f480": {
+          "mismatch_pct": 20.047,
+          "mean_delta": 27.998,
+          "coarse_mismatch_pct": 15.098
+        },
+        "f552": {
+          "mismatch_pct": 31.748,
+          "mean_delta": 37.107,
+          "coarse_mismatch_pct": 27.066
+        },
+        "f582": {
+          "mismatch_pct": 27.505,
+          "mean_delta": 33.626,
+          "coarse_mismatch_pct": 21.922
+        }
+      }
+    }
+  }
+}

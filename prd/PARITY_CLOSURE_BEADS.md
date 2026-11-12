@@ -1,5 +1,10 @@
 # Parity Closure Beads
 
+> **Historical (pre-repin).** This plan targeted Godot 4.5.1. The upstream pin
+> is now **Godot 4.6.1** (`upstream/godot/version.py`), and current parity is
+> tracked in `COMPAT_MATRIX.md`. The 4.5.1 references below are superseded and
+> kept as the record of that closure pass.
+
 These beads come directly from `prd/GODOT_4_5_1_FEATURE_AUDIT.md`.
 
 Purpose:

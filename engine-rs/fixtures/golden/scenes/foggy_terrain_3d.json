@@ -1,0 +1,83 @@
+{
+  "fixture_id": "scene_foggy_terrain_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "FoggyTerrain3D",
+        "class": "Node3D",
+        "path": "/root/FoggyTerrain3D",
+        "children": ["Camera", "Environment", "Fog", "Sun", "Lantern", "Terrain", "Ground", "FallingRock"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/FoggyTerrain3D/Camera",
+        "children": []
+      },
+      {
+        "name": "Environment",
+        "class": "WorldEnvironment",
+        "path": "/root/FoggyTerrain3D/Environment",
+        "children": []
+      },
+      {
+        "name": "Fog",
+        "class": "FogVolume",
+        "path": "/root/FoggyTerrain3D/Fog",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/FoggyTerrain3D/Sun",
+        "children": []
+      },
+      {
+        "name": "Lantern",
+        "class": "OmniLight3D",
+        "path": "/root/FoggyTerrain3D/Lantern",
+        "children": []
+      },
+      {
+        "name": "Terrain",
+        "class": "MeshInstance3D",
+        "path": "/root/FoggyTerrain3D/Terrain",
+        "children": []
+      },
+      {
+        "name": "Ground",
+        "class": "StaticBody3D",
+        "path": "/root/FoggyTerrain3D/Ground",
+        "children": ["GroundShape"]
+      },
+      {
+        "name": "GroundShape",
+        "class": "CollisionShape3D",
+        "path": "/root/FoggyTerrain3D/Ground/GroundShape",
+        "children": []
+      },
+      {
+        "name": "FallingRock",
+        "class": "RigidBody3D",
+        "path": "/root/FoggyTerrain3D/FallingRock",
+        "children": ["RockShape", "RockMesh"]
+      },
+      {
+        "name": "RockShape",
+        "class": "CollisionShape3D",
+        "path": "/root/FoggyTerrain3D/FallingRock/RockShape",
+        "children": []
+      },
+      {
+        "name": "RockMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/FoggyTerrain3D/FallingRock/RockMesh",
+        "children": []
+      }
+    ]
+  }
+}

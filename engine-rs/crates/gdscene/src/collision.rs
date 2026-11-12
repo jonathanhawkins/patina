@@ -129,11 +129,11 @@ pub fn process_collisions_with_bounds(tree: &mut SceneTree, screen_w: f32, scree
                 names.iter().map(|n| Variant::String(n.clone())).collect();
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_property("_is_colliding", Variant::Bool(true));
-                node.set_property("_colliding_with", Variant::Array(name_variants));
+                node.set_property("_colliding_with", Variant::Array(name_variants.into()));
             }
         } else if let Some(node) = tree.get_node_mut(id) {
             node.set_property("_is_colliding", Variant::Bool(false));
-            node.set_property("_colliding_with", Variant::Array(Vec::new()));
+            node.set_property("_colliding_with", Variant::Array(Default::default()));
         }
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let colliding_with = tree.get_node(a_id).unwrap().get_property("_colliding_with");
         if let Variant::Array(arr) = colliding_with {
             assert_eq!(arr.len(), 1);
-            assert_eq!(arr[0], Variant::String("NodeB".to_string()));
+            assert_eq!(arr.to_vec()[0], Variant::String("NodeB".to_string()));
         } else {
             panic!("expected Array, got {colliding_with:?}");
         }
@@ -372,9 +372,11 @@ mod tests {
             .unwrap()
             .get_property("_colliding_with");
         if let Variant::Array(arr) = &bullet_colliders {
-            assert!(arr.contains(&Variant::String("Enemy".to_string())));
+            assert!(arr.to_vec().contains(&Variant::String("Enemy".to_string())));
             // Bullet should NOT collide with Player (mask="enemy" doesn't match group="player")
-            assert!(!arr.contains(&Variant::String("Player".to_string())));
+            assert!(!arr
+                .to_vec()
+                .contains(&Variant::String("Player".to_string())));
         } else {
             panic!("expected Array");
         }
@@ -837,7 +839,9 @@ mod tests {
             .unwrap()
             .get_property("_colliding_with");
         if let Variant::Array(arr) = &bullet_with {
-            assert!(arr.contains(&Variant::String("Enemy1".to_string())));
+            assert!(arr
+                .to_vec()
+                .contains(&Variant::String("Enemy1".to_string())));
         } else {
             panic!("expected Array");
         }

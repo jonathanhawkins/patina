@@ -7,9 +7,7 @@
 						{
 							"children": [],
 							"class": "CollisionShape2D",
-							"groups": [
-								"_root_canvas77309411328"
-							],
+							"groups": [],
 							"name": "CollisionShape",
 							"owner": "/root/World",
 							"path": "/root/World/Ball/CollisionShape"
@@ -28,9 +26,7 @@
 						{
 							"children": [],
 							"class": "CollisionShape2D",
-							"groups": [
-								"_root_canvas77309411328"
-							],
+							"groups": [],
 							"name": "CollisionShape",
 							"owner": "/root/World",
 							"path": "/root/World/Wall/CollisionShape"
@@ -49,9 +45,7 @@
 						{
 							"children": [],
 							"class": "CollisionShape2D",
-							"groups": [
-								"_root_canvas77309411328"
-							],
+							"groups": [],
 							"name": "CollisionShape",
 							"owner": "/root/World",
 							"path": "/root/World/Floor/CollisionShape"

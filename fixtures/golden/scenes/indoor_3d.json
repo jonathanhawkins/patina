@@ -1,0 +1,119 @@
+{
+  "fixture_id": "scene_indoor_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "Indoor 3D scene \u2014 multi-light, multi-mesh, collision hierarchy",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "Room",
+        "class": "Node3D",
+        "path": "/root/Room",
+        "children": [
+          "Camera",
+          "Table",
+          "Chair",
+          "Lamp",
+          "CeilingLight",
+          "Floor",
+          "Wall_Back"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Room/Camera",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 4)",
+          "fov": 70.0,
+          "near": 0.05,
+          "far": 100.0
+        }
+      },
+      {
+        "name": "Table",
+        "class": "MeshInstance3D",
+        "path": "/root/Room/Table",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)",
+          "cast_shadow": true
+        }
+      },
+      {
+        "name": "Chair",
+        "class": "MeshInstance3D",
+        "path": "/root/Room/Chair",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 0.4, 0.5)",
+          "cast_shadow": true
+        }
+      },
+      {
+        "name": "Lamp",
+        "class": "OmniLight3D",
+        "path": "/root/Room/Lamp",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)",
+          "light_energy": 1.5,
+          "light_color": "Color(1, 0.95, 0.8, 1)"
+        }
+      },
+      {
+        "name": "CeilingLight",
+        "class": "OmniLight3D",
+        "path": "/root/Room/CeilingLight",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2.8, -1)",
+          "light_energy": 0.8,
+          "light_color": "Color(0.9, 0.9, 1, 1)"
+        }
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Room/Floor",
+        "children": [
+          "FloorShape"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Room/Floor/FloorShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "Wall_Back",
+        "class": "StaticBody3D",
+        "path": "/root/Room/Wall_Back",
+        "children": [
+          "WallShape"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -3)"
+        }
+      },
+      {
+        "name": "WallShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Room/Wall_Back/WallShape",
+        "children": [],
+        "properties": {}
+      }
+    ]
+  }
+}

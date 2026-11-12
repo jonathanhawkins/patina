@@ -1,0 +1,17 @@
+{
+  "id": "open_3d_select_set",
+  "description": "pat-ghfv0.35: open project scene, switch to 3D mode, select a MeshInstance3D, set a property",
+  "scene": "minimal_3d.tscn",
+  "steps": [
+    { "action": "open_project", "path": "fixtures" },
+    { "action": "load_scene", "path": "scenes/minimal_3d.tscn" },
+    { "action": "set_mode", "mode": "3d" },
+    { "action": "select_by_class", "class": "MeshInstance3D" },
+    { "action": "set_property", "property": "visible", "value": false }
+  ],
+  "expect": {
+    "mode": "3d",
+    "selection_class": "MeshInstance3D",
+    "inspector_property": { "name": "visible", "value": false }
+  }
+}

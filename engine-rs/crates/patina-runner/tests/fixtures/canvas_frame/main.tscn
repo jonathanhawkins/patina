@@ -1,0 +1,23 @@
+[gd_scene load_steps=2 format=3 uid="uid://canvasframe46"]
+
+[ext_resource type="Texture2D" path="res://sprite.png" id="1_tex"]
+
+[node name="Main" type="Node2D"]
+
+; ColorRect colour is deliberately exact in 8 bits: 51/255 = 0.2, 153/255 = 0.6,
+; 204/255 = 0.8. A value the format cannot represent would make the "within
+; 1/255" assertion depend on rounding rather than on the render.
+[node name="Rect" type="ColorRect" parent="."]
+position = Vector2(8, 8)
+size = Vector2(16, 16)
+color = Color(0.2, 0.6, 0.8, 1)
+
+; Sprite2D is centred on its position by default (Godot's `centered = true`), so
+; an 8x8 texture at (48, 16) covers x 44..52, y 12..20.
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(48, 16)
+texture = ExtResource("1_tex")
+
+[node name="Label" type="Label" parent="."]
+position = Vector2(4, 40)
+text = "hi"

@@ -1,0 +1,104 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/indoor_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Table",
+				"node_class": "MeshInstance3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/Table",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Chair",
+				"node_class": "MeshInstance3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/Chair",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Lamp",
+				"node_class": "MeshInstance3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/Lamp",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "CeilingLight",
+				"node_class": "OmniLight3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/CeilingLight",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Indoor3D",
+						"path": "/root/Indoor3D/Floor/FloorShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/Floor",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "WallLeftShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Indoor3D",
+						"path": "/root/Indoor3D/WallLeft/WallLeftShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "WallLeft",
+				"node_class": "StaticBody3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/WallLeft",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "WallRightShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Indoor3D",
+						"path": "/root/Indoor3D/WallRight/WallRightShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "WallRight",
+				"node_class": "StaticBody3D",
+				"owner": "Indoor3D",
+				"path": "/root/Indoor3D/WallRight",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Indoor3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Indoor3D",
+		"scene_file_path": "res://scenes/indoor_3d.tscn"
+	}
+}

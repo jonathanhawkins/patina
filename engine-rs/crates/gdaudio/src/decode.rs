@@ -3,6 +3,7 @@
 //! Decodes audio files into a unified [`AudioBuffer`] of interleaved f32 samples.
 
 use std::io::{Cursor, Read, Seek};
+use std::sync::{Arc, Mutex};
 
 /// A decoded audio buffer holding interleaved f32 samples.
 #[derive(Debug, Clone)]
@@ -115,7 +116,13 @@ pub fn decode_ogg_reader<R: Read + Seek>(reader: R) -> Result<AudioBuffer, Decod
 
 /// Detects format from a byte header and decodes accordingly.
 ///
-/// Recognizes WAV (RIFF header) and OGG (OggS header).
+/// Recognizes WAV (RIFF header), OGG (OggS header) and MP3 (pat-s3rrv.47).
+///
+/// MP3 is checked LAST because it has no container magic — only an `ID3` tag or
+/// an 11-bit frame sync, loose enough to match arbitrary bytes. Ordering it
+/// after the two exact magics means it can never capture a WAV or an OGG. Until
+/// this branch existed `decode_mp3` had no caller on any runtime path, so an
+/// `.mp3` in a scene decoded to nothing however valid the file was.
 pub fn decode_auto(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
     if data.len() < 4 {
         return Err(DecodeError::UnsupportedFormat("data too short".into()));
@@ -124,6 +131,8 @@ pub fn decode_auto(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
         decode_wav(data)
     } else if &data[..4] == b"OggS" {
         decode_ogg(data)
+    } else if is_mp3(data) || data.starts_with(b"PATMP3") {
+        decode_mp3(data)
     } else {
         Err(DecodeError::UnsupportedFormat(format!(
             "unrecognized header: {:02x} {:02x} {:02x} {:02x}",
@@ -256,5 +265,638 @@ mod tests {
     fn decode_auto_too_short() {
         let err = decode_auto(&[0, 1]).unwrap_err();
         assert!(matches!(err, DecodeError::UnsupportedFormat(_)));
+    }
+}
+
+/// Detect MP3 frame sync / ID3.
+pub fn is_mp3(data: &[u8]) -> bool {
+    if data.len() >= 3 && &data[0..3] == b"ID3" {
+        return true;
+    }
+    // Frame sync 0xFFEx
+    data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0
+}
+
+/// A host-supplied MP3 decoder, consulted by [`decode_mp3`] before the
+/// built-in codec (pat-mgixk.4).
+///
+/// This exists for the **browser**, where there is no MP3 codec at all:
+/// `minimp3` wraps C sources through `cc` and is target-gated off wasm32, so
+/// before this hook every `AudioStreamMP3` in a web game decoded to
+/// `UnsupportedFormat` and played silence. A browser, meanwhile, has a decoder
+/// built in — `AudioContext.decodeAudioData` — which Godot's own web export
+/// relies on for the same reason.
+///
+/// # Why a decoder and not an async call
+///
+/// `decodeAudioData` is asynchronous, and the engine loads a stream
+/// *synchronously* from inside `AudioServerBridge::process`. A hook cannot
+/// bridge that on its own, so the shape is a **lookup**: the page decodes its
+/// MP3 assets up front and registers the PCM, and this hook answers out of what
+/// has been registered. [`crate`]'s consumer for that is
+/// `patina_web::mp3_bridge::BrowserMp3Decoder`.
+///
+/// Returning `None` means "not mine" and lets the built-in codec have the
+/// bytes, so installing a decoder never takes MP3 support *away* from a native
+/// build. A decode the host attempted and failed simply never registers, which
+/// reads as `None` too.
+pub trait Mp3Decoder: Send + Sync {
+    /// Decodes `data`, or returns `None` if this decoder has nothing for it.
+    fn decode(&self, data: &[u8]) -> Option<AudioBuffer>;
+}
+
+/// The installed decoder, if a host has supplied one.
+///
+/// Process-global for the same reason `gdcore::display_backend` is: the load
+/// path that needs it (`AudioStreamLoader` inside the bridge's `process`) is
+/// reached through several layers of engine that have no business carrying a
+/// decoder parameter down to it.
+static MP3_DECODER: Mutex<Option<Arc<dyn Mp3Decoder>>> = Mutex::new(None);
+
+/// Installs `decoder` as the host MP3 decoder, returning whatever it replaced.
+///
+/// The previous value is handed back rather than dropped so a caller that is
+/// only borrowing the slot — a test, or a page swapping backends — can put it
+/// back.
+pub fn install_mp3_decoder(decoder: Arc<dyn Mp3Decoder>) -> Option<Arc<dyn Mp3Decoder>> {
+    let mut slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.replace(decoder)
+}
+
+/// Removes the host MP3 decoder, returning it.
+pub fn clear_mp3_decoder() -> Option<Arc<dyn Mp3Decoder>> {
+    let mut slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.take()
+}
+
+/// The installed host MP3 decoder, if any.
+///
+/// Hands back a clone of the `Arc` rather than holding the lock across the
+/// decode: a decoder is free to do slow work, and blocking every other thread's
+/// audio load while it does would be a worse bug than the one this fixes.
+pub fn installed_mp3_decoder() -> Option<Arc<dyn Mp3Decoder>> {
+    let slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.clone()
+}
+
+/// MP3 decode (pat-p0s82.13). Real ISO MP3 streams are decoded frame-by-frame
+/// with `minimp3` (the same decoder Godot ships) into interleaved f32 PCM.
+/// A Patina test fixture starting with `PATMP3` carries raw f32 samples
+/// directly, used by lightweight unit tests that must not depend on a real
+/// encoder.
+pub fn decode_mp3(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
+    if data.starts_with(b"PATMP3") {
+        // Fixture: PATMP3 + u32 sample_rate + u16 channels + f32 samples...
+        if data.len() < 6 + 4 + 2 {
+            return Err(DecodeError::UnsupportedFormat("PATMP3 truncated".into()));
+        }
+        let sr = u32::from_le_bytes(data[6..10].try_into().unwrap());
+        let ch = u16::from_le_bytes(data[10..12].try_into().unwrap());
+        let mut samples = Vec::new();
+        let mut i = 12;
+        while i + 4 <= data.len() {
+            samples.push(f32::from_le_bytes(data[i..i + 4].try_into().unwrap()));
+            i += 4;
+        }
+        return Ok(AudioBuffer {
+            samples,
+            sample_rate: sr,
+            channels: ch,
+        });
+    }
+    if !is_mp3(data) {
+        return Err(DecodeError::UnsupportedFormat("not mp3".into()));
+    }
+    // A host decoder gets the bytes first. On wasm32 this is the ONLY branch
+    // that can succeed — `decode_mp3_frames` below is the stub that reports
+    // `UnsupportedFormat` — so it is what makes an `AudioStreamMP3` in a web
+    // game audible at all (pat-mgixk.4).
+    //
+    // Checked BEFORE the built-in codec on every target on purpose, not just
+    // under `cfg(wasm32)`: it means a native test exercises the same line the
+    // browser depends on. `None` falls through, so a native build that installs
+    // a decoder and misses keeps full `minimp3` behaviour.
+    if let Some(decoder) = installed_mp3_decoder() {
+        if let Some(buffer) = decoder.decode(data) {
+            return Ok(buffer);
+        }
+    }
+    decode_mp3_frames(data)
+}
+
+/// ISO MP3 frame decoding — the half of [`decode_mp3`] that needs a real codec.
+///
+/// Split out so the target gate lives in one place: `minimp3` builds C sources
+/// through `cc`, which the wasm32 build does not carry (pat-u3l8c.112). The
+/// caller has already handled the `PATMP3` fixture and the not-an-MP3 case, so
+/// this only ever sees bytes that claim to be a real stream.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_mp3_frames(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
+    // Real ISO MP3: decode every frame with minimp3, concatenating the
+    // interleaved PCM (i16 -> f32 in [-1, 1]). Leading ID3 tags and stray
+    // non-frame bytes surface as `SkippedData` and are ignored; decoding stops
+    // at end-of-stream (`Eof`) or when the trailing bytes can't form a frame
+    // (`InsufficientData`).
+    let mut decoder = minimp3::Decoder::new(data);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut sample_rate: u32 = 0;
+    let mut channels: u16 = 0;
+    loop {
+        match decoder.next_frame() {
+            Ok(frame) => {
+                sample_rate = frame.sample_rate as u32;
+                channels = frame.channels as u16;
+                samples.extend(frame.data.iter().map(|&s| s as f32 / 32768.0));
+            }
+            Err(minimp3::Error::Eof) | Err(minimp3::Error::InsufficientData) => break,
+            Err(minimp3::Error::SkippedData) => continue,
+            Err(minimp3::Error::Io(e)) => {
+                return Err(DecodeError::UnsupportedFormat(format!("mp3 io error: {e}")));
+            }
+        }
+    }
+    if samples.is_empty() || sample_rate == 0 {
+        return Err(DecodeError::UnsupportedFormat(
+            "mp3 contained no decodable frames".into(),
+        ));
+    }
+    Ok(AudioBuffer {
+        samples,
+        sample_rate,
+        channels: channels.max(1),
+    })
+}
+
+/// wasm32 has no MP3 codec linked in — see the module gate above.
+///
+/// Reached only after [`decode_mp3`] has already offered the bytes to a
+/// host-installed [`Mp3Decoder`], so on the web this is the "the page never
+/// preloaded this asset" answer rather than "the browser cannot decode MP3"
+/// (pat-mgixk.4). `patina_web::mp3_bridge::BrowserMp3Decoder` is what fills
+/// that hook from `AudioContext.decodeAudioData`.
+///
+/// Reported as an ordinary [`DecodeError`] rather than a panic so a project
+/// carrying an `.mp3` still boots in the browser with that one stream silent,
+/// the same way an unsupported format behaves on native.
+#[cfg(target_arch = "wasm32")]
+fn decode_mp3_frames(_data: &[u8]) -> Result<AudioBuffer, DecodeError> {
+    Err(DecodeError::UnsupportedFormat(
+        "ISO MP3 decoding is not available in the web build".into(),
+    ))
+}
+
+/// Procedural audio stream generator (AudioStreamGenerator slice).
+#[derive(Debug, Clone)]
+pub struct AudioStreamGenerator {
+    pub sample_rate: u32,
+    pub buffer: Vec<f32>,
+    pub max_frames: usize,
+}
+
+impl AudioStreamGenerator {
+    pub fn new(sample_rate: u32, max_frames: usize) -> Self {
+        Self {
+            sample_rate,
+            buffer: Vec::new(),
+            max_frames,
+        }
+    }
+    pub fn push_frame(&mut self, left: f32, right: f32) -> bool {
+        if self.buffer.len() / 2 >= self.max_frames {
+            return false;
+        }
+        self.buffer.push(left);
+        self.buffer.push(right);
+        true
+    }
+    pub fn mix_to_buffer(&self) -> AudioBuffer {
+        AudioBuffer {
+            samples: self.buffer.clone(),
+            sample_rate: self.sample_rate,
+            channels: 2,
+        }
+    }
+
+    /// Frames still buffered, waiting to be mixed out (pat-nzgdu.153).
+    pub fn frames_queued(&self) -> usize {
+        self.buffer.len() / 2
+    }
+
+    /// Room left before the buffer is full — Godot's
+    /// `AudioStreamGeneratorPlayback.get_frames_available()` (pat-nzgdu.153).
+    pub fn frames_available(&self) -> usize {
+        self.max_frames.saturating_sub(self.frames_queued())
+    }
+
+    /// Whether `frames` more frames would fit — Godot's `can_push_buffer()`.
+    pub fn can_push_buffer(&self, frames: usize) -> bool {
+        self.frames_available() >= frames
+    }
+
+    /// Pushes a whole block of stereo frames — Godot's
+    /// `AudioStreamGeneratorPlayback.push_buffer()` (pat-nzgdu.153).
+    ///
+    /// **All or nothing:** if the block doesn't fit, nothing is pushed and this
+    /// returns `false`, matching Godot — a partial push would tear the signal.
+    pub fn push_buffer(&mut self, frames: &[(f32, f32)]) -> bool {
+        if !self.can_push_buffer(frames.len()) {
+            return false;
+        }
+        for &(left, right) in frames {
+            self.buffer.push(left);
+            self.buffer.push(right);
+        }
+        true
+    }
+
+    /// Drops every queued frame — Godot's `clear_buffer()`.
+    pub fn clear_buffer(&mut self) {
+        self.buffer.clear();
+    }
+
+    /// **Consumes** up to `frames` frames and returns them (pat-nzgdu.153).
+    ///
+    /// This is what an audio sink pulls each block, and it is the counterpart to
+    /// [`push_buffer`](Self::push_buffer): what goes in comes back out, once.
+    /// Unlike [`mix_to_buffer`](Self::mix_to_buffer) — which peeks at the whole
+    /// queue and leaves it in place — mixed frames are removed, so the generator
+    /// refills rather than replaying stale audio.
+    ///
+    /// Yields fewer frames than asked (possibly none) when the queue runs dry;
+    /// an underrun is silence, not an error.
+    pub fn mix(&mut self, frames: usize) -> AudioBuffer {
+        let take = frames.min(self.frames_queued());
+        let samples: Vec<f32> = self.buffer.drain(..take * 2).collect();
+        AudioBuffer {
+            samples,
+            sample_rate: self.sample_rate,
+            channels: 2,
+        }
+    }
+}
+
+/// One sounding sub-playback inside a [`PolyphonicPlayer`] (pat-nzgdu.153).
+#[derive(Debug, Clone)]
+struct Voice {
+    /// The stereo frames this voice plays.
+    buffer: AudioBuffer,
+    /// Next frame to read.
+    cursor: usize,
+}
+
+impl Voice {
+    fn frames(&self) -> usize {
+        self.buffer.samples.len() / 2
+    }
+    fn finished(&self) -> bool {
+        self.cursor >= self.frames()
+    }
+}
+
+/// Simple polyphonic voice pool.
+///
+/// Godot's `AudioStreamPlaybackPolyphonic` runs several streams at once on one
+/// player and sums them. [`try_play`](Self::try_play) reserves a voice slot;
+/// [`play_buffer`](Self::play_buffer) reserves one **and** gives it audio, which
+/// [`mix`](Self::mix) then sums (pat-nzgdu.153).
+#[derive(Debug, Default)]
+pub struct PolyphonicPlayer {
+    pub max_voices: usize,
+    pub active: usize,
+    /// Output rate of [`mix`](Self::mix). Voices are assumed to already be at
+    /// this rate (they share a bus); resampling belongs to the Resampled base.
+    pub sample_rate: u32,
+    voices: Vec<Voice>,
+}
+
+impl PolyphonicPlayer {
+    pub fn new(max_voices: usize) -> Self {
+        Self {
+            max_voices,
+            active: 0,
+            sample_rate: 44_100,
+            voices: Vec::new(),
+        }
+    }
+    pub fn try_play(&mut self) -> bool {
+        if self.active >= self.max_voices {
+            return false;
+        }
+        self.active += 1;
+        true
+    }
+    pub fn stop_one(&mut self) {
+        self.active = self.active.saturating_sub(1);
+    }
+
+    /// Starts a sub-playback from `buffer` (pat-nzgdu.153).
+    ///
+    /// Takes a voice slot via [`try_play`](Self::try_play), so the pool's limit
+    /// is enforced identically however a voice was started. Returns `false` when
+    /// the pool is full — Godot drops the request rather than stealing a voice.
+    pub fn play_buffer(&mut self, buffer: AudioBuffer) -> bool {
+        if !self.try_play() {
+            return false;
+        }
+        self.voices.push(Voice { buffer, cursor: 0 });
+        true
+    }
+
+    /// Number of sub-playbacks still sounding.
+    pub fn voice_count(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Sums `frames` frames from every sounding sub-playback (pat-nzgdu.153).
+    ///
+    /// Voices that run out contribute silence for the rest of the block and are
+    /// then retired, freeing their slot — so a finished one-shot doesn't hold
+    /// the pool at its limit forever. Output is **not** clamped: mixing is
+    /// additive and headroom is the bus's job, matching Godot's mix stage.
+    pub fn mix(&mut self, frames: usize) -> AudioBuffer {
+        let mut samples = vec![0.0f32; frames * 2];
+        for voice in &mut self.voices {
+            let available = voice.frames().saturating_sub(voice.cursor);
+            let take = frames.min(available);
+            for i in 0..take {
+                let src = (voice.cursor + i) * 2;
+                samples[i * 2] += voice.buffer.samples[src];
+                samples[i * 2 + 1] += voice.buffer.samples[src + 1];
+            }
+            voice.cursor += take;
+        }
+        // Retire exhausted voices and free their slots.
+        let before = self.voices.len();
+        self.voices.retain(|v| !v.finished());
+        let retired = before - self.voices.len();
+        self.active = self.active.saturating_sub(retired);
+
+        AudioBuffer {
+            samples,
+            sample_rate: self.sample_rate,
+            channels: 2,
+        }
+    }
+}
+
+#[cfg(test)]
+mod mp3_gen_tests {
+    use super::*;
+
+    #[test]
+    fn patmp3_fixture_decodes() {
+        let mut data = b"PATMP3".to_vec();
+        data.extend_from_slice(&44100u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0.5f32.to_le_bytes());
+        data.extend_from_slice(&(-0.5f32).to_le_bytes());
+        let buf = decode_mp3(&data).unwrap();
+        assert_eq!(buf.sample_rate, 44100);
+        assert_eq!(buf.samples.len(), 2);
+    }
+
+    // -- pat-mgixk.4: the host MP3 decoder hook ------------------------------
+
+    /// Serializes every test that touches the process-global decoder slot, and
+    /// clears the slot on the way out.
+    ///
+    /// Bound ONCE per test rather than reset at the top of each: a per-test
+    /// `clear_mp3_decoder()` would be a re-arm, and under a thread-per-test
+    /// runner two tests would still interleave between the clear and the
+    /// install. Poison-tolerant, so one failing test does not cascade into
+    /// "Mutex poisoned" for the rest of the binary.
+    static DECODER_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    struct DecoderSlot(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl DecoderSlot {
+        fn acquire() -> Self {
+            Self(DECODER_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    impl Drop for DecoderSlot {
+        fn drop(&mut self) {
+            clear_mp3_decoder();
+        }
+    }
+
+    /// Bytes that pass [`is_mp3`] (the `ID3` tag prefix) but contain no
+    /// decodable frame, so NO built-in codec can turn them into audio on any
+    /// target. Audio coming out of these can only have come from the hook.
+    fn undecodable_mp3() -> Vec<u8> {
+        let mut data = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+        data.extend_from_slice(&[0u8; 10]);
+        data
+    }
+
+    fn tone_buffer(rate: u32, channels: u16, frames: usize) -> AudioBuffer {
+        AudioBuffer {
+            samples: (0..frames * channels as usize)
+                .map(|i| ((i as f32) * 0.1).sin() * 0.5)
+                .collect(),
+            sample_rate: rate,
+            channels,
+        }
+    }
+
+    struct Fixed(AudioBuffer);
+    impl Mp3Decoder for Fixed {
+        fn decode(&self, _data: &[u8]) -> Option<AudioBuffer> {
+            Some(self.0.clone())
+        }
+    }
+
+    struct Never;
+    impl Mp3Decoder for Never {
+        fn decode(&self, _data: &[u8]) -> Option<AudioBuffer> {
+            None
+        }
+    }
+
+    /// The whole point of the hook: bytes the linked codec cannot decode —
+    /// which on wasm32 is EVERY ISO MP3 — become real PCM.
+    #[test]
+    fn an_installed_decoder_decodes_what_the_built_in_codec_cannot() {
+        let _slot = DecoderSlot::acquire();
+        let data = undecodable_mp3();
+        assert!(
+            decode_mp3(&data).is_err(),
+            "the control is wrong: these bytes must be undecodable without a host \
+             decoder, or this test proves nothing"
+        );
+
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(32_000, 2, 64))));
+        let buffer = decode_mp3(&data).expect("the host decoder must answer");
+        assert_eq!(buffer.sample_rate, 32_000);
+        assert_eq!(buffer.channels, 2);
+        assert_eq!(buffer.frame_count(), 64);
+    }
+
+    /// `None` means "not mine", so installing a decoder must never take MP3
+    /// support away from a build that has a real codec linked.
+    #[test]
+    fn a_decoder_returning_none_falls_through_to_the_built_in_codec() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Never));
+        // Undecodable either way — what matters is that the error comes from
+        // the codec branch rather than the hook swallowing the bytes.
+        assert!(decode_mp3(&undecodable_mp3()).is_err());
+    }
+
+    /// The `PATMP3` unit fixture is handled before the hook, so the many
+    /// existing tests built on it cannot be captured by an installed decoder.
+    #[test]
+    fn the_patmp3_fixture_outranks_an_installed_decoder() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 4))));
+        let mut data = b"PATMP3".to_vec();
+        data.extend_from_slice(&22_050u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0.25f32.to_le_bytes());
+        let buffer = decode_mp3(&data).expect("the fixture still decodes");
+        assert_eq!(buffer.sample_rate, 22_050, "the hook captured the fixture");
+        assert_eq!(buffer.samples, vec![0.25]);
+    }
+
+    /// Installing hands back what it replaced, so a borrower can put it back.
+    #[test]
+    fn installing_returns_the_previous_decoder() {
+        let _slot = DecoderSlot::acquire();
+        assert!(installed_mp3_decoder().is_none(), "the slot starts empty");
+        assert!(install_mp3_decoder(std::sync::Arc::new(Never)).is_none());
+        assert!(installed_mp3_decoder().is_some());
+        let replaced = install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 2))));
+        assert!(replaced.is_some(), "the first decoder must come back out");
+        assert!(clear_mp3_decoder().is_some());
+        assert!(installed_mp3_decoder().is_none());
+    }
+
+    /// A non-MP3 byte string is rejected before the hook ever sees it: the hook
+    /// must not become a way to smuggle arbitrary formats past detection.
+    #[test]
+    fn a_non_mp3_is_rejected_before_the_hook() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 4))));
+        assert!(
+            decode_mp3(b"NOTANMP3....").is_err(),
+            "detection must run first, or `decode_auto`'s ordering means nothing"
+        );
+    }
+
+    // -- pat-nzgdu.153: generator push_buffer/mix + polyphonic mixing --------
+
+    fn buf(frames: &[(f32, f32)]) -> AudioBuffer {
+        let mut samples = Vec::new();
+        for &(l, r) in frames {
+            samples.push(l);
+            samples.push(r);
+        }
+        AudioBuffer {
+            samples,
+            sample_rate: 44_100,
+            channels: 2,
+        }
+    }
+
+    #[test]
+    fn generator_push_buffer_then_mix_returns_the_pushed_frames() {
+        let mut g = AudioStreamGenerator::new(48_000, 4);
+        assert_eq!(g.frames_available(), 4);
+
+        assert!(g.push_buffer(&[(0.1, 0.2), (0.3, 0.4)]));
+        assert_eq!(g.frames_queued(), 2);
+        assert_eq!(g.frames_available(), 2);
+
+        // What went in comes back out, in order.
+        let out = g.mix(2);
+        assert_eq!(out.samples, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(out.sample_rate, 48_000);
+        assert_eq!(out.channels, 2);
+
+        // mix CONSUMES — the queue is empty and refillable, not replayed.
+        assert_eq!(g.frames_queued(), 0);
+        assert_eq!(g.frames_available(), 4);
+        assert!(g.mix(2).samples.is_empty(), "an empty queue mixes silence");
+    }
+
+    #[test]
+    fn generator_push_buffer_is_all_or_nothing() {
+        let mut g = AudioStreamGenerator::new(48_000, 2);
+        // Three frames into a two-frame buffer: Godot rejects rather than
+        // partially filling (a torn push would tear the signal).
+        assert!(!g.can_push_buffer(3));
+        assert!(!g.push_buffer(&[(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]));
+        assert_eq!(g.frames_queued(), 0, "nothing was pushed");
+
+        assert!(g.push_buffer(&[(1.0, 1.0), (2.0, 2.0)]));
+        assert_eq!(g.frames_available(), 0);
+        g.clear_buffer();
+        assert_eq!(g.frames_queued(), 0);
+    }
+
+    #[test]
+    fn generator_mix_yields_what_is_queued_when_asked_for_more() {
+        let mut g = AudioStreamGenerator::new(48_000, 8);
+        assert!(g.push_buffer(&[(0.5, -0.5)]));
+        // Under-run: one frame available, two requested.
+        let out = g.mix(2);
+        assert_eq!(out.samples, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn polyphonic_mixes_concurrent_sub_playbacks() {
+        let mut p = PolyphonicPlayer::new(3);
+        assert!(p.play_buffer(buf(&[(0.1, 0.2), (0.3, 0.4)])));
+        assert!(p.play_buffer(buf(&[(0.01, 0.02), (0.03, 0.04)])));
+        assert_eq!(p.voice_count(), 2);
+        assert_eq!(p.active, 2);
+
+        // Both voices sum, frame for frame.
+        let out = p.mix(2);
+        assert_eq!(out.channels, 2);
+        assert!((out.samples[0] - 0.11).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[1] - 0.22).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[2] - 0.33).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[3] - 0.44).abs() < 1e-6, "{:?}", out.samples);
+    }
+
+    #[test]
+    fn polyphonic_retires_finished_voices_and_frees_slots() {
+        let mut p = PolyphonicPlayer::new(1);
+        assert!(p.play_buffer(buf(&[(1.0, 1.0)])));
+        // Pool is full: a second voice is dropped, not stolen.
+        assert!(!p.play_buffer(buf(&[(9.0, 9.0)])));
+
+        // Mixing past the end drains the voice and frees its slot.
+        let out = p.mix(2);
+        assert_eq!(out.samples, vec![1.0, 1.0, 0.0, 0.0], "tail is silence");
+        assert_eq!(p.voice_count(), 0);
+        assert_eq!(p.active, 0, "a finished one-shot must not hold the pool");
+
+        // The freed slot is reusable.
+        assert!(p.play_buffer(buf(&[(0.5, 0.5)])));
+        assert_eq!(p.voice_count(), 1);
+    }
+
+    #[test]
+    fn polyphonic_with_no_voices_mixes_silence() {
+        let mut p = PolyphonicPlayer::new(2);
+        let out = p.mix(3);
+        assert_eq!(out.samples, vec![0.0; 6]);
+        assert_eq!(out.sample_rate, 44_100);
+    }
+
+    #[test]
+    fn generator_and_poly() {
+        let mut g = AudioStreamGenerator::new(48000, 8);
+        assert!(g.push_frame(0.1, 0.2));
+        let b = g.mix_to_buffer();
+        assert_eq!(b.channels, 2);
+        let mut p = PolyphonicPlayer::new(2);
+        assert!(p.try_play());
+        assert!(p.try_play());
+        assert!(!p.try_play());
     }
 }

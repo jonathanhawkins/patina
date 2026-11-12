@@ -5,10 +5,39 @@
 
 #![warn(clippy::all)]
 
+pub mod binary;
 pub mod conversion;
+pub mod dictionary;
+// Godot-identical `Variant::hash()` (pat-0q2kx.230). Lives here rather than in
+// the interpreter because it is a Variant operation, and the interpreter's copy
+// used Rust's SipHash and matched nothing.
+#[cfg(test)]
+mod fuzz_variant;
+pub mod hash;
 pub mod serialize;
+// pat-s3rrv.8: Godot's Array/Dictionary are refcounted handles, not values
+// ("Arrays are always passed by reference" — doc/classes/Array.xml). These are
+// the shared-storage types `Variant::Array`/`Variant::Dictionary` will hold.
+pub mod shared;
+// pat-0q2kx.225: the project-wide global shader parameter store. Lives here
+// because gdserver3d (shader resolve) and gdscript-interop (the RenderingServer
+// script surface) must share it, and gdvariant is their only common dependency
+// that has Variant.
+pub mod shader_globals;
+// pat-mgixk.12: Godot's `StringLikeVariantComparator` — the equality rule
+// Dictionary keys and `Array.find`/`has`/`count` use, which is deliberately
+// *not* the `==` operator (no int/float promotion; String and StringName
+// compare equal by text). Lives here because `Dictionary` and the GDScript
+// interpreter must agree on it.
+pub mod string_like;
 pub mod variant;
 
 // Re-export the most-used types at the crate root.
+pub use binary::{decode_variant, encode_variant, VariantDecodeError, VariantEncodeError};
 pub use conversion::ConversionError;
-pub use variant::{CallableRef, ResourceRef, Variant, VariantType};
+pub use dictionary::Dictionary;
+pub use shared::{ContainerError, ContainerType, SharedArray, SharedDictionary};
+pub use string_like::{hash_compare, string_like_eq};
+pub use variant::{
+    num_real_f32, num_real_f64, num_with_decimals, CallableRef, ResourceRef, Variant, VariantType,
+};

@@ -12,11 +12,19 @@
 //! resource type string, and then serialized properties using Godot's
 //! binary variant encoding.
 
+use gdvariant::Dictionary;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
+use gdcore::node_path::NodePath;
+use gdcore::string_name::StringName;
+use gdvariant::Variant;
 
-use crate::resource::Resource;
+use crate::resource::{ExtResource, Resource};
 
 /// Magic bytes at the start of every Godot `.res` binary resource file.
 pub const RES_MAGIC: &[u8; 4] = b"RSRC";
@@ -111,18 +119,229 @@ pub fn parse_res_header(data: &[u8]) -> EngineResult<ResBinaryHeader> {
     })
 }
 
-/// Attempts to load a `.res` binary resource file.
+/// Loads a binary `.res`/`.scn`/`.tres` resource (Godot's
+/// `ResourceFormatBinary`, `resource_format_binary.cpp`).
 ///
-/// Currently, this parses the header to extract the resource type, then
-/// returns an error indicating that full binary deserialization is not
-/// yet supported.
+/// Parses the header, string table, external- and internal-resource tables,
+/// then each internal resource's typed properties. The last internal resource
+/// is the main one and is returned; the others become entries in its
+/// [`subresources`](Resource) map (keyed by their internal index as a string).
+/// Internal/external object references become
+/// `Variant::String("SubResource:<idx>")` / `"ExtResource:<idx>"` values plus
+/// entries in the main resource's `subresources`/`ext_resources` maps — the
+/// same in-memory model the text loader produces.
+///
+/// The `PackedByteArray`/`PackedInt32Array`/… family decodes into the matching
+/// [`Variant`] packed types (pat-nzgdu.82).
+///
+/// A compressed (`RSCC`) file is inflated first (pat-33wmr).
+///
+/// Returns an [`EngineError::Unsupported`] for big-endian,
+/// newer-than-6 format, and the three variant types that are live bindings
+/// rather than data (InputEvent, Callable, Signal). The integer vectors,
+/// `Rect2i`, `Vector4`/`Vector4i`, `Projection` and `PackedVector4Array` decode
+/// into real values as of pat-s3rrv.59; an `RID` decodes to the `Int` upstream
+/// yields for it.
+/// All reads are bounds-checked, so truncated or corrupt input yields an
+/// [`EngineError::Parse`] rather than a panic.
 pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
-    let header = parse_res_header(data)?;
+    // An `RSCC` file is an `RSRC` file behind Godot's block compressor
+    // (`FileAccessCompressed`); inflate it and parse what it wraps. Every
+    // binary `.scn` the editor saves is written this way (pat-33wmr).
+    //
+    // ⚠️ The compressed stream does NOT repeat the `RSRC` magic: the saver
+    // writes it only for an uncompressed file (`resource_format_binary.cpp`
+    // `if (!(p_flags & FLAG_COMPRESS))`), so the inflated bytes start at the
+    // endianness word, and every internal-resource offset is relative to THAT
+    // stream. Re-prefixing the magic lets one parser serve both forms, at the
+    // cost of shifting those offsets by its 4 bytes.
+    if crate::compressed::is_compressed_resource(data) {
+        let inflated = crate::compressed::decompress_rscc(data)
+            .map_err(|e| prefix_error(e, &format!("compressed binary resource {path}")))?;
+        let mut framed = Vec::with_capacity(inflated.len() + RES_MAGIC.len());
+        framed.extend_from_slice(RES_MAGIC);
+        framed.extend_from_slice(&inflated);
+        return parse_res_binary(&framed, path, RES_MAGIC.len() as u64);
+    }
+    parse_res_binary(data, path, 0)
+}
 
-    Err(EngineError::Unsupported(format!(
-        "binary .res format not yet supported (resource type: '{}', format version: {}, path: {})",
-        header.resource_type, header.format_version, path
-    )))
+/// Parses an `RSRC` resource; `offset_bias` is added to every stored
+/// internal-resource offset (non-zero only for an inflated `RSCC` stream).
+fn parse_res_binary(data: &[u8], path: &str, offset_bias: u64) -> EngineResult<Arc<Resource>> {
+    let mut cur = Cursor::new(data);
+
+    // -- Magic --
+    let magic = cur.take(4)?;
+    if magic != RES_MAGIC {
+        return Err(EngineError::Parse(format!(
+            "invalid binary resource magic: expected RSRC, got {magic:?} ({path})"
+        )));
+    }
+
+    // -- Header --
+    let big_endian = cur.u32()? != 0;
+    if big_endian {
+        return Err(EngineError::Unsupported(format!(
+            "big-endian binary resource is not supported: {path}"
+        )));
+    }
+    let _use_real64 = cur.u32()? != 0; // informational; real size is set by the flag below
+    let _ver_major = cur.u32()?;
+    let _ver_minor = cur.u32()?;
+    let ver_format = cur.u32()?;
+    if ver_format > FORMAT_VERSION_MAX {
+        return Err(EngineError::Unsupported(format!(
+            "binary resource format version {ver_format} is newer than supported ({FORMAT_VERSION_MAX}): {path}"
+        )));
+    }
+
+    let type_name = read_unicode_string(&mut cur)?;
+    let _importmd_ofs = cur.u64()?;
+    let flags = cur.u32()?;
+    let using_uids = flags & FORMAT_FLAG_UIDS != 0;
+    let real_is_double = flags & FORMAT_FLAG_REAL_T_IS_DOUBLE != 0;
+
+    // The uid field is always present (read whether or not the UID flag is set).
+    let file_uid = cur.u64()? as i64;
+
+    if flags & FORMAT_FLAG_HAS_SCRIPT_CLASS != 0 {
+        let _script_class = read_unicode_string(&mut cur)?;
+    }
+
+    for _ in 0..RESERVED_FIELDS {
+        cur.u32()?;
+    }
+
+    // -- String table --
+    let str_count = cur.u32()?;
+    let mut string_map = Vec::new();
+    for _ in 0..str_count {
+        string_map.push(read_unicode_string(&mut cur)?);
+    }
+
+    // -- External resources --
+    let ext_count = cur.u32()?;
+    let mut ext_resources = Vec::new();
+    for i in 0..ext_count {
+        let resource_type = read_unicode_string(&mut cur)?;
+        let ext_path = read_unicode_string(&mut cur)?;
+        let uid_str = if using_uids {
+            let uid = cur.u64()? as i64;
+            if uid >= 0 {
+                crate::uid::id_to_text(uid)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        ext_resources.push(ExtResource {
+            resource_type,
+            uid: uid_str,
+            path: ext_path,
+            id: i.to_string(),
+        });
+    }
+
+    // -- Internal resources (path + absolute byte offset) --
+    let int_count = cur.u32()?;
+    let mut internal_offsets = Vec::new();
+    for _ in 0..int_count {
+        let _int_path = read_unicode_string(&mut cur)?;
+        let offset = cur.u64()?;
+        internal_offsets.push(offset);
+    }
+    if internal_offsets.is_empty() {
+        return Err(EngineError::Parse(format!(
+            "binary resource has no internal resources: {path}"
+        )));
+    }
+
+    // -- Parse each internal resource's properties --
+    let mut reader = BinaryResourceReader {
+        cur,
+        real_is_double,
+        ver_format,
+        string_map,
+        ext_count,
+        internal_count: internal_offsets.len(),
+    };
+
+    let mut resources: Vec<Resource> = Vec::with_capacity(internal_offsets.len());
+    for &offset in &internal_offsets {
+        reader
+            .cur
+            .seek(offset.checked_add(offset_bias).ok_or_else(|| {
+                EngineError::Parse(format!("binary resource offset overflow: {path}"))
+            })?)?;
+        let res_type = read_unicode_string(&mut reader.cur)?;
+        let prop_count = reader.cur.u32()?;
+        let mut res = Resource::new(res_type);
+        for _ in 0..prop_count {
+            let name = reader.get_string()?;
+            if name.is_empty() {
+                return Err(EngineError::Parse(format!(
+                    "binary resource has an empty property name: {path}"
+                )));
+            }
+            let value = reader.parse_variant(0)?;
+            res.set_property(name, value);
+        }
+        resources.push(res);
+    }
+
+    // Last internal resource is the main one; the rest are sub-resources keyed
+    // by their internal index (matching OBJECT_INTERNAL_RESOURCE references).
+    let mut main = resources
+        .pop()
+        .ok_or_else(|| EngineError::Parse(format!("binary resource has no resources: {path}")))?;
+    main.path = path.to_string();
+    if using_uids && file_uid >= 0 {
+        main.uid = gdcore::ResourceUid::new(file_uid);
+    }
+    if main.class_name.is_empty() {
+        main.class_name = type_name;
+    }
+    for (idx, sub) in resources.into_iter().enumerate() {
+        main.subresources.insert(idx.to_string(), Arc::new(sub));
+    }
+    for ext in ext_resources {
+        main.ext_resources.insert(ext.id.clone(), ext);
+    }
+
+    Ok(Arc::new(main))
+}
+
+/// Whether `data` is a Godot binary resource in either on-disk form: plain
+/// (`RSRC`) or block-compressed (`RSCC`).
+pub fn is_binary_resource(data: &[u8]) -> bool {
+    is_res_binary(data) || crate::compressed::is_compressed_resource(data)
+}
+
+/// Loads a resource file's bytes in whichever format they are in: a binary
+/// resource (`RSRC`/`RSCC`, the `.res`/`.scn` family) or the text `.tres`
+/// format. Godot picks the loader by sniffing the file, not by extension, so
+/// a `.res` that happens to be text still loads.
+pub fn load_resource_bytes(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
+    if is_binary_resource(data) {
+        return load_res_binary(data, path);
+    }
+    let text = std::str::from_utf8(data).map_err(|e| {
+        EngineError::Parse(format!(
+            "{path} is neither a binary resource nor UTF-8 text: {e}"
+        ))
+    })?;
+    crate::loader::TresLoader::new().parse_str(text, path)
+}
+
+/// Keeps an error's kind while naming the file it came from.
+fn prefix_error(e: EngineError, what: &str) -> EngineError {
+    match e {
+        EngineError::Unsupported(m) => EngineError::Unsupported(format!("{what}: {m}")),
+        EngineError::Parse(m) => EngineError::Parse(format!("{what}: {m}")),
+        other => other,
+    }
 }
 
 /// Reads a little-endian `u32` from a 4-byte slice.
@@ -133,6 +352,646 @@ fn read_u32_le(bytes: &[u8]) -> u32 {
 /// Reads a big-endian `u32` from a 4-byte slice.
 fn read_u32_be(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+// ---------------------------------------------------------------------------
+// Binary resource format constants (resource_format_binary.cpp / .h)
+// ---------------------------------------------------------------------------
+
+/// Magic for a block-compressed binary resource (see [`crate::compressed`]).
+#[cfg(test)]
+const RES_MAGIC_COMPRESSED: &[u8; 4] = b"RSCC";
+
+/// Highest binary `FORMAT_VERSION` this loader accepts.
+const FORMAT_VERSION_MAX: u32 = 6;
+/// Below this format version, `NodePath` carries an extra property subname.
+const FORMAT_VERSION_NO_NODEPATH_PROPERTY: u32 = 3;
+/// Number of reserved `u32` header fields after the (optional) script class.
+const RESERVED_FIELDS: usize = 11;
+
+// Header flags.
+const FORMAT_FLAG_UIDS: u32 = 2;
+const FORMAT_FLAG_REAL_T_IS_DOUBLE: u32 = 4;
+const FORMAT_FLAG_HAS_SCRIPT_CLASS: u32 = 8;
+
+// Variant type tags (distinct from marshalls.cpp's values).
+const V_NIL: u32 = 1;
+const V_BOOL: u32 = 2;
+const V_INT: u32 = 3;
+const V_FLOAT: u32 = 4;
+const V_STRING: u32 = 5;
+const V_VECTOR2: u32 = 10;
+const V_RECT2: u32 = 11;
+const V_VECTOR3: u32 = 12;
+const V_PLANE: u32 = 13;
+const V_QUATERNION: u32 = 14;
+const V_AABB: u32 = 15;
+const V_BASIS: u32 = 16;
+const V_TRANSFORM3D: u32 = 17;
+const V_TRANSFORM2D: u32 = 18;
+const V_COLOR: u32 = 20;
+const V_NODE_PATH: u32 = 22;
+const V_OBJECT: u32 = 24;
+const V_DICTIONARY: u32 = 26;
+const V_ARRAY: u32 = 30;
+const V_PACKED_BYTE_ARRAY: u32 = 31;
+const V_PACKED_INT32_ARRAY: u32 = 32;
+const V_PACKED_FLOAT32_ARRAY: u32 = 33;
+const V_PACKED_STRING_ARRAY: u32 = 34;
+// ⚠️ 35/36/37 are Vector3/Color/Vector2 — NOT the Variant::Type order
+// (Vector2, Vector3, Color). This table had them in Variant order, so every
+// real `PackedVector3Array` (a ConvexPolygonShape3D's hull) was read as a
+// PackedVector2Array and then a garbage length, failing the whole file
+// (pat-33wmr; `resource_format_binary.cpp:71-73`).
+const V_PACKED_VECTOR3_ARRAY: u32 = 35;
+const V_PACKED_COLOR_ARRAY: u32 = 36;
+const V_PACKED_VECTOR2_ARRAY: u32 = 37;
+const V_INT64: u32 = 40;
+const V_DOUBLE: u32 = 41;
+const V_STRING_NAME: u32 = 44;
+const V_PACKED_INT64_ARRAY: u32 = 48;
+const V_PACKED_FLOAT64_ARRAY: u32 = 49;
+// ⚠️ These tags are the BINARY RESOURCE format's own numbering
+// (`core/io/resource_format_binary.cpp:47-88`), which is NOT `Variant::Type`.
+// The same `Rect2i` is 46 here and 8 on the `var_to_bytes` wire; reusing the
+// wrong table decodes a file into silently different types rather than failing.
+const V_RID: u32 = 23;
+const V_VECTOR2I: u32 = 45;
+const V_RECT2I: u32 = 46;
+const V_VECTOR3I: u32 = 47;
+const V_VECTOR4: u32 = 50;
+const V_VECTOR4I: u32 = 51;
+const V_PROJECTION: u32 = 52;
+const V_PACKED_VECTOR4_ARRAY: u32 = 53;
+
+// Object reference sub-kinds (within V_OBJECT).
+const OBJECT_EMPTY: u32 = 0;
+const OBJECT_EXTERNAL_RESOURCE: u32 = 1;
+const OBJECT_INTERNAL_RESOURCE: u32 = 2;
+const OBJECT_EXTERNAL_RESOURCE_INDEX: u32 = 3;
+
+/// Maximum array/dictionary nesting depth (guards against stack overflow on
+/// crafted input).
+const MAX_DEPTH: u32 = 128;
+
+// ---------------------------------------------------------------------------
+// Bounds-checked byte cursor
+// ---------------------------------------------------------------------------
+
+/// A little-endian, seekable, panic-free cursor over the resource bytes.
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> EngineResult<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| EngineError::Parse("binary resource length overflow".into()))?;
+        if end > self.data.len() {
+            return Err(EngineError::Parse(format!(
+                "binary resource truncated: need {n} byte(s) at offset {}, have {}",
+                self.pos,
+                self.data.len().saturating_sub(self.pos)
+            )));
+        }
+        let s = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(s)
+    }
+
+    fn seek(&mut self, pos: u64) -> EngineResult<()> {
+        let p = usize::try_from(pos)
+            .map_err(|_| EngineError::Parse("binary resource offset overflow".into()))?;
+        if p > self.data.len() {
+            return Err(EngineError::Parse(format!(
+                "binary resource offset {p} out of range (len {})",
+                self.data.len()
+            )));
+        }
+        self.pos = p;
+        Ok(())
+    }
+
+    fn u16(&mut self) -> EngineResult<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+
+    fn u32(&mut self) -> EngineResult<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> EngineResult<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn f32(&mut self) -> EngineResult<f32> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn f64(&mut self) -> EngineResult<f64> {
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+}
+
+/// Reads a length-prefixed UTF-8 string (`u32 len + len bytes`, NO padding).
+///
+/// Unlike marshalls.cpp, the binary resource format does not 4-byte-align
+/// strings. Invalid UTF-8 is replaced lossily (as Godot's `String::utf8` is
+/// lenient) rather than erroring.
+fn read_unicode_string(cur: &mut Cursor) -> EngineResult<String> {
+    let len = cur.u32()? as usize;
+    if len == 0 {
+        return Ok(String::new());
+    }
+    let bytes = cur.take(len)?;
+    Ok(utf8_without_terminator(bytes))
+}
+
+/// Decodes a stored string, dropping the NUL terminator Godot writes.
+///
+/// ⚠️ `save_unicode_string` stores `utf8().length() + 1` bytes — the length
+/// INCLUDES a trailing `\0`. Kept, it made every type name compare unequal
+/// (`"ArrayMesh\0" != "ArrayMesh"`), so no class-keyed consumer could
+/// recognise a resource loaded from a real Godot file (pat-33wmr).
+fn utf8_without_terminator(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Variant decoder for the binary resource format
+// ---------------------------------------------------------------------------
+
+/// Holds decode state shared while parsing a resource's property variants.
+struct BinaryResourceReader<'a> {
+    cur: Cursor<'a>,
+    real_is_double: bool,
+    ver_format: u32,
+    /// The string table (`_get_string` indexes into this).
+    string_map: Vec<String>,
+    /// Number of external resources (for reference-index validation).
+    ext_count: u32,
+    /// Number of internal resources (for reference-index validation).
+    internal_count: usize,
+}
+
+impl BinaryResourceReader<'_> {
+    /// Reads a table-indexed or inline string (`_get_string`): a `u32` where the
+    /// high bit means an inline string (`len = id & 0x7FFFFFFF`, no padding),
+    /// otherwise an index into the string table.
+    fn get_string(&mut self) -> EngineResult<String> {
+        let id = self.cur.u32()?;
+        if id & 0x8000_0000 != 0 {
+            let len = (id & 0x7FFF_FFFF) as usize;
+            if len == 0 {
+                return Ok(String::new());
+            }
+            let bytes = self.cur.take(len)?;
+            return Ok(utf8_without_terminator(bytes));
+        }
+        self.string_map
+            .get(id as usize)
+            .cloned()
+            .ok_or_else(|| EngineError::Parse(format!("string table index {id} out of range")))
+    }
+
+    /// Reads one `real_t` component as `f32` (the engine's storage type),
+    /// honoring the file's real-is-double flag.
+    fn real(&mut self) -> EngineResult<f32> {
+        if self.real_is_double {
+            Ok(self.cur.f64()? as f32)
+        } else {
+            self.cur.f32()
+        }
+    }
+
+    /// Reads a `VARIANT_FLOAT` (a `real_t`) at full precision into `f64`.
+    fn real_f64(&mut self) -> EngineResult<f64> {
+        if self.real_is_double {
+            self.cur.f64()
+        } else {
+            Ok(self.cur.f32()? as f64)
+        }
+    }
+
+    /// Reads a packed array's `u32` element count, rejecting counts whose
+    /// payload cannot fit in the remaining bytes.
+    ///
+    /// `min_elem_size` is the smallest number of bytes one element can occupy
+    /// (for `PackedStringArray` that is the 4-byte length prefix). Checking
+    /// before allocating keeps a corrupt count from reserving gigabytes — the
+    /// cursor alone would catch the truncation, but only after the allocation.
+    fn packed_len(&mut self, min_elem_size: usize) -> EngineResult<usize> {
+        let len = self.cur.u32()? as usize;
+        let needed = len
+            .checked_mul(min_elem_size)
+            .ok_or_else(|| EngineError::Parse("packed array length overflow".into()))?;
+        let remaining = self.cur.data.len().saturating_sub(self.cur.pos);
+        if needed > remaining {
+            return Err(EngineError::Parse(format!(
+                "packed array truncated: {len} element(s) need {needed} byte(s), have {remaining}"
+            )));
+        }
+        Ok(len)
+    }
+
+    /// Skips the zero padding Godot writes to re-align to 4 bytes after a
+    /// `PackedByteArray` payload (`_advance_padding`).
+    fn advance_padding(&mut self, len: usize) -> EngineResult<()> {
+        let extra = (4 - (len % 4)) % 4;
+        if extra > 0 {
+            self.cur.take(extra)?;
+        }
+        Ok(())
+    }
+
+    /// Byte width of one `real_t` component in this file.
+    fn real_size(&self) -> usize {
+        if self.real_is_double {
+            8
+        } else {
+            4
+        }
+    }
+
+    fn parse_variant(&mut self, depth: u32) -> EngineResult<Variant> {
+        if depth > MAX_DEPTH {
+            return Err(EngineError::Parse(
+                "binary resource variant nesting too deep".into(),
+            ));
+        }
+
+        let ty = self.cur.u32()?;
+        match ty {
+            V_NIL => Ok(Variant::Nil),
+            V_BOOL => Ok(Variant::Bool(self.cur.u32()? != 0)),
+            V_INT => Ok(Variant::Int(self.cur.u32()? as i32 as i64)),
+            V_INT64 => Ok(Variant::Int(self.cur.u64()? as i64)),
+            V_FLOAT => Ok(Variant::Float(self.real_f64()?)),
+            V_DOUBLE => Ok(Variant::Float(self.cur.f64()?)),
+            V_STRING => Ok(Variant::String(read_unicode_string(&mut self.cur)?)),
+            V_STRING_NAME => Ok(Variant::StringName(StringName::new(&read_unicode_string(
+                &mut self.cur,
+            )?))),
+            V_VECTOR2 => {
+                let x = self.real()?;
+                let y = self.real()?;
+                Ok(Variant::Vector2(Vector2::new(x, y)))
+            }
+            V_VECTOR3 => {
+                let x = self.real()?;
+                let y = self.real()?;
+                let z = self.real()?;
+                Ok(Variant::Vector3(Vector3::new(x, y, z)))
+            }
+            V_RECT2 => {
+                let px = self.real()?;
+                let py = self.real()?;
+                let sx = self.real()?;
+                let sy = self.real()?;
+                Ok(Variant::Rect2(Rect2::new(
+                    Vector2::new(px, py),
+                    Vector2::new(sx, sy),
+                )))
+            }
+            V_PLANE => {
+                let nx = self.real()?;
+                let ny = self.real()?;
+                let nz = self.real()?;
+                let d = self.real()?;
+                Ok(Variant::Plane(Plane {
+                    normal: Vector3::new(nx, ny, nz),
+                    d,
+                }))
+            }
+            V_QUATERNION => {
+                let x = self.real()?;
+                let y = self.real()?;
+                let z = self.real()?;
+                let w = self.real()?;
+                Ok(Variant::Quaternion(Quaternion { x, y, z, w }))
+            }
+            V_AABB => {
+                let px = self.real()?;
+                let py = self.real()?;
+                let pz = self.real()?;
+                let sx = self.real()?;
+                let sy = self.real()?;
+                let sz = self.real()?;
+                Ok(Variant::Aabb(Aabb {
+                    position: Vector3::new(px, py, pz),
+                    size: Vector3::new(sx, sy, sz),
+                }))
+            }
+            V_TRANSFORM2D => {
+                // columns[0], columns[1], columns[2] (each x,y).
+                let a = self.real()?;
+                let b = self.real()?;
+                let c = self.real()?;
+                let d = self.real()?;
+                let e = self.real()?;
+                let f = self.real()?;
+                Ok(Variant::Transform2D(Transform2D {
+                    x: Vector2::new(a, b),
+                    y: Vector2::new(c, d),
+                    origin: Vector2::new(e, f),
+                }))
+            }
+            V_BASIS => {
+                let rows = self.read_reals::<9>()?;
+                Ok(Variant::Basis(basis_from_rows(&rows)))
+            }
+            V_TRANSFORM3D => {
+                let rows = self.read_reals::<9>()?;
+                let ox = self.real()?;
+                let oy = self.real()?;
+                let oz = self.real()?;
+                Ok(Variant::Transform3D(Transform3D {
+                    basis: basis_from_rows(&rows),
+                    origin: Vector3::new(ox, oy, oz),
+                }))
+            }
+            V_COLOR => {
+                // Colors are always single-precision.
+                let r = self.cur.f32()?;
+                let g = self.cur.f32()?;
+                let b = self.cur.f32()?;
+                let a = self.cur.f32()?;
+                Ok(Variant::Color(Color::new(r, g, b, a)))
+            }
+            V_NODE_PATH => self.parse_node_path(),
+            V_OBJECT => self.parse_object(),
+            V_ARRAY => {
+                let len = self.cur.u32()? & 0x7FFF_FFFF;
+                let mut arr = Vec::new();
+                for _ in 0..len {
+                    arr.push(self.parse_variant(depth + 1)?);
+                }
+                Ok(Variant::Array(arr.into()))
+            }
+            V_PACKED_BYTE_ARRAY => {
+                let len = self.packed_len(1)?;
+                let bytes = self.cur.take(len)?.to_vec();
+                // Byte arrays (and only byte arrays) are padded back to a
+                // 4-byte boundary.
+                self.advance_padding(len)?;
+                Ok(Variant::PackedByteArray(bytes))
+            }
+            V_PACKED_INT32_ARRAY => {
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.u32()? as i32);
+                }
+                Ok(Variant::PackedInt32Array(arr))
+            }
+            V_PACKED_INT64_ARRAY => {
+                let len = self.packed_len(8)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.u64()? as i64);
+                }
+                Ok(Variant::PackedInt64Array(arr))
+            }
+            V_PACKED_FLOAT32_ARRAY => {
+                // Always 32-bit, regardless of the file's real_t width.
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.f32()?);
+                }
+                Ok(Variant::PackedFloat32Array(arr))
+            }
+            V_PACKED_FLOAT64_ARRAY => {
+                // Always 64-bit, regardless of the file's real_t width.
+                let len = self.packed_len(8)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.f64()?);
+                }
+                Ok(Variant::PackedFloat64Array(arr))
+            }
+            V_PACKED_STRING_ARRAY => {
+                // Each element is at minimum its own 4-byte length prefix.
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(read_unicode_string(&mut self.cur)?);
+                }
+                Ok(Variant::PackedStringArray(arr))
+            }
+            V_PACKED_VECTOR2_ARRAY => {
+                let len = self.packed_len(self.real_size() * 2)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    arr.push(Vector2::new(x, y));
+                }
+                Ok(Variant::PackedVector2Array(arr))
+            }
+            V_PACKED_VECTOR3_ARRAY => {
+                let len = self.packed_len(self.real_size() * 3)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    let z = self.real()?;
+                    arr.push(Vector3::new(x, y, z));
+                }
+                Ok(Variant::PackedVector3Array(arr))
+            }
+            V_PACKED_COLOR_ARRAY => {
+                // Colors are always single-precision (Color is float-based,
+                // not real_t), matching the V_COLOR scalar arm above.
+                let len = self.packed_len(16)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let r = self.cur.f32()?;
+                    let g = self.cur.f32()?;
+                    let b = self.cur.f32()?;
+                    let a = self.cur.f32()?;
+                    arr.push(Color::new(r, g, b, a));
+                }
+                Ok(Variant::PackedColorArray(arr))
+            }
+            V_DICTIONARY => {
+                let len = self.cur.u32()? & 0x7FFF_FFFF;
+                let mut map = Dictionary::new();
+                for _ in 0..len {
+                    let key = self.parse_variant(depth + 1)?;
+                    let value = self.parse_variant(depth + 1)?;
+                    // Keys keep their decoded Variant type (typed dictionary keys).
+                    map.insert(key, value);
+                }
+                Ok(Variant::Dictionary(map.into()))
+            }
+            // The integer vectors and the pat-s3rrv.59 builtins. Before these
+            // arms existed a single such property aborted the whole binary
+            // resource load with `Unsupported`, which is a far worse failure
+            // than the text loader's: one `Rect2i` on a TileSet lost the file.
+            V_VECTOR2I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                Ok(Variant::Vector2i(Vector2i::new(x, y)))
+            }
+            V_VECTOR3I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                let z = self.cur.u32()? as i32;
+                Ok(Variant::Vector3i(Vector3i::new(x, y, z)))
+            }
+            V_RECT2I => {
+                let px = self.cur.u32()? as i32;
+                let py = self.cur.u32()? as i32;
+                let sx = self.cur.u32()? as i32;
+                let sy = self.cur.u32()? as i32;
+                Ok(Variant::Rect2i(Rect2i::from_components(px, py, sx, sy)))
+            }
+            V_VECTOR4 => {
+                let x = self.real()?;
+                let y = self.real()?;
+                let z = self.real()?;
+                let w = self.real()?;
+                Ok(Variant::Vector4(Vector4::new(x, y, z, w)))
+            }
+            V_VECTOR4I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                let z = self.cur.u32()? as i32;
+                let w = self.cur.u32()? as i32;
+                Ok(Variant::Vector4i(Vector4i::new(x, y, z, w)))
+            }
+            V_PROJECTION => {
+                // Sixteen reals, column-major (`m[column][row]`) — the same
+                // order `columns[i][j]` is written in upstream.
+                let mut m = [[0.0f32; 4]; 4];
+                for col in m.iter_mut() {
+                    for cell in col.iter_mut() {
+                        *cell = self.real()?;
+                    }
+                }
+                Ok(Variant::Projection(Projection { m }))
+            }
+            V_PACKED_VECTOR4_ARRAY => {
+                let len = self.packed_len(self.real_size() * 4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    let z = self.real()?;
+                    let w = self.real()?;
+                    arr.push(Vector4::new(x, y, z, w));
+                }
+                Ok(Variant::PackedVector4Array(arr))
+            }
+            // ⚠️ An RID in a binary resource is FOUR BYTES that decode to an
+            // INT, not to an RID. Upstream is literally `r_v = f->get_32()`
+            // (`resource_format_binary.cpp:389`) — a handle is an index into a
+            // live server's table, so it cannot survive a file, and Godot does
+            // not pretend otherwise. Yielding `Variant::Rid` here would be
+            // tidier and would disagree with every real `.res` Godot writes.
+            V_RID => Ok(Variant::Int(self.cur.u32()? as i64)),
+            // Still unmapped: INPUT_EVENT(25), CALLABLE(42) and SIGNAL(43) —
+            // each is a live binding rather than data.
+            other => Err(EngineError::Unsupported(format!(
+                "binary resource variant type {other} is not supported yet"
+            ))),
+        }
+    }
+
+    fn parse_node_path(&mut self) -> EngineResult<Variant> {
+        let name_count = self.cur.u16()? as usize;
+        let raw_subname = self.cur.u16()?;
+        let absolute = raw_subname & 0x8000 != 0;
+        let mut subname_count = (raw_subname & 0x7FFF) as usize;
+        if self.ver_format < FORMAT_VERSION_NO_NODEPATH_PROPERTY {
+            subname_count += 1;
+        }
+
+        let mut names = Vec::new();
+        for _ in 0..name_count {
+            names.push(self.get_string()?);
+        }
+        let mut subnames = Vec::new();
+        for _ in 0..subname_count {
+            subnames.push(self.get_string()?);
+        }
+
+        // Rebuild via the public string API (names/subnames are separator-free).
+        let mut s = String::new();
+        if absolute {
+            s.push('/');
+        }
+        s.push_str(&names.join("/"));
+        for sub in &subnames {
+            s.push(':');
+            s.push_str(sub);
+        }
+        Ok(Variant::NodePath(NodePath::new(&s)))
+    }
+
+    fn parse_object(&mut self) -> EngineResult<Variant> {
+        let objtype = self.cur.u32()?;
+        match objtype {
+            OBJECT_EMPTY => Ok(Variant::Nil),
+            OBJECT_INTERNAL_RESOURCE => {
+                let index = self.cur.u32()? as usize;
+                if index >= self.internal_count {
+                    return Err(EngineError::Parse(format!(
+                        "internal resource reference index {index} out of range ({})",
+                        self.internal_count
+                    )));
+                }
+                Ok(Variant::String(format!("SubResource:{index}")))
+            }
+            OBJECT_EXTERNAL_RESOURCE_INDEX => {
+                let index = self.cur.u32()?;
+                if index >= self.ext_count {
+                    return Err(EngineError::Parse(format!(
+                        "external resource reference index {index} out of range ({})",
+                        self.ext_count
+                    )));
+                }
+                Ok(Variant::String(format!("ExtResource:{index}")))
+            }
+            OBJECT_EXTERNAL_RESOURCE => {
+                // Deprecated inline form: type + path strings (no table index).
+                let _exttype = read_unicode_string(&mut self.cur)?;
+                let path = read_unicode_string(&mut self.cur)?;
+                Ok(Variant::String(format!("ExtResource:{path}")))
+            }
+            other => Err(EngineError::Parse(format!(
+                "unknown object reference kind: {other}"
+            ))),
+        }
+    }
+
+    /// Reads `N` `real_t` components into a fixed array.
+    fn read_reals<const N: usize>(&mut self) -> EngineResult<[f32; N]> {
+        let mut out = [0.0f32; N];
+        for slot in out.iter_mut() {
+            *slot = self.real()?;
+        }
+        Ok(out)
+    }
+}
+
+/// Rebuilds a column-stored [`Basis`] from 9 row-major wire values
+/// (`rows[i][j] = r[i*3+j]`; column 0 = (r0, r3, r6), etc.).
+fn basis_from_rows(r: &[f32; 9]) -> Basis {
+    Basis {
+        x: Vector3::new(r[0], r[3], r[6]),
+        y: Vector3::new(r[1], r[4], r[7]),
+        z: Vector3::new(r[2], r[5], r[8]),
+    }
 }
 
 #[cfg(test)]
@@ -261,20 +1120,32 @@ mod tests {
     }
 
     #[test]
-    fn load_res_binary_returns_unsupported_error() {
+    fn load_res_binary_header_only_is_truncated() {
+        // A bare header (no importmd/flags/tables) must fail cleanly, not panic.
         let data = build_test_header(false, false, 4, 3, 5, "Theme");
         let result = load_res_binary(&data, "res://theme.res");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("binary .res format not yet supported"));
-        assert!(err.contains("Theme"));
-        assert!(err.contains("res://theme.res"));
+        assert!(result.unwrap_err().to_string().contains("truncated"));
     }
 
     #[test]
     fn load_res_binary_invalid_data() {
         let result = load_res_binary(b"not a res file", "test.res");
         assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid binary resource magic"));
+    }
+
+    #[test]
+    fn load_res_binary_compressed_truncated_header_errors() {
+        let mut data = RES_MAGIC_COMPRESSED.to_vec();
+        data.extend_from_slice(&[0u8; 8]);
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("compressed"), "got: {err}");
     }
 
     #[test]
@@ -283,5 +1154,820 @@ mod tests {
         let data = build_test_header(false, false, 4, 0, 1, long_type);
         let header = parse_res_header(&data).unwrap();
         assert_eq!(header.resource_type, long_type);
+    }
+}
+
+// ===========================================================================
+// Full binary-resource loader tests (hand-built fixtures)
+// ===========================================================================
+
+#[cfg(test)]
+mod binary_tests {
+    use super::*;
+
+    fn u32b(v: u32) -> Vec<u8> {
+        v.to_le_bytes().to_vec()
+    }
+    fn u64b(v: u64) -> Vec<u8> {
+        v.to_le_bytes().to_vec()
+    }
+    /// Length-prefixed string, no padding (`get_unicode_string` format).
+    fn ustr(s: &str) -> Vec<u8> {
+        let mut o = u32b(s.len() as u32);
+        o.extend_from_slice(s.as_bytes());
+        o
+    }
+
+    // Variant byte encoders (resource-binary VARIANT_* tags).
+    fn v_nil() -> Vec<u8> {
+        u32b(V_NIL)
+    }
+    fn v_bool(b: bool) -> Vec<u8> {
+        let mut o = u32b(V_BOOL);
+        o.extend(u32b(u32::from(b)));
+        o
+    }
+    fn v_int(i: i32) -> Vec<u8> {
+        let mut o = u32b(V_INT);
+        o.extend_from_slice(&i.to_le_bytes());
+        o
+    }
+    fn v_int64(i: i64) -> Vec<u8> {
+        let mut o = u32b(V_INT64);
+        o.extend_from_slice(&i.to_le_bytes());
+        o
+    }
+    fn v_float32(f: f32) -> Vec<u8> {
+        let mut o = u32b(V_FLOAT);
+        o.extend_from_slice(&f.to_le_bytes());
+        o
+    }
+    fn v_float64(f: f64) -> Vec<u8> {
+        let mut o = u32b(V_FLOAT);
+        o.extend_from_slice(&f.to_le_bytes());
+        o
+    }
+    fn v_double(f: f64) -> Vec<u8> {
+        let mut o = u32b(V_DOUBLE);
+        o.extend_from_slice(&f.to_le_bytes());
+        o
+    }
+    fn v_string(s: &str) -> Vec<u8> {
+        let mut o = u32b(V_STRING);
+        o.extend(ustr(s));
+        o
+    }
+    fn v_vec2_f32(x: f32, y: f32) -> Vec<u8> {
+        let mut o = u32b(V_VECTOR2);
+        o.extend_from_slice(&x.to_le_bytes());
+        o.extend_from_slice(&y.to_le_bytes());
+        o
+    }
+    fn v_vec2_f64(x: f64, y: f64) -> Vec<u8> {
+        let mut o = u32b(V_VECTOR2);
+        o.extend_from_slice(&x.to_le_bytes());
+        o.extend_from_slice(&y.to_le_bytes());
+        o
+    }
+    fn v_array(elems: &[Vec<u8>]) -> Vec<u8> {
+        let mut o = u32b(V_ARRAY);
+        o.extend(u32b(elems.len() as u32));
+        for e in elems {
+            o.extend_from_slice(e);
+        }
+        o
+    }
+    /// `PackedByteArray`, including the 4-byte-alignment padding Godot writes.
+    fn v_packed_byte(bytes: &[u8]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_BYTE_ARRAY);
+        o.extend(u32b(bytes.len() as u32));
+        o.extend_from_slice(bytes);
+        o.extend(vec![0u8; (4 - (bytes.len() % 4)) % 4]);
+        o
+    }
+    fn v_packed_int32(vals: &[i32]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_INT32_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_int64(vals: &[i64]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_INT64_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_f32(vals: &[f32]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_FLOAT32_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_f64(vals: &[f64]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_FLOAT64_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_string(vals: &[&str]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_STRING_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for s in vals {
+            o.extend(ustr(s));
+        }
+        o
+    }
+    fn v_packed_vec2_f32(vals: &[(f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR2_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec2_f64(vals: &[(f64, f64)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR2_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec3_f32(vals: &[(f32, f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR3_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y, z) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+            o.extend_from_slice(&z.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec3_f64(vals: &[(f64, f64, f64)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR3_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y, z) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+            o.extend_from_slice(&z.to_le_bytes());
+        }
+        o
+    }
+    /// `PackedColorArray` — always single-precision, even in a real64 file.
+    fn v_packed_color(vals: &[(f32, f32, f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_COLOR_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(r, g, b, a) in vals {
+            o.extend_from_slice(&r.to_le_bytes());
+            o.extend_from_slice(&g.to_le_bytes());
+            o.extend_from_slice(&b.to_le_bytes());
+            o.extend_from_slice(&a.to_le_bytes());
+        }
+        o
+    }
+    fn v_dict(pairs: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+        let mut o = u32b(V_DICTIONARY);
+        o.extend(u32b(pairs.len() as u32));
+        for (k, v) in pairs {
+            o.extend_from_slice(k);
+            o.extend_from_slice(v);
+        }
+        o
+    }
+    fn v_ext_index(i: u32) -> Vec<u8> {
+        let mut o = u32b(V_OBJECT);
+        o.extend(u32b(OBJECT_EXTERNAL_RESOURCE_INDEX));
+        o.extend(u32b(i));
+        o
+    }
+    fn v_internal_index(i: u32) -> Vec<u8> {
+        let mut o = u32b(V_OBJECT);
+        o.extend(u32b(OBJECT_INTERNAL_RESOURCE));
+        o.extend(u32b(i));
+        o
+    }
+
+    /// Builds a complete binary resource. Property names are gathered into the
+    /// string table and referenced by index (as Godot's saver does). `internals`
+    /// is `[(type, [(prop_name, variant_bytes)])]`; the last is the main one.
+    fn build(
+        flags: u32,
+        ext: &[(&str, &str)],
+        internals: &[(&str, Vec<(&str, Vec<u8>)>)],
+    ) -> Vec<u8> {
+        // Gather property names into the string table (first-appearance order).
+        let mut table: Vec<String> = Vec::new();
+        for (_, props) in internals {
+            for (name, _) in props {
+                if !table.iter().any(|s| s.as_str() == *name) {
+                    table.push((*name).to_string());
+                }
+            }
+        }
+        let index_of = |name: &str| table.iter().position(|s| s.as_str() == name).unwrap() as u32;
+
+        let using_uids = flags & FORMAT_FLAG_UIDS != 0;
+
+        // Header.
+        let mut header = Vec::new();
+        header.extend_from_slice(RES_MAGIC);
+        header.extend(u32b(0)); // big_endian
+        header.extend(u32b(0)); // use_real64 (informational)
+        header.extend(u32b(4)); // ver_major
+        header.extend(u32b(6)); // ver_minor
+        header.extend(u32b(6)); // ver_format
+        header.extend(ustr("Resource")); // top-level type
+        header.extend(u64b(0)); // importmd_ofs
+        header.extend(u32b(flags));
+        header.extend(u64b(0)); // uid (always present)
+        for _ in 0..RESERVED_FIELDS {
+            header.extend(u32b(0));
+        }
+        // String table.
+        header.extend(u32b(table.len() as u32));
+        for s in &table {
+            header.extend(ustr(s));
+        }
+        // External resources.
+        header.extend(u32b(ext.len() as u32));
+        for entry in ext {
+            header.extend(ustr(entry.0));
+            header.extend(ustr(entry.1));
+            if using_uids {
+                header.extend(u64b(0)); // uid 0 -> "uid://a"
+            }
+        }
+
+        // Resource bodies (built to compute their absolute offsets).
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        for entry in internals {
+            let mut body = ustr(entry.0);
+            body.extend(u32b(entry.1.len() as u32));
+            for prop in &entry.1 {
+                body.extend(u32b(index_of(prop.0))); // table-indexed name
+                body.extend_from_slice(&prop.1);
+            }
+            bodies.push(body);
+        }
+
+        // Internal-resource table (path + absolute offset).
+        let paths: Vec<String> = (0..internals.len())
+            .map(|i| format!("local://{i}"))
+            .collect();
+        let mut int_table_size = 4usize; // count u32
+        for p in &paths {
+            int_table_size += 4 + p.len() + 8;
+        }
+        let bodies_start = header.len() + int_table_size;
+        let mut offsets = Vec::new();
+        let mut acc = bodies_start;
+        for b in &bodies {
+            offsets.push(acc as u64);
+            acc += b.len();
+        }
+
+        let mut out = header;
+        out.extend(u32b(internals.len() as u32));
+        for (i, p) in paths.iter().enumerate() {
+            out.extend(ustr(p));
+            out.extend(u64b(offsets[i]));
+        }
+        for b in bodies {
+            out.extend(b);
+        }
+        out
+    }
+
+    #[test]
+    fn minimal_resource_int_string_vector2() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "MyResource",
+                vec![
+                    ("count", v_int(42)),
+                    ("name", v_string("hello")),
+                    ("pos", v_vec2_f32(1.0, 2.0)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://x.res").unwrap();
+        assert_eq!(res.class_name, "MyResource");
+        assert_eq!(res.path, "res://x.res");
+        assert_eq!(res.get_property("count"), Some(&Variant::Int(42)));
+        assert_eq!(
+            res.get_property("name"),
+            Some(&Variant::String("hello".into()))
+        );
+        assert_eq!(
+            res.get_property("pos"),
+            Some(&Variant::Vector2(Vector2::new(1.0, 2.0)))
+        );
+    }
+
+    #[test]
+    fn scalars_and_math_roundtrip_through_loader() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("nil", v_nil()),
+                    ("t", v_bool(true)),
+                    ("big", v_int64(1i64 << 40)),
+                    ("f", v_float32(0.5)),
+                    ("d", v_double(0.1)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://r.res").unwrap();
+        assert_eq!(res.get_property("nil"), Some(&Variant::Nil));
+        assert_eq!(res.get_property("t"), Some(&Variant::Bool(true)));
+        assert_eq!(res.get_property("big"), Some(&Variant::Int(1i64 << 40)));
+        assert_eq!(res.get_property("f"), Some(&Variant::Float(0.5)));
+        assert_eq!(res.get_property("d"), Some(&Variant::Float(0.1)));
+    }
+
+    #[test]
+    fn external_resource_reference() {
+        let data = build(
+            FORMAT_FLAG_UIDS,
+            &[("Texture2D", "res://icon.png")],
+            &[("Sprite2D", vec![("texture", v_ext_index(0))])],
+        );
+        let res = load_res_binary(&data, "res://s.res").unwrap();
+        assert_eq!(
+            res.get_property("texture"),
+            Some(&Variant::String("ExtResource:0".into()))
+        );
+        assert_eq!(res.ext_resources.len(), 1);
+        let ext = &res.ext_resources["0"];
+        assert_eq!(ext.resource_type, "Texture2D");
+        assert_eq!(ext.path, "res://icon.png");
+        assert_eq!(ext.uid, "uid://a"); // uid 0 -> base-34 "a"
+    }
+
+    #[test]
+    fn internal_subresource_reference() {
+        // internal 0 = sub, internal 1 = main (references the sub by index 0).
+        let data = build(
+            0,
+            &[],
+            &[
+                ("StyleBoxFlat", vec![("bg", v_int(7))]),
+                ("Theme", vec![("panel", v_internal_index(0))]),
+            ],
+        );
+        let res = load_res_binary(&data, "res://t.res").unwrap();
+        assert_eq!(res.class_name, "Theme");
+        assert_eq!(
+            res.get_property("panel"),
+            Some(&Variant::String("SubResource:0".into()))
+        );
+        assert_eq!(res.subresources.len(), 1);
+        let sub = &res.subresources["0"];
+        assert_eq!(sub.class_name, "StyleBoxFlat");
+        assert_eq!(sub.get_property("bg"), Some(&Variant::Int(7)));
+        // And it resolves through the shared model helper.
+        let resolved = res.resolve_subresource("panel").unwrap();
+        assert_eq!(resolved.class_name, "StyleBoxFlat");
+    }
+
+    #[test]
+    fn nested_array_and_dictionary() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "Data",
+                vec![
+                    ("items", v_array(&[v_int(1), v_int(2), v_int(3)])),
+                    ("map", v_dict(&[(v_string("k"), v_vec2_f32(1.0, 2.0))])),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://d.res").unwrap();
+        assert_eq!(
+            res.get_property("items"),
+            Some(&Variant::Array(
+                vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into()
+            ))
+        );
+        match res.get_property("map") {
+            Some(Variant::Dictionary(d)) => {
+                assert_eq!(d.get("k"), Some(Variant::Vector2(Vector2::new(1.0, 2.0))));
+            }
+            other => panic!("expected dictionary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn real64_flag_decodes_double_precision_math() {
+        let data = build(
+            FORMAT_FLAG_REAL_T_IS_DOUBLE,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("pos", v_vec2_f64(1.5, 2.5)),
+                    ("f", v_float64(0.25)), // VARIANT_FLOAT reads a double here
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://r64.res").unwrap();
+        assert_eq!(
+            res.get_property("pos"),
+            Some(&Variant::Vector2(Vector2::new(1.5, 2.5)))
+        );
+        assert_eq!(res.get_property("f"), Some(&Variant::Float(0.25)));
+    }
+
+    #[test]
+    fn big_endian_flag_unsupported() {
+        let mut data = build(0, &[], &[("R", vec![("x", v_int(1))])]);
+        data[4] = 1; // set big_endian flag
+        let err = load_res_binary(&data, "res://be.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("big-endian"), "got: {err}");
+    }
+
+    #[test]
+    fn newer_format_version_unsupported() {
+        let mut data = build(0, &[], &[("R", vec![("x", v_int(1))])]);
+        // ver_format is the 6th u32 (offset 20).
+        data[20..24].copy_from_slice(&7u32.to_le_bytes());
+        let err = load_res_binary(&data, "res://v7.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("format version"), "got: {err}");
+    }
+
+    #[test]
+    fn packed_arrays_roundtrip_through_loader() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    // len 4 => no padding; a stray pad byte would desync "i32s".
+                    ("bytes", v_packed_byte(&[1, 2, 3, 4])),
+                    ("i32s", v_packed_int32(&[-1, 0, 7])),
+                    ("i64s", v_packed_int64(&[-1, 1i64 << 40])),
+                    ("f32s", v_packed_f32(&[0.5, -1.5])),
+                    ("f64s", v_packed_f64(&[0.25, 1e300])),
+                    ("strs", v_packed_string(&["a", "", "hello"])),
+                    ("v2s", v_packed_vec2_f32(&[(1.0, 2.0), (3.0, 4.0)])),
+                    ("v3s", v_packed_vec3_f32(&[(1.0, 2.0, 3.0)])),
+                    ("cols", v_packed_color(&[(1.0, 0.5, 0.25, 1.0)])),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://packed.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(vec![1, 2, 3, 4]))
+        );
+        assert_eq!(
+            res.get_property("i32s"),
+            Some(&Variant::PackedInt32Array(vec![-1, 0, 7]))
+        );
+        assert_eq!(
+            res.get_property("i64s"),
+            Some(&Variant::PackedInt64Array(vec![-1, 1i64 << 40]))
+        );
+        assert_eq!(
+            res.get_property("f32s"),
+            Some(&Variant::PackedFloat32Array(vec![0.5, -1.5]))
+        );
+        assert_eq!(
+            res.get_property("f64s"),
+            Some(&Variant::PackedFloat64Array(vec![0.25, 1e300]))
+        );
+        assert_eq!(
+            res.get_property("strs"),
+            Some(&Variant::PackedStringArray(vec![
+                "a".to_string(),
+                String::new(),
+                "hello".to_string(),
+            ]))
+        );
+        assert_eq!(
+            res.get_property("v2s"),
+            Some(&Variant::PackedVector2Array(vec![
+                Vector2::new(1.0, 2.0),
+                Vector2::new(3.0, 4.0),
+            ]))
+        );
+        assert_eq!(
+            res.get_property("v3s"),
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(
+                1.0, 2.0, 3.0
+            )]))
+        );
+        assert_eq!(
+            res.get_property("cols"),
+            Some(&Variant::PackedColorArray(vec![Color::new(
+                1.0, 0.5, 0.25, 1.0
+            )]))
+        );
+    }
+
+    #[test]
+    fn packed_byte_array_padding_is_consumed() {
+        // 5 bytes => 3 bytes of padding. If the padding is not skipped the
+        // following property decodes as garbage.
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("bytes", v_packed_byte(&[1, 2, 3, 4, 5])),
+                    ("after", v_int(42)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://pad.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(vec![1, 2, 3, 4, 5]))
+        );
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(42)));
+    }
+
+    #[test]
+    fn empty_packed_arrays_decode_to_empty_vecs() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("bytes", v_packed_byte(&[])),
+                    ("strs", v_packed_string(&[])),
+                    ("after", v_int(9)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://empty.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(Vec::new()))
+        );
+        assert_eq!(
+            res.get_property("strs"),
+            Some(&Variant::PackedStringArray(Vec::new()))
+        );
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(9)));
+    }
+
+    #[test]
+    fn packed_vector_arrays_honor_real64_flag_but_colors_stay_f32() {
+        let data = build(
+            FORMAT_FLAG_REAL_T_IS_DOUBLE,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("v2s", v_packed_vec2_f64(&[(1.5, 2.5)])),
+                    ("v3s", v_packed_vec3_f64(&[(1.5, 2.5, 3.5)])),
+                    // Colors are float-based, not real_t — still 4×f32 here.
+                    ("cols", v_packed_color(&[(1.0, 0.5, 0.25, 1.0)])),
+                    ("after", v_int(3)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://p64.res").unwrap();
+        assert_eq!(
+            res.get_property("v2s"),
+            Some(&Variant::PackedVector2Array(vec![Vector2::new(1.5, 2.5)]))
+        );
+        assert_eq!(
+            res.get_property("v3s"),
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(
+                1.5, 2.5, 3.5
+            )]))
+        );
+        assert_eq!(
+            res.get_property("cols"),
+            Some(&Variant::PackedColorArray(vec![Color::new(
+                1.0, 0.5, 0.25, 1.0
+            )]))
+        );
+        // Proves the color array consumed exactly 16 bytes, not 32.
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(3)));
+    }
+
+    #[test]
+    fn packed_arrays_nest_inside_array_and_dictionary() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("arr", v_array(&[v_packed_int32(&[1, 2])])),
+                    ("dict", v_dict(&[(v_string("k"), v_packed_string(&["v"]))])),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://nest.res").unwrap();
+        assert_eq!(
+            res.get_property("arr"),
+            Some(&Variant::Array(
+                vec![Variant::PackedInt32Array(vec![1, 2])].into()
+            ))
+        );
+        assert!(matches!(
+            res.get_property("dict"),
+            Some(Variant::Dictionary(_))
+        ));
+    }
+
+    #[test]
+    fn packed_array_with_absurd_length_errors_without_allocating() {
+        // A corrupt count must be rejected against the bytes actually left,
+        // never used to reserve ~16 GB.
+        let mut packed = u32b(V_PACKED_INT32_ARRAY);
+        packed.extend(u32b(u32::MAX));
+        let data = build(0, &[], &[("R", vec![("evil", packed)])]);
+        let err = load_res_binary(&data, "res://evil.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "got: {err}");
+    }
+
+    #[test]
+    fn packed_byte_array_with_truncated_payload_errors() {
+        let mut packed = u32b(V_PACKED_BYTE_ARRAY);
+        packed.extend(u32b(1_000_000)); // claims 1 MB; the file is far smaller
+        let data = build(0, &[], &[("R", vec![("evil", packed)])]);
+        let err = load_res_binary(&data, "res://evil2.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "got: {err}");
+    }
+
+    #[test]
+    fn truncated_input_never_panics() {
+        let data = build(
+            0,
+            &[("Ext", "res://e.res")],
+            &[
+                ("Sub", vec![("v", v_int(9))]),
+                ("Main", vec![("arr", v_array(&[v_int(1), v_int(2)]))]),
+            ],
+        );
+        // Full parse works.
+        assert!(load_res_binary(&data, "res://full.res").is_ok());
+        // Every strict prefix errors cleanly (no panic).
+        for len in 0..data.len() {
+            assert!(
+                load_res_binary(&data[..len], "res://t.res").is_err(),
+                "prefix len {len} should error"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_internal_reference_errors() {
+        // Only one internal resource exists (index 0 = main), but a property
+        // references internal index 5.
+        let data = build(0, &[], &[("R", vec![("bad", v_internal_index(5))])]);
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn out_of_range_external_reference_errors() {
+        // No external resources, but a property references external index 0.
+        let data = build(0, &[], &[("R", vec![("bad", v_ext_index(0))])]);
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    // -- Real files from the official 3D platformer demo (pat-33wmr) --
+
+    fn platformer_3d(rel: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../games/platformer_3d")
+            .join(rel);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// The level itself: `grid_map.scn` is RSCC (zstd) on disk. It used to be
+    /// rejected as "compressed binary resource (RSCC) is not supported".
+    #[test]
+    fn real_rscc_scene_loads_as_a_packed_scene_with_its_bundle() {
+        let data = platformer_3d("stage/grid_map.scn");
+        assert_eq!(&data[..4], b"RSCC");
+        assert!(is_binary_resource(&data));
+        assert!(!is_res_binary(&data), "RSCC is not the plain RSRC magic");
+
+        let res = load_res_binary(&data, "res://stage/grid_map.scn").expect("RSCC scene loads");
+        assert_eq!(res.class_name, "PackedScene");
+        let Some(Variant::Dictionary(bundle)) = res.get_property("_bundled") else {
+            panic!("PackedScene has no _bundled dictionary");
+        };
+        let Some(Variant::PackedStringArray(names)) = bundle.get("names") else {
+            panic!("bundle has no names");
+        };
+        assert_eq!(names[0], "GridMap");
+        assert!(names.iter().any(|n| n == "mesh_library"));
+        assert_eq!(bundle.get("node_count"), Some(Variant::Int(1)));
+
+        // The MeshLibrary is the scene's one external resource.
+        let ext: Vec<_> = res.ext_resources.values().collect();
+        assert_eq!(ext.len(), 1);
+        assert_eq!(ext[0].path, "res://stage/tiles.tres");
+        assert_eq!(ext[0].resource_type, "MeshLibrary");
+
+        // The cell data rides in the variants array: a {"cells": PackedInt32Array}
+        // whose length is a whole number of (x/y, z, item) triples.
+        let Some(Variant::Array(variants)) = bundle.get("variants") else {
+            panic!("bundle has no variants");
+        };
+        let cells = variants
+            .to_vec()
+            .into_iter()
+            .find_map(|v| match v {
+                Variant::Dictionary(d) => match d.get("cells") {
+                    Some(Variant::PackedInt32Array(c)) => Some(c),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a cells array in the variants");
+        assert!(cells.len() > 300, "only {} cell words", cells.len());
+        assert_eq!(cells.len() % 3, 0);
+    }
+
+    /// A binary `ArrayMesh` `.res` carries its geometry as `_surfaces`.
+    #[test]
+    fn real_binary_array_mesh_res_loads_its_surface() {
+        let data = platformer_3d("stage/meshes/floor.res");
+        let res = load_resource_bytes(&data, "res://stage/meshes/floor.res").unwrap();
+        assert_eq!(res.class_name, "ArrayMesh");
+        let Some(Variant::Array(surfaces)) = res.get_property("_surfaces") else {
+            panic!("ArrayMesh has no _surfaces");
+        };
+        let surface = match &surfaces.to_vec()[0] {
+            Variant::Dictionary(d) => d.clone(),
+            other => panic!("surface is {other:?}"),
+        };
+        assert_eq!(surface.get("vertex_count"), Some(Variant::Int(4)));
+        assert_eq!(surface.get("index_count"), Some(Variant::Int(6)));
+        assert!(
+            matches!(surface.get("vertex_data"), Some(Variant::PackedByteArray(b)) if b.len() == 80)
+        );
+        // The material is the external tile_material.tres.
+        assert_eq!(
+            res.ext_resources.get("0").map(|e| e.path.as_str()),
+            Some("res://stage/tile_material.tres")
+        );
+    }
+
+    /// A binary collision shape `.res` (ConvexPolygonShape3D) keeps its hull.
+    #[test]
+    fn real_binary_convex_shape_res_loads_its_points() {
+        let data = platformer_3d("stage/collision/corner.res");
+        let res = load_resource_bytes(&data, "res://stage/collision/corner.res").unwrap();
+        assert_eq!(res.class_name, "ConvexPolygonShape3D");
+        let Some(Variant::PackedVector3Array(points)) = res.get_property("points") else {
+            panic!("no points: {:?}", res.get_property("points"));
+        };
+        assert_eq!(points.len(), 10);
+        assert!(points
+            .iter()
+            .all(|p| p.x.abs() <= 1.0 && p.y.abs() <= 1.0 && p.z.abs() <= 1.0));
+    }
+
+    /// The same entry point still loads a text `.tres` (sniffed, not by
+    /// extension), so callers can route every resource file through it.
+    #[test]
+    fn load_resource_bytes_falls_back_to_the_text_format() {
+        let data = platformer_3d("stage/collision/box.tres");
+        let res = load_resource_bytes(&data, "res://stage/collision/box.tres").unwrap();
+        assert_eq!(res.class_name, "BoxShape3D");
+        let err = load_resource_bytes(&[0xff, 0xfe, 0x00, 0x01], "res://x.res").unwrap_err();
+        assert!(err.to_string().contains("neither"), "{err}");
     }
 }

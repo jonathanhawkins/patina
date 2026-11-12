@@ -6,6 +6,11 @@
 
 use gdvariant::variant::Variant;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Re-exported so renderers can build a sampler without depending on
+/// `gdresource` themselves (pat-s3rrv.36).
+pub use gdresource::shader_ast::Sampler;
 
 /// The type of shader program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,14 +95,43 @@ impl Shader {
 /// shader uniform declarations without a full GLSL/Godot-shading-language parser.
 pub fn parse_uniforms(source: &str) -> Vec<ShaderUniform> {
     let mut uniforms = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
+
+    // ⚠️ Scans DECLARATIONS, not raw source lines. A `.tscn` stores a shader as a single
+    // `code = "..."` string, so the whole program arrives on ONE line beginning
+    // with `shader_type` — and a line-based scan gated on
+    // `starts_with("uniform ")` then finds NOTHING. Every uniform in every
+    // scene-authored shader was invisible, which is why a
+    // `hint_screen_texture` sampler fell through to the item's own texture and
+    // a sprite sampled itself (pat-s3rrv.202).
+    //
+    // Comments are stripped first: once statements rather than lines are the
+    // unit, a `// note` above a declaration would otherwise sit inside the same
+    // `;`-segment and stop it matching. A bare `//` scan is safe here because
+    // the shading language has no string literals for one to hide in.
+    let decommented: String = source
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // ⚠️ `;` alone is NOT enough to separate statements. `void fragment() {}`
+    // carries no semicolon, so a `;`-only split swallows the declaration that
+    // follows it — `parse_multiple_uniforms` drops from three uniforms to two.
+    // Braces are separators too. Turning all three into newlines and then
+    // scanning LINES keeps every declaration the old line-based scan found
+    // (line breaks survive the replacement) and adds the ones sharing a line.
+    let normalized = decommented.replace(&[';', '{', '}'][..], "\n");
+
+    for statement in normalized.lines() {
+        let trimmed = statement.trim();
         if !trimmed.starts_with("uniform ") {
             continue;
         }
-        // Strip trailing semicolon
-        let trimmed = trimmed.trim_end_matches(';').trim();
-        // "uniform TYPE name [: hint] [= default]"
+        // "uniform TYPE name [: hint] [= default]" — any trailing `;` became
+        // the newline that ended this piece, so there is none left to strip.
         let rest = &trimmed["uniform ".len()..];
         let mut parts = rest.splitn(2, char::is_whitespace);
         let type_str = match parts.next() {
@@ -160,21 +194,16 @@ fn parse_uniform_type(s: &str) -> Option<UniformType> {
 }
 
 /// Best-effort default value parse for simple literals.
+/// pat-s3rrv.36: delegates to the shared parser in `gdresource`, which the 3D
+/// renderer uses too. Both crates carried byte-identical copies that understood
+/// only `true`/`false`/int/float, so a `vec4` default silently became
+/// `Variant::Nil` and the uniform read as zero.
+///
+/// `_utype` stays unused: the literal names its own arity (`vec3(...)` is a
+/// vec3 whatever the declaration says), and trusting the constructor keeps a
+/// mismatched declaration a visible Nil rather than a coerced wrong value.
 fn parse_default_value(s: &str, _utype: UniformType) -> Variant {
-    let s = s.trim();
-    if s == "true" {
-        return Variant::Bool(true);
-    }
-    if s == "false" {
-        return Variant::Bool(false);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return Variant::Int(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Variant::Float(f);
-    }
-    Variant::Nil
+    gdresource::shader_tokenizer::parse_shader_default_value(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,16 +242,26 @@ impl ShaderMaterial {
 
 /// A compiled shader program ready for execution.
 ///
-/// Stores the parsed uniforms and the shader "program" (currently the source
-/// string — a future implementation would hold bytecode or an IR).
+/// Stores the parsed uniforms, the original source, an optional WGSL
+/// translation (for `canvas_item` shaders — the GPU-runnable subset), and the
+/// list of source constructs that fell outside the translated subset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledShader {
     /// The shader pipeline stage.
     pub shader_type: ShaderType,
     /// Parsed uniform declarations.
     pub uniforms: Vec<ShaderUniform>,
-    /// The compiled program representation (currently just the source).
+    /// The compiled program representation (the original source).
     pub program: String,
+    /// Generated WGSL fragment program for GPU execution.
+    ///
+    /// `Some` for `canvas_item` shaders (the supported subset); `None` for
+    /// shader stages this backend does not translate to WGSL.
+    pub wgsl_program: Option<String>,
+    /// Human-readable list of source constructs that are *not* represented in
+    /// the WGSL translation (see [`unsupported_features`]). Empty when the
+    /// whole shader lies within the supported subset.
+    pub unsupported: Vec<String>,
 }
 
 impl CompiledShader {
@@ -251,12 +290,26 @@ impl ShaderCompiler {
     }
 
     /// Compiles shader source into a [`CompiledShader`].
+    ///
+    /// For `canvas_item` shaders this also translates the recognised
+    /// `fragment()` subset into a runnable WGSL fragment program (see
+    /// [`generate_canvas_item_wgsl`]) and records any source constructs that
+    /// fell outside the supported subset (see [`unsupported_features`]).
     pub fn compile(&self, shader_type: ShaderType, source: &str) -> CompiledShader {
         let uniforms = parse_uniforms(source);
+        let unsupported = unsupported_features(source, shader_type);
+        let wgsl_program = match shader_type {
+            ShaderType::CanvasItem => Some(generate_canvas_item_wgsl(&uniforms, source)),
+            // Spatial shaders are translated by `gdserver3d`; particle/sky
+            // stages are not part of this backend's supported subset.
+            _ => None,
+        };
         CompiledShader {
             shader_type,
             uniforms,
             program: source.to_string(),
+            wgsl_program,
+            unsupported,
         }
     }
 }
@@ -321,6 +374,10 @@ pub struct FragmentContext {
     pub screen_uv: (f32, f32),
     /// Time elapsed in seconds (for animated shaders).
     pub time: f32,
+    /// The sky stage's view direction (Godot's `EYEDIR`), as a unit vector
+    /// (pat-nzgdu.139). Unused — and left at zero — by canvas_item shaders,
+    /// which have no such built-in.
+    pub eyedir: (f32, f32, f32),
 }
 
 impl Default for FragmentContext {
@@ -330,6 +387,7 @@ impl Default for FragmentContext {
             uv: (0.0, 0.0),
             screen_uv: (0.0, 0.0),
             time: 0.0,
+            eyedir: (0.0, 0.0, 0.0),
         }
     }
 }
@@ -350,6 +408,18 @@ pub enum FragmentInstruction {
     MultiplyColorRgb(FloatExpr),
     /// `COLOR *= <float>` — multiplies all channels by a scalar.
     MultiplyColor(FloatExpr),
+    /// The whole shader, parsed by the real GDShader front end (pat-s3rrv.36).
+    ///
+    /// The variants above are a five-shape line matcher that silently skips any
+    /// statement it cannot classify — a shader with a local variable or an `if`
+    /// produced *zero* instructions and rendered unshaded, with no diagnostic.
+    /// When `gdresource::shader_ast` can parse the source, the entire program is
+    /// carried here instead and evaluated per fragment.
+    ///
+    /// `Arc` because a program is parsed once per shader source and shared by
+    /// every fragment; `PartialEq` on the enum still works because
+    /// `ShaderProgram` derives it.
+    Program(Arc<gdresource::shader_ast::ShaderProgram>),
 }
 
 /// An expression that evaluates to a color value.
@@ -365,6 +435,18 @@ pub enum ColorExpr {
     BuiltinColor,
     /// `mix(a, b, t)` — linear interpolation of two colors.
     Mix(Box<ColorExpr>, Box<ColorExpr>, FloatExpr),
+    /// A `vec3`/`vec4` built from per-component expressions, e.g.
+    /// `vec3(EYEDIR.y, 0.0, 1.0)` (pat-nzgdu.139).
+    ///
+    /// [`Literal`](Self::Literal) only covers constant components; this covers
+    /// the case where a component references a built-in or uniform. A `vec3`
+    /// parses with an alpha of `1.0`.
+    Components(
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+    ),
 }
 
 /// An expression that evaluates to a float value.
@@ -378,6 +460,18 @@ pub enum FloatExpr {
     BuiltinTime,
     /// `UV.x` or `UV.y`.
     UvComponent(UvAxis),
+    /// `SCREEN_UV.x` or `SCREEN_UV.y` — the fragment's position in screen space
+    /// (pat-0q2kx.223).
+    ///
+    /// The renderer has been supplying this all along:
+    /// `gdrender2d/src/draw.rs:870` fills `FragmentContext::screen_uv` for every
+    /// fragment. Nothing could reference it, because the expression parser had
+    /// no `SCREEN_UV` case — a live producer wired to a dead consumer.
+    ScreenUvComponent(UvAxis),
+    /// `EYEDIR.x`, `.y` or `.z` — the sky stage's view direction
+    /// (pat-nzgdu.139). Evaluates to `0.0` outside a sky shader, where Godot
+    /// does not expose this built-in.
+    EyeDirComponent(Vec3Axis),
     /// `sin(expr)`.
     Sin(Box<FloatExpr>),
 }
@@ -387,6 +481,35 @@ pub enum FloatExpr {
 pub enum UvAxis {
     X,
     Y,
+}
+
+/// Which component of a `vec3` built-in (e.g. `EYEDIR`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vec3Axis {
+    /// The `x` component.
+    X,
+    /// The `y` component.
+    Y,
+    /// The `z` component.
+    Z,
+}
+
+/// Whether `(`/`)` and `[`/`]` pair up in one statement.
+fn brackets_balance(stmt: &str) -> bool {
+    let mut stack = Vec::new();
+    for c in stmt.chars() {
+        match c {
+            '(' | '[' => stack.push(c),
+            ')' if stack.pop() != Some('(') => {
+                return false;
+            }
+            ']' if stack.pop() != Some('[') => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    stack.is_empty()
 }
 
 /// Parses a Godot shader's `fragment()` function body into instructions.
@@ -403,12 +526,103 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
     };
 
     // Parse statements line-by-line (simplified).
+    let mut skipped_any = false;
     for line in body.lines() {
         let trimmed = line.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
 
+        // A statement with unbalanced brackets is malformed, whatever prefix
+        // the lenient matcher recognises: `COLOR = vec4(1.0, 0.0;` used to be
+        // accepted as a SetColor, so the broken shader never reached the
+        // front end and its syntax error was never reported.
+        let balanced = brackets_balance(trimmed);
+        match parse_fragment_statement(trimmed).filter(|_| balanced) {
+            Some(inst) => instructions.push(inst),
+            None => skipped_any = true,
+        }
+    }
+
+    // pat-s3rrv.36: when the line matcher above did not understand EVERY
+    // statement, hand the whole source to the real GDShader front end.
+    //
+    // Deliberately a fallback rather than a replacement. A shader the matcher
+    // fully handles keeps its exact existing path, so this cannot regress
+    // anything that renders correctly today. A shader it only PARTLY handles
+    // is already wrong: fixtures/shaders/outline.gdshader declares locals and
+    // ends in `COLOR = vec4(final.rgb, alpha)`, which the matcher accepts as a
+    // SetColor whose locals it cannot resolve while silently dropping the six
+    // lines that compute them. Falling back only on an EMPTY result let that
+    // one bogus instruction mask the whole shader. Letting the AST preempt the
+    // matcher outright is the end state, but only once every built-in the
+    // matcher implies is populated for the AST path.
+    //
+    // ⚠️ `skipped_any` alone, not `|| instructions.is_empty()`: every body the
+    // matcher failed on already sets `skipped_any`, so the extra clause only
+    // ever added the EMPTY body (`void fragment() {}`) — which then came back
+    // as a Program, made the WGSL translator report "constructs beyond the
+    // translator" for a shader that does nothing, and pushed it onto the CPU.
+    if skipped_any {
+        if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
+            if program.function("fragment").is_some() {
+                return vec![FragmentInstruction::Program(Arc::new(program))];
+            }
+        }
+    }
+
+    instructions
+}
+
+/// [`parse_fragment_body`] that also reports WHY a shader produced nothing
+/// (pat-s3rrv.36).
+///
+/// Godot treats an unparsable shader as a compile error with a line number;
+/// Patina dropped it silently, which is the root of this bead — a broken shader
+/// and a shader that legitimately does nothing were indistinguishable. The
+/// plain [`parse_fragment_body`] keeps its lossy signature so existing callers
+/// are untouched; a caller that wants to surface the error uses this instead.
+///
+/// `Ok` with an empty vec is still possible and still meaningful: it is a source
+/// with no `fragment()` function at all, which is legal.
+pub fn parse_fragment_body_checked(
+    source: &str,
+) -> Result<Vec<FragmentInstruction>, gdresource::shader_ast::ShaderError> {
+    let instructions = parse_fragment_body(source);
+    if !instructions.is_empty() {
+        return Ok(instructions);
+    }
+    // Nothing came out. Distinguish "there is no fragment() here" (fine) from
+    // "the source is broken" (a diagnostic the author needs).
+    match gdresource::shader_ast::parse_shader(source) {
+        Ok(_) => Ok(instructions),
+        Err(e) => Err(e),
+    }
+}
+
+/// Parses a `shader_type sky` program's `sky()` function body into the same
+/// instruction set as [`parse_fragment_body`] (pat-nzgdu.139).
+///
+/// Godot's sky stage writes `COLOR` (a `vec3`) from built-ins such as `EYEDIR`.
+/// Execute the result with [`execute_fragment`], passing a [`FragmentContext`]
+/// whose [`eyedir`](FragmentContext::eyedir) is the view direction for the pixel
+/// being shaded.
+///
+/// Returns an empty vec when the source has no `sky()` body — so a canvas_item
+/// shader parsed as sky (or vice versa) yields nothing rather than misfiring.
+pub fn parse_sky_body(source: &str) -> Vec<FragmentInstruction> {
+    let mut instructions = Vec::new();
+
+    let body = match extract_function_body(source, "sky") {
+        Some(b) => b,
+        None => return instructions,
+    };
+
+    for line in body.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
         if let Some(inst) = parse_fragment_statement(trimmed) {
             instructions.push(inst);
         }
@@ -446,6 +660,23 @@ fn extract_function_body<'a>(source: &'a str, func_name: &str) -> Option<&'a str
     None
 }
 
+/// Whether an expression samples a texture.
+///
+/// `ColorExpr` has no way to represent a sampler tap, so `parse_color_expr`
+/// falls all the way through to `ColorExpr::BuiltinColor` — the INCOMING colour
+/// — and `COLOR = texture(SCREEN_TEXTURE, UV)` silently renders as an unshaded
+/// passthrough rather than as an error (pat-s3rrv.183).
+///
+/// Declining the statement instead leaves the instruction list empty, which is
+/// exactly the condition that hands the shader to the AST evaluator in
+/// `parse_fragment_body` — and that path DOES sample, through the renderer's
+/// `Sampler`. So this turns a wrong answer into a right one; it cannot make a
+/// shader that renders correctly today render differently, because a shader
+/// reaching this branch was being ignored.
+fn samples_a_texture(expr: &str) -> bool {
+    expr.contains("texture(") || expr.contains("textureLod(")
+}
+
 /// Parses a single fragment statement.
 fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
     // COLOR.a = <expr>
@@ -453,6 +684,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColorAlpha(parse_float_expr(val)));
         }
     }
@@ -466,6 +700,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         }
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColorRgb(parse_color_expr(val)));
         }
     }
@@ -479,6 +716,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         }
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColor(parse_color_expr(val)));
         }
     }
@@ -529,6 +769,45 @@ fn parse_color_expr(s: &str) -> ColorExpr {
         return ColorExpr::Uniform(s.to_string());
     }
 
+    // pat-nzgdu.139: constructors whose components are not all literals, e.g.
+    // `vec3(EYEDIR.y, 0.0, 1.0)`. The all-literal `vec4` forms above already
+    // returned, so reaching here means at least one component is an expression.
+    // `split_top_level_commas` (not `split(',')`) keeps nested calls intact.
+    if let Some(inner) = strip_func_call(s, "vec4") {
+        let parts = split_top_level_commas(inner);
+        if parts.len() == 4 {
+            return ColorExpr::Components(
+                Box::new(parse_float_expr(parts[0])),
+                Box::new(parse_float_expr(parts[1])),
+                Box::new(parse_float_expr(parts[2])),
+                Box::new(parse_float_expr(parts[3])),
+            );
+        }
+    }
+
+    // `vec3(r, g, b)` — the sky stage's COLOR is a vec3, so alpha is 1.0.
+    if let Some(inner) = strip_func_call(s, "vec3") {
+        let parts = split_top_level_commas(inner);
+        if parts.len() == 3 {
+            return ColorExpr::Components(
+                Box::new(parse_float_expr(parts[0])),
+                Box::new(parse_float_expr(parts[1])),
+                Box::new(parse_float_expr(parts[2])),
+                Box::new(FloatExpr::Literal(1.0)),
+            );
+        }
+        if parts.len() == 1 {
+            // `vec3(v)` splat.
+            let c = parse_float_expr(parts[0]);
+            return ColorExpr::Components(
+                Box::new(c.clone()),
+                Box::new(c.clone()),
+                Box::new(c),
+                Box::new(FloatExpr::Literal(1.0)),
+            );
+        }
+    }
+
     ColorExpr::BuiltinColor
 }
 
@@ -544,11 +823,32 @@ fn parse_float_expr(s: &str) -> FloatExpr {
         return FloatExpr::BuiltinTime;
     }
 
+    // SCREEN_UV must be tested BEFORE UV: a suffix check would be fine here,
+    // but these are exact comparisons and `"SCREEN_UV.x" == "UV.x"` is false —
+    // the ordering matters only if either is ever relaxed to `ends_with`.
+    if s == "SCREEN_UV.x" {
+        return FloatExpr::ScreenUvComponent(UvAxis::X);
+    }
+    if s == "SCREEN_UV.y" {
+        return FloatExpr::ScreenUvComponent(UvAxis::Y);
+    }
+
     if s == "UV.x" {
         return FloatExpr::UvComponent(UvAxis::X);
     }
     if s == "UV.y" {
         return FloatExpr::UvComponent(UvAxis::Y);
+    }
+
+    // Sky stage view direction (pat-nzgdu.139).
+    if s == "EYEDIR.x" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::X);
+    }
+    if s == "EYEDIR.y" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::Y);
+    }
+    if s == "EYEDIR.z" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::Z);
     }
 
     if let Some(inner) = strip_func_call(s, "sin") {
@@ -603,6 +903,11 @@ pub fn eval_float_expr(
         FloatExpr::BuiltinTime => ctx.time,
         FloatExpr::UvComponent(UvAxis::X) => ctx.uv.0,
         FloatExpr::UvComponent(UvAxis::Y) => ctx.uv.1,
+        FloatExpr::ScreenUvComponent(UvAxis::X) => ctx.screen_uv.0,
+        FloatExpr::ScreenUvComponent(UvAxis::Y) => ctx.screen_uv.1,
+        FloatExpr::EyeDirComponent(Vec3Axis::X) => ctx.eyedir.0,
+        FloatExpr::EyeDirComponent(Vec3Axis::Y) => ctx.eyedir.1,
+        FloatExpr::EyeDirComponent(Vec3Axis::Z) => ctx.eyedir.2,
         FloatExpr::Uniform(name) => match uniforms.get(name) {
             Some(Variant::Float(f)) => *f as f32,
             Some(Variant::Int(i)) => *i as f32,
@@ -626,6 +931,12 @@ pub fn eval_color_expr(
             Some(Variant::Color(c)) => *c,
             _ => ctx.color,
         },
+        ColorExpr::Components(r, g, b, a) => gdcore::math::Color::new(
+            eval_float_expr(r, ctx, uniforms),
+            eval_float_expr(g, ctx, uniforms),
+            eval_float_expr(b, ctx, uniforms),
+            eval_float_expr(a, ctx, uniforms),
+        ),
         ColorExpr::Mix(a, b, t) => {
             let ca = eval_color_expr(a, ctx, uniforms);
             let cb = eval_color_expr(b, ctx, uniforms);
@@ -640,6 +951,78 @@ pub fn eval_color_expr(
     }
 }
 
+/// Converts a script/material uniform into a shader value (pat-s3rrv.36).
+///
+/// `None` for types with no shader equivalent (strings, node paths); the
+/// evaluator then reports the name as undeclared rather than silently reading a
+/// zero, which is the behaviour that made the old matcher untrustworthy.
+fn uniform_to_shader_value(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
+    use gdresource::shader_ast::ShaderValue as SV;
+    Some(match v {
+        Variant::Bool(b) => SV::Bool(*b),
+        Variant::Int(i) => SV::Int(*i),
+        Variant::Float(f) => SV::Float(*f as f32),
+        Variant::Vector2(v) => SV::Vec2([v.x, v.y]),
+        Variant::Vector3(v) => SV::Vec3([v.x, v.y, v.z]),
+        Variant::Color(c) => SV::Vec4([c.r, c.g, c.b, c.a]),
+        _ => return None,
+    })
+}
+
+/// Runs a parsed shader's `fragment()` for one pixel (pat-s3rrv.36).
+///
+/// Returns `None` when the shader fails to evaluate or `discard`s, leaving the
+/// caller's colour untouched — a `discard`ed fragment must not be written.
+fn eval_ast_fragment(
+    program: &gdresource::shader_ast::ShaderProgram,
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+    env: &ShaderEnv,
+) -> Option<gdcore::math::Color> {
+    use gdresource::shader_ast::{eval_function, ShaderValue as SV, StageContext};
+
+    let uniform_values: HashMap<String, SV> = uniforms
+        .iter()
+        .filter_map(|(k, v)| uniform_to_shader_value(v).map(|sv| (k.clone(), sv)))
+        .collect();
+
+    // Godot's canvas_item fragment built-ins that this renderer can supply.
+    // COLOR arrives pre-modulated, matching the default `COLOR =
+    // texture(TEXTURE, UV) * MODULATE` the caller already applied.
+    let mut builtins: HashMap<String, SV> = HashMap::new();
+    builtins.insert(
+        "COLOR".to_string(),
+        SV::Vec4([ctx.color.r, ctx.color.g, ctx.color.b, ctx.color.a]),
+    );
+    builtins.insert("UV".to_string(), SV::Vec2([ctx.uv.0, ctx.uv.1]));
+    builtins.insert(
+        "SCREEN_UV".to_string(),
+        SV::Vec2([ctx.screen_uv.0, ctx.screen_uv.1]),
+    );
+    builtins.insert("TIME".to_string(), SV::Float(ctx.time));
+    builtins.insert(
+        "TEXTURE_PIXEL_SIZE".to_string(),
+        SV::Vec2([env.texture_pixel_size.0, env.texture_pixel_size.1]),
+    );
+
+    let mut stage = StageContext::new(uniform_values, builtins);
+    if let Some(sampler) = &env.sampler {
+        stage = stage.with_sampler(sampler.clone());
+    }
+
+    // A shader that fails at runtime leaves the pixel as the caller had it,
+    // rather than punching a hole in the sprite.
+    eval_function(program, "fragment", &mut stage).ok()?;
+    if stage.discarded {
+        return None;
+    }
+    match stage.builtins.get("COLOR") {
+        Some(SV::Vec4(c)) => Some(gdcore::math::Color::new(c[0], c[1], c[2], c[3])),
+        Some(SV::Vec3(c)) => Some(gdcore::math::Color::new(c[0], c[1], c[2], ctx.color.a)),
+        _ => None,
+    }
+}
+
 /// Executes parsed fragment instructions against a context.
 ///
 /// Returns the resulting output color.
@@ -648,10 +1031,44 @@ pub fn execute_fragment(
     ctx: &FragmentContext,
     uniforms: &HashMap<String, Variant>,
 ) -> gdcore::math::Color {
+    execute_fragment_with_env(instructions, ctx, uniforms, &ShaderEnv::default())
+}
+
+/// Per-draw values the fragment stage needs that [`FragmentContext`] does not
+/// carry, because they belong to the *renderer* rather than the pixel
+/// (pat-s3rrv.36).
+///
+/// A separate struct rather than new `FragmentContext` fields: that type has
+/// ~16 construction sites, only some using `..Default::default()`, and every
+/// full literal would have to be edited. This also keeps the texture out of
+/// `gdserver2d` entirely — `Texture2D` lives in `gdrender2d`, so the sampler can
+/// only ever arrive as a caller-supplied closure.
+#[derive(Debug, Clone, Default)]
+pub struct ShaderEnv {
+    /// Resolves `texture(SAMPLER, uv)`. `None` samples transparent black.
+    pub sampler: Option<gdresource::shader_ast::Sampler>,
+    /// Godot's `TEXTURE_PIXEL_SIZE`: one texel in UV units. Zero when unknown,
+    /// which makes neighbour-tap shaders sample their own texel — visually a
+    /// no-op rather than a wrong offset.
+    pub texture_pixel_size: (f32, f32),
+}
+
+/// [`execute_fragment`] with renderer-supplied environment (pat-s3rrv.36).
+pub fn execute_fragment_with_env(
+    instructions: &[FragmentInstruction],
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+    env: &ShaderEnv,
+) -> gdcore::math::Color {
     let mut color = ctx.color;
 
     for inst in instructions {
         match inst {
+            FragmentInstruction::Program(program) => {
+                if let Some(c) = eval_ast_fragment(program, ctx, uniforms, env) {
+                    color = c;
+                }
+            }
             FragmentInstruction::SetColor(expr) => {
                 color = eval_color_expr(expr, ctx, uniforms);
             }
@@ -681,6 +1098,357 @@ pub fn execute_fragment(
     }
 
     color
+}
+
+// ---------------------------------------------------------------------------
+// GDShader (canvas_item) -> WGSL translation
+// ---------------------------------------------------------------------------
+
+/// Maps a [`UniformType`] to the WGSL type used in the generated
+/// `MaterialUniforms` struct / texture bindings.
+pub fn uniform_type_to_wgsl(ty: UniformType) -> &'static str {
+    match ty {
+        UniformType::Float => "f32",
+        UniformType::Vec2 => "vec2<f32>",
+        UniformType::Vec3 => "vec3<f32>",
+        UniformType::Vec4 => "vec4<f32>",
+        UniformType::Color => "vec4<f32>",
+        UniformType::Int => "i32",
+        UniformType::Bool => "u32", // WGSL uniform buffers cannot hold `bool`.
+        UniformType::Sampler2D => "texture_2d<f32>",
+        UniformType::Mat4 => "mat4x4<f32>",
+    }
+}
+
+/// Formats an `f32` as a WGSL float literal (always carrying a decimal point,
+/// so integer-valued constants are not parsed as abstract ints).
+fn wgsl_f32(v: f32) -> String {
+    if !v.is_finite() {
+        // WGSL has no inf/NaN literal; fall back to 0.0 to keep output valid.
+        return "0.0".to_string();
+    }
+    let s = format!("{v}");
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+/// Translates a [`FloatExpr`] to a WGSL `f32` expression.
+///
+/// `uniforms` is the set of non-sampler uniform names; a reference to an
+/// undeclared name degrades to `0.0` so the generated module stays valid.
+fn float_expr_to_wgsl(expr: &FloatExpr, uniforms: &[&str]) -> String {
+    match expr {
+        FloatExpr::Literal(v) => wgsl_f32(*v),
+        FloatExpr::BuiltinTime => "globals.time".to_string(),
+        FloatExpr::UvComponent(UvAxis::X) => "UV.x".to_string(),
+        FloatExpr::UvComponent(UvAxis::Y) => "UV.y".to_string(),
+        // SCREEN_UV resolves on the CPU path, where the software renderer
+        // supplies it per fragment (gdrender2d/src/draw.rs). This emitter has
+        // no equivalent: the generated WGSL declares `UV` from `in.uv` but
+        // nothing carries screen position, so `SCREEN_UV.x` would be an
+        // undefined identifier and the whole program would fail to compile.
+        // Degrade to 0.0 like EYEDIR below — a GPU/CPU divergence, and the
+        // reason the wgpu path still needs the screen-texture work this bead
+        // describes (pat-0q2kx.223).
+        FloatExpr::ScreenUvComponent(_) => "0.0".to_string(),
+        // EYEDIR is a sky-stage built-in with no canvas_item counterpart. This
+        // emitter only generates canvas_item programs, so degrade to 0.0 —
+        // matching what the CPU interpreter yields outside a sky shader — rather
+        // than emitting an undefined WGSL identifier (pat-nzgdu.139).
+        FloatExpr::EyeDirComponent(_) => "0.0".to_string(),
+        FloatExpr::Uniform(name) => {
+            if uniforms.contains(&name.as_str()) {
+                format!("material.{name}")
+            } else {
+                "0.0".to_string()
+            }
+        }
+        FloatExpr::Sin(inner) => format!("sin({})", float_expr_to_wgsl(inner, uniforms)),
+    }
+}
+
+/// Translates a [`ColorExpr`] to a WGSL `vec4<f32>` expression.
+///
+/// A reference to an undeclared uniform degrades to the built-in `COLOR`
+/// (passthrough) so the generated module stays valid.
+fn color_expr_to_wgsl(expr: &ColorExpr, uniforms: &[&str]) -> String {
+    match expr {
+        ColorExpr::Literal(r, g, b, a) => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            wgsl_f32(*r),
+            wgsl_f32(*g),
+            wgsl_f32(*b),
+            wgsl_f32(*a)
+        ),
+        ColorExpr::Splat(v) => format!("vec4<f32>({})", wgsl_f32(*v)),
+        ColorExpr::BuiltinColor => "COLOR".to_string(),
+        ColorExpr::Uniform(name) => {
+            if uniforms.contains(&name.as_str()) {
+                format!("material.{name}")
+            } else {
+                "COLOR".to_string()
+            }
+        }
+        // Per-component constructor, e.g. `vec4(UV.x, 0.0, 0.0, 1.0)`
+        // (pat-nzgdu.139) — translate each component in turn.
+        ColorExpr::Components(r, g, b, a) => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            float_expr_to_wgsl(r, uniforms),
+            float_expr_to_wgsl(g, uniforms),
+            float_expr_to_wgsl(b, uniforms),
+            float_expr_to_wgsl(a, uniforms)
+        ),
+        ColorExpr::Mix(a, b, t) => format!(
+            "mix({}, {}, {})",
+            color_expr_to_wgsl(a, uniforms),
+            color_expr_to_wgsl(b, uniforms),
+            float_expr_to_wgsl(t, uniforms)
+        ),
+    }
+}
+
+/// Generates a runnable WGSL fragment program from a Godot `canvas_item`
+/// shader source.
+///
+/// The generated module mirrors the CPU interpreter ([`execute_fragment`]):
+/// `COLOR` is initialised to `textureSample(TEXTURE, ..., UV) * MODULATE`, then
+/// the recognised `fragment()` statements are applied in order. Non-sampler
+/// uniforms are collected into a `MaterialUniforms` struct (bind group 2); the
+/// `TIME` built-in, when used, is sourced from a `Globals` uniform (group 0).
+///
+/// Constructs outside the supported subset are silently skipped here — call
+/// [`unsupported_features`] to enumerate them.
+pub fn generate_canvas_item_wgsl(uniforms: &[ShaderUniform], source: &str) -> String {
+    let instructions = parse_fragment_body(source);
+
+    let buffer_uniforms: Vec<&ShaderUniform> = uniforms
+        .iter()
+        .filter(|u| u.uniform_type != UniformType::Sampler2D)
+        .collect();
+    let uni_names: Vec<&str> = buffer_uniforms.iter().map(|u| u.name.as_str()).collect();
+
+    // Translate the fragment body first so we can tell which built-ins are used.
+    let mut body = String::new();
+    for inst in &instructions {
+        match inst {
+            // pat-s3rrv.36: an AST-routed shader has no WGSL translation yet.
+            // This function returns a String and cannot decline, so the body is
+            // left empty for it and `unsupported_features` reports the reason —
+            // that is the channel callers already use to gate the GPU path.
+            // Emitting nothing WITHOUT that report would silently render an
+            // unshaded sprite on GPU while the CPU interpreter rendered it
+            // correctly, which is the exact class of silent divergence this
+            // bead exists to remove.
+            FragmentInstruction::Program(_) => continue,
+            FragmentInstruction::SetColor(e) => {
+                body.push_str(&format!(
+                    "    COLOR = {};\n",
+                    color_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::SetColorRgb(e) => {
+                body.push_str(&format!(
+                    "    COLOR = vec4<f32>(({}).rgb, COLOR.a);\n",
+                    color_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::SetColorAlpha(e) => {
+                body.push_str(&format!(
+                    "    COLOR.a = {};\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::MultiplyColorRgb(e) => {
+                body.push_str(&format!(
+                    "    COLOR = vec4<f32>(COLOR.rgb * ({}), COLOR.a);\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::MultiplyColor(e) => {
+                body.push_str(&format!(
+                    "    COLOR = COLOR * ({});\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+        }
+    }
+    let uses_time = body.contains("globals.time");
+
+    let mut wgsl = String::with_capacity(1024);
+    wgsl.push_str("// Auto-generated WGSL from Godot `canvas_item` shader source.\n");
+    wgsl.push_str("// Fragment-stage subset — regenerated on each compilation.\n\n");
+
+    if uses_time {
+        wgsl.push_str("struct Globals {\n    time: f32,\n}\n");
+        wgsl.push_str("@group(0) @binding(0)\nvar<uniform> globals: Globals;\n\n");
+    }
+
+    if !buffer_uniforms.is_empty() {
+        wgsl.push_str("struct MaterialUniforms {\n");
+        for u in &buffer_uniforms {
+            wgsl.push_str(&format!(
+                "    {}: {},\n",
+                u.name,
+                uniform_type_to_wgsl(u.uniform_type)
+            ));
+        }
+        wgsl.push_str("}\n");
+        wgsl.push_str("@group(2) @binding(0)\nvar<uniform> material: MaterialUniforms;\n\n");
+    }
+
+    // A canvas_item always exposes the item's texture + sampler.
+    wgsl.push_str("@group(2) @binding(1) var TEXTURE: texture_2d<f32>;\n");
+    wgsl.push_str("@group(2) @binding(2) var TEXTURE_sampler: sampler;\n\n");
+
+    wgsl.push_str("struct FragmentInput {\n");
+    wgsl.push_str("    @location(0) uv: vec2<f32>,\n");
+    wgsl.push_str("    @location(1) modulate: vec4<f32>,\n");
+    wgsl.push_str("}\n\n");
+
+    wgsl.push_str("@fragment\n");
+    wgsl.push_str("fn fragment_main(in: FragmentInput) -> @location(0) vec4<f32> {\n");
+    wgsl.push_str("    let UV: vec2<f32> = in.uv;\n");
+    wgsl.push_str(
+        "    var COLOR: vec4<f32> = textureSample(TEXTURE, TEXTURE_sampler, UV) * in.modulate;\n",
+    );
+    wgsl.push_str(&body);
+    wgsl.push_str("    return COLOR;\n");
+    wgsl.push_str("}\n");
+
+    wgsl
+}
+
+/// Returns a WGSL-facing name for a shader stage.
+fn shader_type_name(ty: ShaderType) -> &'static str {
+    match ty {
+        ShaderType::Spatial => "spatial",
+        ShaderType::CanvasItem => "canvas_item",
+        ShaderType::Particles => "particles",
+        ShaderType::Sky => "sky",
+    }
+}
+
+/// Returns true if `source` contains a call/definition of `name(` at a word
+/// boundary (so `light(` does not match inside `highlight(`).
+fn contains_call(source: &str, name: &str) -> bool {
+    let pat = format!("{name}(");
+    let bytes = source.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = source[start..].find(pat.as_str()) {
+        let abs = start + rel;
+        let boundary = abs == 0 || {
+            let prev = bytes[abs - 1];
+            !(prev.is_ascii_alphanumeric() || prev == b'_')
+        };
+        if boundary {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Enumerates Godot shading-language constructs in `source` that fall *outside*
+/// the translated WGSL subset (see [`generate_canvas_item_wgsl`]).
+///
+/// The returned strings are human-readable and intended to be surfaced to the
+/// user (editor diagnostics, logs). An empty vector means the whole shader is
+/// within the supported subset. This is best-effort, not a full validator.
+/// Names of `uniform sampler2D` declarations carrying `: hint_screen_texture`
+/// (pat-s3rrv.202).
+///
+/// Godot has TWO spellings for reading the back buffer: the legacy built-in
+/// `SCREEN_TEXTURE`, and the modern `uniform sampler2D screen_tex :
+/// hint_screen_texture`. The renderer's sampler is handed the LITERAL name, so
+/// without this list a hint-declared uniform falls through to the item's own
+/// texture — a sprite sampling itself, which still produces plausible pixels and
+/// therefore looks like a working screen read.
+pub fn screen_texture_uniforms(source: &str) -> Vec<String> {
+    parse_uniforms(source)
+        .into_iter()
+        .filter(|u| {
+            u.hint
+                .as_deref()
+                .is_some_and(|h| h.trim() == "hint_screen_texture")
+        })
+        .map(|u| u.name)
+        .collect()
+}
+
+pub fn unsupported_features(source: &str, shader_type: ShaderType) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // pat-s3rrv.36: a source only the GDShader AST front end can represent (a
+    // local variable, an `if`, a loop, a user function) has no WGSL translation.
+    // Detected by asking the parser rather than by string-matching for keywords,
+    // so this stays true as the front end grows.
+    if parse_fragment_body(source)
+        .iter()
+        .any(|i| matches!(i, FragmentInstruction::Program(_)))
+    {
+        out.push(
+            "shader language constructs beyond the WGSL translator (locals, \
+             control flow, user functions) — runs on the CPU interpreter"
+                .to_string(),
+        );
+    }
+
+    if shader_type != ShaderType::CanvasItem {
+        out.push(format!(
+            "shader_type `{}` is not translated to WGSL (canvas_item only)",
+            shader_type_name(shader_type)
+        ));
+    }
+
+    if source.contains("#include") {
+        out.push("`#include` preprocessor directive".to_string());
+    }
+    if contains_call(source, "vertex") {
+        out.push("`vertex()` stage (only `fragment()` is translated)".to_string());
+    }
+    if contains_call(source, "light") {
+        out.push("`light()` custom lighting processor".to_string());
+    }
+    // ⚠️ NOT reported as unsupported any more (pat-s3rrv.202). The CPU canvas
+    // path samples the back buffer end to end: a `BackBufferCopy` item
+    // snapshots the framebuffer during rasterization, the snapshot is handed to
+    // the shaded draw, and the sampler resolves both `SCREEN_TEXTURE` and any
+    // `hint_screen_texture` uniform against it.
+    //
+    // Leaving the entry here would be the inverse of the usual defect — a
+    // WORKING feature advertised as broken, which is just as misleading and
+    // sends the next reader to reimplement something that already runs.
+    //
+    // The WGSL/GPU translation still does not bind a screen sampler, so a
+    // shader relying on it renders unshaded on that path only.
+    if matches!(shader_type, ShaderType::CanvasItem) && source.contains("textureLod(SCREEN") {
+        out.push("`textureLod` mip sampling of the screen buffer".to_string());
+    }
+    if source.contains("discard") {
+        out.push("`discard` statement".to_string());
+    }
+    if source.contains("struct ") {
+        out.push("user-defined `struct` types".to_string());
+    }
+
+    // Any statement inside fragment() the line parser cannot classify (control
+    // flow, local variables, unhandled built-ins, ...).
+    if let Some(body) = extract_function_body(source, "fragment") {
+        for line in body.lines() {
+            let t = line.trim().trim_end_matches(';').trim();
+            if t.is_empty() || t.starts_with("//") || t == "{" || t == "}" {
+                continue;
+            }
+            if parse_fragment_statement(t).is_none() {
+                out.push(format!("unrecognised fragment statement: `{t}`"));
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +1638,61 @@ mod tests {
     fn shader_type_equality() {
         assert_eq!(ShaderType::Spatial, ShaderType::Spatial);
         assert_ne!(ShaderType::Spatial, ShaderType::CanvasItem);
+    }
+
+    /// 🔑 A `.tscn` stores a shader as ONE `code = "..."` string, so every
+    /// statement shares a line and the program starts with `shader_type`.
+    ///
+    /// The parser used to scan LINES gated on `starts_with("uniform ")`, so a
+    /// scene-authored shader yielded ZERO uniforms — no default reached the
+    /// renderer, and a `hint_screen_texture` sampler was indistinguishable from
+    /// an ordinary one, which made a sprite sample its own texture instead of
+    /// the back buffer (pat-s3rrv.202).
+    #[test]
+    fn parse_uniforms_finds_declarations_sharing_a_line() {
+        let src = "shader_type canvas_item; uniform sampler2D screen_tex : \
+                   hint_screen_texture; uniform float amount = 0.5; void \
+                   fragment() { COLOR = texture(screen_tex, SCREEN_UV); }";
+        let uniforms = parse_uniforms(src);
+
+        assert_eq!(
+            uniforms.len(),
+            2,
+            "both declarations share the line with `shader_type` and the \
+             fragment body; a line-based scan finds neither: {uniforms:?}"
+        );
+        assert_eq!(uniforms[0].name, "screen_tex");
+        assert_eq!(uniforms[0].uniform_type, UniformType::Sampler2D);
+        assert_eq!(
+            uniforms[0].hint.as_deref(),
+            Some("hint_screen_texture"),
+            "the hint is what tells the renderer this sampler reads the back \
+             buffer rather than the item's own texture"
+        );
+        assert_eq!(uniforms[1].name, "amount");
+        assert_eq!(uniforms[1].default_value, Variant::Float(0.5));
+
+        // ⚠️ The fragment body is full of `;` too. Splitting on it must not
+        // invent a uniform out of `COLOR = texture(...)`.
+        assert!(
+            uniforms.iter().all(|u| u.name != "COLOR"),
+            "statement splitting must not turn body statements into uniforms"
+        );
+    }
+
+    /// A comment must not swallow the declaration that follows it.
+    ///
+    /// ⚠️ This is the regression the statement split could have introduced: a
+    /// `// note` line and the `uniform` below it land in the SAME `;`-segment,
+    /// so without stripping comments first the segment no longer begins with
+    /// `uniform ` and the declaration disappears — a case the old line-based
+    /// scan handled correctly.
+    #[test]
+    fn a_comment_line_above_a_uniform_does_not_hide_it() {
+        let src = "// the tint applied to every pixel\nuniform vec4 tint : source_color;";
+        let uniforms = parse_uniforms(src);
+        assert_eq!(uniforms.len(), 1, "got {uniforms:?}");
+        assert_eq!(uniforms[0].name, "tint");
     }
 
     #[test]
@@ -1265,6 +2088,122 @@ uniform bool enabled = true;
         assert_eq!(result, gdcore::math::Color::rgb(1.0, 0.0, 0.0));
     }
 
+    // -- pat-nzgdu.139: shader_type sky stage + EYEDIR built-in ---------------
+
+    const SKY_SRC: &str =
+        "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.y, 0.0, 1.0);\n}";
+
+    #[test]
+    fn sky_shader_computes_color_from_eyedir() {
+        let instructions = parse_sky_body(SKY_SRC);
+        assert_eq!(instructions.len(), 1, "sky() body parsed");
+
+        // Looking up: EYEDIR.y = 0.25 drives the red channel.
+        let ctx = FragmentContext {
+            eyedir: (0.0, 0.25, 0.0),
+            ..Default::default()
+        };
+        let out = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert_eq!(out.r, 0.25);
+        assert_eq!(out.g, 0.0);
+        assert_eq!(out.b, 1.0);
+        // vec3 COLOR implies opaque alpha.
+        assert_eq!(out.a, 1.0);
+
+        // A different view direction yields a different colour — i.e. the sky
+        // is actually a function of EYEDIR rather than a constant.
+        let ctx2 = FragmentContext {
+            eyedir: (0.0, 0.9, 0.0),
+            ..Default::default()
+        };
+        let out2 = execute_fragment(&instructions, &ctx2, &HashMap::new());
+        assert_eq!(out2.r, 0.9);
+        assert_ne!(out.r, out2.r);
+    }
+
+    #[test]
+    fn sky_shader_reads_every_eyedir_axis() {
+        let src =
+            "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.x, EYEDIR.y, EYEDIR.z);\n}";
+        let ctx = FragmentContext {
+            eyedir: (0.1, 0.2, 0.3),
+            ..Default::default()
+        };
+        let out = execute_fragment(&parse_sky_body(src), &ctx, &HashMap::new());
+        assert_eq!((out.r, out.g, out.b), (0.1, 0.2, 0.3));
+    }
+
+    #[test]
+    fn parse_sky_body_ignores_a_canvas_item_shader() {
+        // Stage mismatch yields nothing rather than misfiring on fragment().
+        let canvas =
+            "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}";
+        assert!(parse_sky_body(canvas).is_empty());
+        // ...and the converse: a sky program has no fragment() body.
+        assert!(parse_fragment_body(SKY_SRC).is_empty());
+    }
+
+    #[test]
+    fn eyedir_is_zero_outside_a_sky_shader() {
+        // canvas_item has no EYEDIR built-in; it must read as 0, not panic.
+        let instructions = vec![FragmentInstruction::SetColorAlpha(
+            FloatExpr::EyeDirComponent(Vec3Axis::Y),
+        )];
+        let out = execute_fragment(&instructions, &FragmentContext::default(), &HashMap::new());
+        assert_eq!(out.a, 0.0);
+    }
+
+    #[test]
+    fn vec3_and_non_literal_vec4_parse_as_components() {
+        // vec3 splat -> rgb all equal, alpha 1.
+        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(0.5);\n}";
+        let out = execute_fragment(
+            &parse_sky_body(src),
+            &FragmentContext::default(),
+            &HashMap::new(),
+        );
+        assert_eq!((out.r, out.g, out.b, out.a), (0.5, 0.5, 0.5, 1.0));
+
+        // vec4 with an expression component still evaluates per-component.
+        let src4 = "void fragment() {\n    COLOR = vec4(UV.x, 0.0, 0.0, 1.0);\n}";
+        let ctx = FragmentContext {
+            uv: (0.75, 0.0),
+            ..Default::default()
+        };
+        let out4 = execute_fragment(&parse_fragment_body(src4), &ctx, &HashMap::new());
+        assert_eq!(out4.r, 0.75);
+        assert_eq!(out4.a, 1.0);
+    }
+
+    #[test]
+    fn all_literal_vec4_still_parses_as_a_literal() {
+        // Regression: the existing all-literal fast path must keep its
+        // ColorExpr::Literal representation, not fall through to Components.
+        let src = "void fragment() {\n    COLOR = vec4(0.1, 0.2, 0.3, 0.4);\n}";
+        assert_eq!(
+            parse_fragment_body(src),
+            vec![FragmentInstruction::SetColor(ColorExpr::Literal(
+                0.1, 0.2, 0.3, 0.4
+            ))],
+        );
+    }
+
+    #[test]
+    fn sky_shader_uniform_and_time_built_ins_work() {
+        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(horizon, TIME, EYEDIR.y);\n}";
+        let mut uniforms = HashMap::new();
+        uniforms.insert("horizon".to_string(), Variant::Float(0.4));
+        let ctx = FragmentContext {
+            time: 0.5,
+            eyedir: (0.0, 0.6, 0.0),
+            ..Default::default()
+        };
+        let out = execute_fragment(&parse_sky_body(src), &ctx, &uniforms);
+        assert_eq!(out.r, 0.4, "uniform");
+        assert_eq!(out.g, 0.5, "TIME");
+        assert_eq!(out.b, 0.6, "EYEDIR.y");
+    }
+
     #[test]
     fn execute_fragment_set_alpha() {
         let instructions = vec![FragmentInstruction::SetColorAlpha(FloatExpr::Literal(0.5))];
@@ -1454,5 +2393,186 @@ void fragment() {
         let ctx = FragmentContext::default();
         let result = eval_color_expr(&expr, &ctx, &HashMap::new());
         assert_eq!(result, ctx.color);
+    }
+
+    // -----------------------------------------------------------------------
+    // canvas_item -> WGSL translation (pat-p0s82.21)
+    // -----------------------------------------------------------------------
+
+    /// Braces in the generated WGSL must be balanced — a cheap structural
+    /// sanity check that the module is well-formed.
+    fn assert_brace_balanced(wgsl: &str) {
+        let open = wgsl.chars().filter(|c| *c == '{').count();
+        let close = wgsl.chars().filter(|c| *c == '}').count();
+        assert_eq!(open, close, "unbalanced braces in generated WGSL:\n{wgsl}");
+    }
+
+    #[test]
+    fn canvas_item_compile_emits_wgsl() {
+        let compiled = ShaderCompiler::new().compile(
+            ShaderType::CanvasItem,
+            "shader_type canvas_item;\nvoid fragment() {}\n",
+        );
+        let wgsl = compiled.wgsl_program.expect("canvas_item should emit WGSL");
+        assert!(wgsl.contains("@fragment"), "missing @fragment: {wgsl}");
+        assert!(wgsl.contains("fn fragment_main"), "missing entry point");
+        // The default COLOR samples the item texture.
+        assert!(
+            wgsl.contains("textureSample(TEXTURE, TEXTURE_sampler, UV)"),
+            "default COLOR should sample TEXTURE: {wgsl}"
+        );
+        assert!(
+            compiled.unsupported.is_empty(),
+            "{:?}",
+            compiled.unsupported
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_translates_color_literal() {
+        let src =
+            "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            wgsl.contains("COLOR = vec4<f32>(1.0, 0.0, 0.0, 1.0);"),
+            "color literal not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_uniform_struct_and_reference() {
+        let src =
+            "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = tint;\n}\n";
+        let uniforms = parse_uniforms(src);
+        let wgsl = generate_canvas_item_wgsl(&uniforms, src);
+        assert!(
+            wgsl.contains("struct MaterialUniforms"),
+            "no uniform struct"
+        );
+        assert!(
+            wgsl.contains("tint: vec4<f32>,"),
+            "tint field missing: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("var<uniform> material: MaterialUniforms;"),
+            "material binding missing"
+        );
+        assert!(
+            wgsl.contains("COLOR = material.tint;"),
+            "uniform reference not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_uv_and_time_builtins() {
+        let src = "shader_type canvas_item;\nvoid fragment() {\n    COLOR.a = UV.x;\n    COLOR.rgb *= sin(TIME);\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            wgsl.contains("COLOR.a = UV.x;"),
+            "UV.x not translated: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("struct Globals"),
+            "TIME needs Globals: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("sin(globals.time)"),
+            "TIME builtin not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_no_globals_without_time() {
+        let src = "shader_type canvas_item;\nvoid fragment() {\n    COLOR.a = UV.x;\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            !wgsl.contains("struct Globals"),
+            "Globals emitted without TIME use: {wgsl}"
+        );
+    }
+
+    #[test]
+    fn canvas_item_wgsl_mix_expression() {
+        let src = "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = mix(vec4(0.0, 0.0, 0.0, 1.0), tint, 0.5);\n}\n";
+        let uniforms = parse_uniforms(src);
+        let wgsl = generate_canvas_item_wgsl(&uniforms, src);
+        assert!(
+            wgsl.contains("mix(vec4<f32>(0.0, 0.0, 0.0, 1.0), material.tint, 0.5)"),
+            "mix() not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn shader_material_compiles_to_wgsl() {
+        // A ShaderMaterial carrying a canvas_item shader yields runnable WGSL.
+        let mut mat = ShaderMaterial::new();
+        mat.shader = Some(Shader::new(
+            ShaderType::CanvasItem,
+            "shader_type canvas_item;\nuniform vec4 modulate_color;\nvoid fragment() {\n    COLOR = modulate_color;\n}\n",
+        ));
+        let shader = mat.shader.as_ref().unwrap();
+        let compiled = ShaderCompiler::new().compile(shader.shader_type, &shader.source_code);
+        let wgsl = compiled
+            .wgsl_program
+            .expect("material shader should emit WGSL");
+        assert!(wgsl.contains("modulate_color: vec4<f32>,"));
+        assert!(wgsl.contains("COLOR = material.modulate_color;"));
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn non_canvas_item_has_no_wgsl_and_is_flagged() {
+        let compiled = ShaderCompiler::new().compile(
+            ShaderType::Spatial,
+            "shader_type spatial;\nvoid fragment() {}\n",
+        );
+        assert!(compiled.wgsl_program.is_none());
+        assert!(
+            compiled.unsupported.iter().any(|s| s.contains("spatial")),
+            "spatial stage should be flagged unsupported: {:?}",
+            compiled.unsupported
+        );
+    }
+
+    #[test]
+    fn unsupported_features_flags_known_constructs() {
+        let src = "shader_type canvas_item;\n#include \"lib.gdshaderinc\"\nvoid vertex() {\n    VERTEX.x += 1.0;\n}\nvoid fragment() {\n    for (int i = 0; i < 4; i++) {\n        COLOR.rgb *= 0.5;\n    }\n    discard;\n}\n";
+        let flags = unsupported_features(src, ShaderType::CanvasItem);
+        assert!(flags.iter().any(|s| s.contains("#include")), "{flags:?}");
+        assert!(flags.iter().any(|s| s.contains("vertex()")), "{flags:?}");
+        assert!(flags.iter().any(|s| s.contains("discard")), "{flags:?}");
+        // The `for` loop header is an unrecognised fragment statement.
+        assert!(
+            flags.iter().any(|s| s.contains("for (int i")),
+            "for-loop should be flagged: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn unsupported_features_empty_for_supported_shader() {
+        let src =
+            "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = tint;\n}\n";
+        let flags = unsupported_features(src, ShaderType::CanvasItem);
+        assert!(
+            flags.is_empty(),
+            "expected no unsupported flags, got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn uniform_type_wgsl_mapping() {
+        assert_eq!(uniform_type_to_wgsl(UniformType::Float), "f32");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Vec2), "vec2<f32>");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Color), "vec4<f32>");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Mat4), "mat4x4<f32>");
+        assert_eq!(
+            uniform_type_to_wgsl(UniformType::Sampler2D),
+            "texture_2d<f32>"
+        );
     }
 }

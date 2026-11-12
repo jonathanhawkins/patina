@@ -9,5 +9,29 @@ repository.workspace = true
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
+gdresource = { path = "../gdresource" }
+# Shader uniform parsing (`parse_uniforms`) for the Shader script API
+# (pat-0q2kx.144). gdserver2d sits below this crate — it depends only on
+# gdcore/gdvariant — so this is acyclic, and gdscene already depends on both.
+gdserver2d = { path = "../gdserver2d" }
+# WebSocketPeer is a RefCounted class scripts construct directly, and its RFC
+# 6455 implementation lives in the platform layer (pat-0q2kx.96). gdplatform does
+# not depend on gdscript-interop, so this edge is acyclic.
+gdplatform = { path = "../gdplatform" }
+# TextServerManager's interface registry is backed by the real text shaper
+# (pat-s3rrv.211). gdrender2d depends only on gdcore/gdserver2d/gdvariant --
+# all three already in this crate's graph -- and does NOT depend on
+# gdscript-interop, so this edge is acyclic and adds exactly one crate.
+gdrender2d = { path = "../gdrender2d" }
+serde_json = { workspace = true }
+stacker = "0.1"
+# DEFLATE for `PackedByteArray.compress/decompress` (pat-s3rrv.224). Already a
+# direct dependency of gdrender2d, gdresource and gdscene at this exact version,
+# so this adds no new crate to the graph.
+miniz_oxide = "0.8"
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

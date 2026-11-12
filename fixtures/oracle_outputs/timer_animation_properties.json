@@ -1,0 +1,215 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Timer",
+					"name": "OneShot",
+					"path": "/root/Root/OneShot",
+					"properties": {
+						"one_shot": {
+							"class_type": "",
+							"hint": 0,
+							"type": "bool",
+							"value": true
+						},
+						"wait_time": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 2.0
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "Timer",
+					"name": "Repeating",
+					"path": "/root/Root/Repeating",
+					"properties": {
+						"wait_time": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.5
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "AnimationPlayer",
+					"name": "Player",
+					"path": "/root/Root/Player",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "BoneAttachment3D",
+									"name": "BoneAttachment",
+									"path": "/root/Root/Mesh/Skeleton/BoneAttachment",
+									"properties": {
+
+									}
+								}
+							],
+							"class": "Skeleton3D",
+							"name": "Skeleton",
+							"path": "/root/Root/Mesh/Skeleton",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "Node3D",
+					"name": "Mesh",
+					"path": "/root/Root/Mesh",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": {
+										"x": 1.0,
+										"y": 0.0,
+										"z": 0.0
+									},
+									"y": {
+										"x": 0.0,
+										"y": 1.0,
+										"z": 0.0
+									},
+									"z": {
+										"x": 0.0,
+										"y": 0.0,
+										"z": 1.0
+									}
+								},
+								"origin": {
+									"x": 0.0,
+									"y": 2.0,
+									"z": 0.0
+								}
+							}
+						}
+					}
+				}
+			],
+			"class": "Node",
+			"name": "Root",
+			"path": "/root/Root",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

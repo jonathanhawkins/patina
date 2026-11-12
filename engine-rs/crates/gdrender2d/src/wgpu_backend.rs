@@ -13,6 +13,7 @@ use gdserver2d::viewport::Viewport;
 
 use crate::draw;
 use crate::font;
+use crate::polygon_raster;
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
 
@@ -242,6 +243,117 @@ impl WgpuRenderer {
                     let t = global_transform.xform(*to);
                     draw::draw_line(fb, f, t, *color, *width);
                 }
+                // Stroke/fill family (pat-0q2kx.129). Shares `polygon_raster`
+                // with the software renderer so both paths agree; this match is
+                // exhaustive, so these arms are also what keeps the backend
+                // compiling as the command set grows.
+                DrawCommand::DrawPolyline {
+                    points,
+                    color,
+                    width,
+                    closed,
+                } => {
+                    let pts = transform_points(global_transform, points);
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        scaled_width(global_transform, *width),
+                        *color,
+                        *closed,
+                        polygon_raster::LineCap::None,
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawMultiline {
+                    points,
+                    color,
+                    width,
+                } => {
+                    let w = scaled_width(global_transform, *width);
+                    for pair in points.chunks_exact(2) {
+                        let seg = [
+                            global_transform.xform(pair[0]),
+                            global_transform.xform(pair[1]),
+                        ];
+                        polygon_raster::draw_polyline(
+                            fb,
+                            &seg,
+                            w,
+                            *color,
+                            false,
+                            polygon_raster::LineCap::None,
+                            polygon_raster::LineJoint::Sharp,
+                        );
+                    }
+                }
+                DrawCommand::DrawDashedLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                    dash,
+                } => {
+                    let f = global_transform.xform(*from);
+                    let t = global_transform.xform(*to);
+                    let span = t - f;
+                    let len = span.length();
+                    let step = scaled_width(global_transform, *dash).max(0.1);
+                    if len > 1e-6 {
+                        let dir = span * (1.0 / len);
+                        let w = scaled_width(global_transform, *width);
+                        let mut travelled = 0.0_f32;
+                        while travelled < len {
+                            let end = (travelled + step).min(len);
+                            let seg = [f + dir * travelled, f + dir * end];
+                            polygon_raster::draw_polyline(
+                                fb,
+                                &seg,
+                                w,
+                                *color,
+                                false,
+                                polygon_raster::LineCap::None,
+                                polygon_raster::LineJoint::Sharp,
+                            );
+                            travelled = end + step;
+                        }
+                    }
+                }
+                DrawCommand::DrawArc {
+                    center,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    point_count,
+                    color,
+                    width,
+                } => {
+                    let steps = (*point_count).max(2);
+                    let sweep = *end_angle - *start_angle;
+                    let pts: Vec<Vector2> = (0..steps)
+                        .map(|i| {
+                            let t = i as f32 / (steps - 1) as f32;
+                            let a = *start_angle + sweep * t;
+                            global_transform.xform(Vector2::new(
+                                center.x + radius * a.cos(),
+                                center.y + radius * a.sin(),
+                            ))
+                        })
+                        .collect();
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        scaled_width(global_transform, *width),
+                        *color,
+                        false,
+                        polygon_raster::LineCap::None,
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawPolygon { points, colors } => {
+                    let pts = transform_points(global_transform, points);
+                    let color = colors.first().copied().unwrap_or(Color::WHITE);
+                    polygon_raster::fill_polygon(fb, &pts, color);
+                }
                 DrawCommand::DrawTextureRect {
                     texture_path,
                     rect,
@@ -281,11 +393,23 @@ impl WgpuRenderer {
                     margin_right,
                     margin_bottom,
                     draw_center,
+                    axis_h,
+                    axis_v,
                     modulate,
+                    region,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
+                        // `region_rect` confines sampling to a sub-rect of the
+                        // source (pat-s3rrv.167). A zero-size region yields
+                        // `None`, and the whole texture is used byte-for-byte as
+                        // before this field existed.
+                        let cropped = draw::crop_to_region(tex, *region);
+                        let tex = cropped.as_ref().unwrap_or(tex);
                         let transformed = transform_rect(global_transform, *rect);
-                        draw::draw_nine_patch(
+                        // Must honour the per-axis stretch modes, same as the CPU
+                        // renderer (`renderer.rs`). Matching with `..` here would
+                        // compile and silently stretch a `Tile`/`TileFit` stylebox.
+                        draw::draw_nine_patch_axes(
                             fb,
                             tex,
                             transformed,
@@ -294,6 +418,8 @@ impl WgpuRenderer {
                             *margin_right,
                             *margin_bottom,
                             *draw_center,
+                            *axis_h,
+                            *axis_v,
                             *modulate,
                         );
                     }
@@ -344,6 +470,20 @@ impl WgpuRenderer {
 }
 
 /// Transforms an axis-aligned rect through a 2D transform, returning the AABB.
+/// Transforms a run of local-space points into pixel space (pat-0q2kx.129).
+fn transform_points(xform: Transform2D, points: &[Vector2]) -> Vec<Vector2> {
+    points.iter().map(|p| xform.xform(*p)).collect()
+}
+
+/// Scales a stroke width by the item's transform, using the mean of the two
+/// basis scale factors — the same convention the `DrawCircle` arm uses for its
+/// radius. A non-positive width is Godot's "thinnest visible line".
+fn scaled_width(xform: Transform2D, width: f32) -> f32 {
+    let sx = xform.basis_xform(Vector2::new(1.0, 0.0)).length();
+    let sy = xform.basis_xform(Vector2::new(0.0, 1.0)).length();
+    width.max(1.0) * (sx + sy) * 0.5
+}
+
 fn transform_rect(xform: Transform2D, rect: Rect2) -> Rect2 {
     let p0 = xform.xform(rect.position);
     let p1 = xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y));
@@ -443,6 +583,8 @@ impl RenderingServer2D for WgpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not among the crate-level imports that `super::*` re-exports.
+    use gdserver2d::canvas::NinePatchAxis;
 
     #[test]
     fn create_renderer_default() {
@@ -721,5 +863,94 @@ mod tests {
         let frame_sw = sw.render_frame(&vp2);
 
         assert_eq!(frame_wgpu.pixels, frame_sw.pixels);
+    }
+
+    /// A `StyleBoxTexture` with `axis_stretch_horizontal = Tile` must actually
+    /// tile on **this** backend too (pat-0q2kx.148).
+    ///
+    /// Regression guard for a real bug: adding `axis_h`/`axis_v` to
+    /// `DrawCommand::DrawNinePatch` broke this arm's exhaustive destructure, and
+    /// silencing it with `..` + the stretch-only `draw_nine_patch` compiled
+    /// perfectly while discarding the mode. The CPU renderer honoured `Tile` and
+    /// this path silently stretched, so the two backends disagreed.
+    #[test]
+    fn wgpu_nine_patch_honours_axis_stretch_mode() {
+        // 4x4, 1px margins ⇒ the top edge source is 2px wide: one red column and
+        // one blue column, so repetition is visible as extra colour flips.
+        let tex = {
+            let mut pixels = vec![Color::rgb(0.0, 0.0, 0.0); 16];
+            for y in 0..4 {
+                pixels[y * 4 + 1] = Color::rgb(1.0, 0.0, 0.0);
+                pixels[y * 4 + 2] = Color::rgb(0.0, 0.0, 1.0);
+            }
+            Texture2D {
+                width: 4,
+                height: 4,
+                pixels,
+            }
+        };
+
+        // Renders the same nine-patch through a chosen backend and counts
+        // red/blue transitions along the top edge row.
+        let flips = |axis: NinePatchAxis, use_wgpu: bool| {
+            let mut vp = Viewport::new(20, 6, Color::rgb(0.0, 0.0, 0.0));
+            let mut item = CanvasItem::new(CanvasItemId(1));
+            item.commands.push(DrawCommand::DrawNinePatch {
+                texture_path: "panel.png".to_string(),
+                rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 6.0)),
+                margin_left: 1.0,
+                margin_top: 1.0,
+                margin_right: 1.0,
+                margin_bottom: 1.0,
+                draw_center: true,
+                axis_h: axis,
+                axis_v: NinePatchAxis::Stretch,
+                modulate: Color::WHITE,
+                region: gdcore::math::Rect2::new(
+                    gdcore::math::Vector2::ZERO,
+                    gdcore::math::Vector2::ZERO,
+                ),
+            });
+            vp.add_canvas_item(item);
+
+            let frame = if use_wgpu {
+                let mut r = WgpuRenderer::new();
+                r.register_texture("panel.png", tex.clone());
+                r.render_frame(&vp)
+            } else {
+                let mut r = crate::renderer::SoftwareRenderer::new();
+                r.register_texture("panel.png", tex.clone());
+                r.render_frame(&vp)
+            };
+            let mut n = 0;
+            for x in 2..17 {
+                if (frame.pixels[x].r > 0.5) != (frame.pixels[x + 1].r > 0.5) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        // The load-bearing assertion: on the wgpu path, tiling must not look
+        // like stretching. With the mode discarded these were equal.
+        let stretched = flips(NinePatchAxis::Stretch, true);
+        let tiled = flips(NinePatchAxis::Tile, true);
+        assert!(
+            tiled > stretched,
+            "wgpu backend must honour Tile: {tiled} colour flips tiled vs \
+             {stretched} stretched — equal counts mean axis_h was discarded",
+        );
+
+        // And it must agree with the CPU renderer rather than merely differing.
+        assert_eq!(
+            tiled,
+            flips(NinePatchAxis::Tile, false),
+            "the two backends must tile identically",
+        );
+        assert_eq!(
+            stretched,
+            flips(NinePatchAxis::Stretch, false),
+            "the two backends must stretch identically",
+        );
     }
 }

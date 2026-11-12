@@ -3,9 +3,11 @@
 [node name="World" type="Node"]
 
 [node name="Player" type="Node2D" parent="."]
+_script_path = "res://fixtures/scripts/player.gd"
 position = Vector2(100, 200)
 
 [node name="Enemy" type="Node2D" parent="."]
+_script_path = "res://fixtures/scripts/enemy_spawner.gd"
 position = Vector2(400, 200)
 
 [node name="Ground" type="Node2D" parent="."]

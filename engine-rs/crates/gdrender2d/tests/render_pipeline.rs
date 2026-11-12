@@ -837,7 +837,7 @@ fn texture_missing_path_no_crash() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unfilled_rect_is_no_op() {
+fn unfilled_rect_draws_outline_only() {
     let mut renderer = SoftwareRenderer::new();
     let mut vp = Viewport::new(10, 10, Color::BLACK);
 
@@ -850,8 +850,14 @@ fn unfilled_rect_is_no_op() {
     vp.add_canvas_item(item);
 
     let fb = capture_frame(&mut renderer, &vp);
-    // Non-filled rects are not implemented, so nothing should be drawn.
-    assert_eq!(count_pixels(&fb, Color::BLACK), 100);
+    // Godot draw_rect(filled=false) draws the outline (pat-u3l8c.24).
+    assert_eq!(fb.get_pixel(4, 2), Color::WHITE, "top edge drawn");
+    assert_eq!(fb.get_pixel(2, 4), Color::WHITE, "left edge drawn");
+    assert_eq!(fb.get_pixel(4, 4), Color::BLACK, "interior untouched");
+    assert!(
+        count_pixels(&fb, Color::WHITE) >= 16,
+        "outline perimeter drawn"
+    );
 }
 
 #[test]

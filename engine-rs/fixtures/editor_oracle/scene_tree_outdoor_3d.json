@@ -1,0 +1,86 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/outdoor_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "FillLight",
+				"node_class": "OmniLight3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/FillLight",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Terrain",
+				"node_class": "MeshInstance3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Terrain",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Rock",
+				"node_class": "MeshInstance3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Rock",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Tree",
+				"node_class": "MeshInstance3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Tree",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "BoulderShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Outdoor3D",
+						"path": "/root/Outdoor3D/Boulder/BoulderShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "BoulderMesh",
+						"node_class": "MeshInstance3D",
+						"owner": "Outdoor3D",
+						"path": "/root/Outdoor3D/Boulder/BoulderMesh",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Boulder",
+				"node_class": "RigidBody3D",
+				"owner": "Outdoor3D",
+				"path": "/root/Outdoor3D/Boulder",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Outdoor3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Outdoor3D",
+		"scene_file_path": "res://scenes/outdoor_3d.tscn"
+	}
+}

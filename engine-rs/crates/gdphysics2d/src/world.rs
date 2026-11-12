@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 
 use gdcore::math::{Transform2D, Vector2};
 
-use crate::body::{BodyId, PhysicsBody2D};
+use crate::body::{BodyId, BodyType, PhysicsBody2D};
 use crate::collision;
 use crate::joint::{self, Joint2D, JointId};
 use crate::shape::Shape2D;
+use crate::solver::{self, ContactConstraint2D, ContactSolver2D};
 
 /// Result of a raycast query.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +25,105 @@ pub struct RaycastHit {
     pub normal: Vector2,
     /// Distance from the ray origin to the hit point.
     pub distance: f32,
+}
+
+/// Parameters for [`PhysicsWorld2D::intersect_ray`], mirroring Godot's
+/// `PhysicsRayQueryParameters2D` (pat-nzgdu.124).
+///
+/// Build with [`new`](Self::new) and the chained setters:
+///
+/// ```ignore
+/// let q = RayQuery2D::new(from, to)
+///     .with_exclude(vec![player_id])
+///     .with_collision_mask(0b0010);
+/// let hit = world.intersect_ray(&q);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RayQuery2D {
+    /// Ray start, in world space.
+    pub from: Vector2,
+    /// Ray end, in world space (Godot uses `from`/`to`, not a direction+length).
+    pub to: Vector2,
+    /// Bodies to skip (Godot `exclude`).
+    pub exclude: Vec<BodyId>,
+    /// Layer filter: a body is eligible when `collision_layer & collision_mask`
+    /// is non-zero.
+    ///
+    /// **Godot semantics, which differ from [`PhysicsWorld2D::raycast_filtered`]:**
+    /// this defaults to all layers (`u32::MAX`) and a mask of `0` therefore hits
+    /// **nothing**. `raycast_filtered` instead treats `0` as "every layer".
+    pub collision_mask: u32,
+    /// Whether bodies are considered (Godot `collide_with_bodies`, default true).
+    pub collide_with_bodies: bool,
+    /// Whether areas are considered (Godot `collide_with_areas`, default false).
+    ///
+    /// Areas live in a separate [`AreaStore`](crate::area2d::AreaStore) that
+    /// [`PhysicsWorld2D`] does not own, so this flag is carried for API parity
+    /// but not yet honored — see the module docs.
+    pub collide_with_areas: bool,
+    /// Whether a ray starting inside a shape reports that shape
+    /// (Godot `hit_from_inside`, default false).
+    pub hit_from_inside: bool,
+}
+
+impl RayQuery2D {
+    /// A query from `from` to `to` with Godot's defaults: every layer, bodies
+    /// only, no exclusions, no inside hits.
+    pub fn new(from: Vector2, to: Vector2) -> Self {
+        Self {
+            from,
+            to,
+            exclude: Vec::new(),
+            collision_mask: u32::MAX,
+            collide_with_bodies: true,
+            collide_with_areas: false,
+            hit_from_inside: false,
+        }
+    }
+
+    /// Sets the excluded bodies.
+    pub fn with_exclude(mut self, exclude: Vec<BodyId>) -> Self {
+        self.exclude = exclude;
+        self
+    }
+
+    /// Sets the layer mask (see [`collision_mask`](Self::collision_mask)).
+    pub fn with_collision_mask(mut self, mask: u32) -> Self {
+        self.collision_mask = mask;
+        self
+    }
+
+    /// Sets whether bodies are considered.
+    pub fn with_collide_with_bodies(mut self, enabled: bool) -> Self {
+        self.collide_with_bodies = enabled;
+        self
+    }
+
+    /// Sets whether areas are considered (not yet honored — see the field docs).
+    pub fn with_collide_with_areas(mut self, enabled: bool) -> Self {
+        self.collide_with_areas = enabled;
+        self
+    }
+
+    /// Sets whether a ray starting inside a shape reports it.
+    pub fn with_hit_from_inside(mut self, enabled: bool) -> Self {
+        self.hit_from_inside = enabled;
+        self
+    }
+}
+
+/// A single overlap reported by [`PhysicsWorld2D::shape_cast`] (Godot
+/// `ShapeCast2D`).
+#[derive(Debug, Clone, Copy)]
+pub struct ShapeCastHit {
+    /// The body the cast shape overlaps.
+    pub body_id: BodyId,
+    /// A contact point on the overlap, in world space.
+    pub point: Vector2,
+    /// The contact normal, pointing out of the hit body.
+    pub normal: Vector2,
+    /// Penetration depth of the overlap.
+    pub depth: f32,
 }
 
 /// Whether a contact was just entered or just exited this frame.
@@ -62,6 +162,131 @@ pub struct PhysicsWorld2D {
     constraint_iterations: usize,
     /// Contacts from the previous frame, keyed by (min_id, max_id).
     previous_contacts: HashSet<(BodyId, BodyId)>,
+    /// Global gravity vector (px/s²) applied to dynamic bodies each step.
+    gravity: Vector2,
+    /// The iterated contact solver run between the two halves of integration
+    /// (pat-0q2kx.116). Its knobs come from `physics/2d/solver/*`.
+    contact_solver: ContactSolver2D,
+    /// Last step's converged contact impulses, used to warm-start this step
+    /// (pat-0q2kx.116).
+    ///
+    /// Lives on the world rather than on [`ContactSolver2D`] for two reasons:
+    /// the solver is `Copy` and is copied out of `self` at the call site to
+    /// dodge a borrow conflict, and a process-global would let two worlds seed
+    /// each other's contacts.
+    contact_cache: solver::ContactCache2D,
+    /// Space-wide defaults from `physics/2d/*` (pat-0q2kx.116).
+    space: SpaceParams2D,
+}
+
+/// The `physics/2d/*` project settings a Godot space holds and stamps onto its
+/// bodies (`godot_space_2d.cpp:1219-1227`) — pat-0q2kx.116.
+///
+/// Damping here is *added* to each body's own coefficient, matching Godot's
+/// default `DAMP_MODE_COMBINE`. Patina's defaults are all zero-effect rather
+/// than Godot's (`default_linear_damp = 0.1`), so a world that was never handed
+/// a `project.godot` behaves exactly as it did before this existed; a project
+/// that states a value gets it.
+#[derive(Debug, Clone, Copy)]
+pub struct SpaceParams2D {
+    /// `physics/2d/default_linear_damp`, added to each body's `linear_damp`.
+    pub default_linear_damp: f32,
+    /// `physics/2d/default_angular_damp`, added to each body's `angular_damp`.
+    pub default_angular_damp: f32,
+    /// `physics/2d/sleep_threshold_linear`, stamped onto every body.
+    pub sleep_threshold_linear: f32,
+    /// `physics/2d/sleep_threshold_angular`, stamped onto every body.
+    pub sleep_threshold_angular: f32,
+    /// `physics/2d/time_before_sleep`, stamped onto every body.
+    pub time_before_sleep: f32,
+}
+
+impl Default for SpaceParams2D {
+    fn default() -> Self {
+        Self {
+            default_linear_damp: 0.0,
+            default_angular_damp: 0.0,
+            sleep_threshold_linear: crate::body::DEFAULT_SLEEP_THRESHOLD_LINEAR,
+            sleep_threshold_angular: crate::body::DEFAULT_SLEEP_THRESHOLD_ANGULAR,
+            time_before_sleep: crate::body::DEFAULT_TIME_BEFORE_SLEEP,
+        }
+    }
+}
+
+/// Godot's default 2D gravity vector: `physics/2d/default_gravity` (980.0)
+/// multiplied by `physics/2d/default_gravity_vector` ((0, 1), i.e. down).
+pub const DEFAULT_GRAVITY_2D: Vector2 = Vector2::new(0.0, 980.0);
+
+/// World-space AABB `(min, max)` of a body's primary collider: the local
+/// bounding rect through the collider's own transform, then the body's.
+///
+/// ⚠️ A `WorldBoundary`'s rect is ±1e9 — far past where f32 keeps unit
+/// precision — so callers get a box every sweep starts inside of, which the
+/// sweep then (correctly) leaves to the narrow phase.
+fn world_aabb(body: &PhysicsBody2D) -> (Vector2, Vector2) {
+    let r = body.shape.bounding_rect();
+    let (c, s) = (body.rotation.cos(), body.rotation.sin());
+    let mut lo = Vector2::new(f32::MAX, f32::MAX);
+    let mut hi = Vector2::new(f32::MIN, f32::MIN);
+    for (x, y) in [
+        (r.position.x, r.position.y),
+        (r.position.x + r.size.x, r.position.y),
+        (r.position.x, r.position.y + r.size.y),
+        (r.position.x + r.size.x, r.position.y + r.size.y),
+    ] {
+        let p = body.shape_transform.xform(Vector2::new(x, y));
+        let w = body.position + Vector2::new(p.x * c - p.y * s, p.x * s + p.y * c);
+        lo = Vector2::new(lo.x.min(w.x), lo.y.min(w.y));
+        hi = Vector2::new(hi.x.max(w.x), hi.y.max(w.y));
+    }
+    (lo, hi)
+}
+
+/// Earliest `t ∈ [0, 1]` at which box `[a_min, a_max]` moved by `motion` first
+/// touches box `[b_min, b_max]`, or `None`.
+///
+/// ⚠️ A sweep that STARTS overlapping (penetration deeper than a hair) is
+/// `None`: the narrow phase owns overlaps, and clamping there would pin a body
+/// to its previous position forever. One that starts merely TOUCHING and moves
+/// INTO the box answers `Some(0.0)` — the frame after a CCD clamp leaves the
+/// body exactly in contact, and skipping that case lets it tunnel next tick.
+fn swept_aabb_toi(
+    a_min: Vector2,
+    a_max: Vector2,
+    motion: Vector2,
+    b_min: Vector2,
+    b_max: Vector2,
+) -> Option<f32> {
+    const TOUCH: f32 = 1e-3;
+    let axis = |a0: f32, a1: f32, d: f32, b0: f32, b1: f32| -> Option<(f32, f32)> {
+        if d.abs() < 1e-9 {
+            // Not moving on this axis: overlapping (or touching) for all t, or never.
+            if a1 <= b0 - TOUCH || a0 >= b1 + TOUCH {
+                None
+            } else {
+                Some((f32::NEG_INFINITY, f32::INFINITY))
+            }
+        } else {
+            let t0 = (b0 - a1) / d;
+            let t1 = (b1 - a0) / d;
+            Some((t0.min(t1), t0.max(t1)))
+        }
+    };
+    let (ex, lx) = axis(a_min.x, a_max.x, motion.x, b_min.x, b_max.x)?;
+    let (ey, ly) = axis(a_min.y, a_max.y, motion.y, b_min.y, b_max.y)?;
+    let enter = ex.max(ey);
+    let exit = lx.min(ly);
+    if enter > exit || enter > 1.0 || exit <= 0.0 {
+        return None;
+    }
+    // Penetration at t = 0 on every axis it enters through means a real
+    // overlap rather than a touch: in units of the step, `-enter * |motion|`
+    // is how deep the start already is.
+    let depth = -enter * motion.length();
+    if enter < 0.0 && depth > TOUCH {
+        return None;
+    }
+    Some(enter.max(0.0))
 }
 
 impl PhysicsWorld2D {
@@ -74,7 +299,55 @@ impl PhysicsWorld2D {
             next_joint_id: 1,
             constraint_iterations: 10,
             previous_contacts: HashSet::new(),
+            gravity: DEFAULT_GRAVITY_2D,
+            contact_solver: ContactSolver2D::default(),
+            contact_cache: solver::ContactCache2D::default(),
+            space: SpaceParams2D::default(),
         }
+    }
+
+    /// The contact solver's tunables, so a project's `physics/2d/solver/*`
+    /// settings can be applied (pat-0q2kx.116).
+    pub fn contact_solver_mut(&mut self) -> &mut ContactSolver2D {
+        &mut self.contact_solver
+    }
+
+    /// Read-only view of the contact solver's tunables.
+    pub fn contact_solver(&self) -> &ContactSolver2D {
+        &self.contact_solver
+    }
+
+    /// Read-only view of the space-wide `physics/2d/*` parameters.
+    pub fn space_params(&self) -> &SpaceParams2D {
+        &self.space
+    }
+
+    /// Applies space-wide `physics/2d/*` parameters (pat-0q2kx.116).
+    ///
+    /// The sleep settings are stamped onto every body already in the world as
+    /// well as onto later arrivals, because Godot's space owns them and its
+    /// bodies read them off it every step — a body registered before boot
+    /// finished would otherwise keep the built-in defaults forever.
+    pub fn set_space_params(&mut self, params: SpaceParams2D) {
+        self.space = params;
+        for body in self.bodies.values_mut() {
+            body.sleep_threshold_linear = params.sleep_threshold_linear;
+            body.sleep_threshold_angular = params.sleep_threshold_angular;
+            body.time_before_sleep = params.time_before_sleep;
+        }
+    }
+
+    /// Sets the global gravity vector (px/s²) applied to dynamic bodies.
+    ///
+    /// Defaults to [`DEFAULT_GRAVITY_2D`] (`(0, 980)`), matching Godot's
+    /// `physics/2d/default_gravity` × `default_gravity_vector` project settings.
+    pub fn set_gravity(&mut self, gravity: Vector2) {
+        self.gravity = gravity;
+    }
+
+    /// Returns the global gravity vector (px/s²).
+    pub fn gravity(&self) -> Vector2 {
+        self.gravity
     }
 
     /// Sets the number of constraint solver iterations per step.
@@ -90,6 +363,11 @@ impl PhysicsWorld2D {
         let id = BodyId(self.next_id);
         self.next_id += 1;
         body.id = id;
+        // The space owns the sleep settings; a body joining it adopts them
+        // (pat-0q2kx.116).
+        body.sleep_threshold_linear = self.space.sleep_threshold_linear;
+        body.sleep_threshold_angular = self.space.sleep_threshold_angular;
+        body.time_before_sleep = self.space.time_before_sleep;
         self.bodies.insert(id, body);
         id
     }
@@ -112,6 +390,17 @@ impl PhysicsWorld2D {
     /// Returns the number of bodies in the world.
     pub fn body_count(&self) -> usize {
         self.bodies.len()
+    }
+
+    /// Iterates every body in the world, in `BodyId` order so the sequence is
+    /// deterministic (the backing map is unordered) — pat-0q2kx.200.
+    ///
+    /// Needed by the `PhysicsServer2D` sweep APIs, which test a subject against
+    /// every *other* body regardless of which node (if any) owns it.
+    pub fn bodies(&self) -> impl Iterator<Item = &PhysicsBody2D> {
+        let mut ids: Vec<&BodyId> = self.bodies.keys().collect();
+        ids.sort_by_key(|id| id.0);
+        ids.into_iter().filter_map(|id| self.bodies.get(id))
     }
 
     /// Adds a joint to the world and returns its unique ID.
@@ -150,13 +439,455 @@ impl PhysicsWorld2D {
     ///
     /// Returns collision events for this frame (entered, persisting, exited).
     pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
-        // Phase 1: Integrate
-        for body in self.bodies.values_mut() {
-            body.integrate(dt);
+        self.step_inner(dt, None, None, None)
+    }
+
+    /// Pulls `id` back to its first time of impact when the step it just took
+    /// jumped clean past a static obstacle (`RigidBody2D.continuous_cd`).
+    ///
+    /// 🔑 This is what makes `gdphysics2d::ccd` reachable at all: the module was
+    /// a complete, unit-tested swept-TOI implementation with **zero callers**,
+    /// and `continuous_cd` was a registered property nothing read — a fast
+    /// bullet passed straight through a wall while the inspector showed the
+    /// setting enabled.
+    fn ccd_clamp(&mut self, id: BodyId, prev: Vector2) {
+        let (new_pos, self_min, self_max, self_layer, self_mask) = match self.bodies.get(&id) {
+            Some(b) => {
+                // The body's AABB at its PREVIOUS position: the sweep's start.
+                let (lo, hi) = world_aabb(b);
+                let back = prev - b.position;
+                (
+                    b.position,
+                    lo + back,
+                    hi + back,
+                    b.collision_layer,
+                    b.collision_mask,
+                )
+            }
+            None => return,
+        };
+        let motion = new_pos - prev;
+        if motion.length() < 1e-5 {
+            return;
         }
 
-        // Phase 1.5: Apply joint constraints (iterated for convergence)
-        let joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        // 🔑 Swept AABB vs AABB (slab method), not bounding CIRCLES. A thin
+        // wall — the canonical thing a bullet tunnels through — has a bounding
+        // circle as large as its LENGTH (a 4x400 wall: r ≈ 200), so every sweep
+        // that started within 200 px of it began "inside" the circle, answered
+        // `t = 0`, and was skipped: CCD could never fire against a wall.
+        let mut earliest: Option<f32> = None;
+        for other in self.bodies.values() {
+            // Only against things that do not move under the solver: two rigid
+            // bodies converging are the contact solver's job, and sweeping both
+            // would double-resolve the pair.
+            if other.id == id || other.body_type == BodyType::Rigid {
+                continue;
+            }
+            // Godot's layer/mask test is symmetric.
+            if (self_mask & other.collision_layer) == 0 && (other.collision_mask & self_layer) == 0
+            {
+                continue;
+            }
+            let (o_min, o_max) = world_aabb(other);
+            let Some(t) = swept_aabb_toi(self_min, self_max, motion, o_min, o_max) else {
+                continue;
+            };
+            if earliest.is_none_or(|e| t < e) {
+                earliest = Some(t);
+            }
+        }
+
+        if let Some(t) = earliest {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                body.position = prev + motion * t;
+            }
+        }
+    }
+
+    /// Steps the simulation applying per-body area gravity/damp overrides.
+    ///
+    /// Behaves exactly like [`step`](Self::step) except that, during the
+    /// integrate phase, a body whose [`BodyId`] appears in `gravity_overrides`
+    /// is integrated with that gravity vector instead of the world's global
+    /// gravity, and a body appearing in `damp_overrides` is integrated with that
+    /// linear-damp coefficient instead of its own. Bodies absent from a map use
+    /// the usual world gravity / own damping.
+    ///
+    /// This is how `Area2D` gravity/damp space overrides are applied: an owner
+    /// (e.g. the scene `PhysicsServer`, which holds the `AreaStore` alongside
+    /// the bodies) computes the effective per-body gravity/damp via
+    /// [`AreaStore::compute_body_gravity`](crate::area2d::AreaStore::compute_body_gravity)
+    /// and [`compute_body_damp`](crate::area2d::AreaStore::compute_body_damp),
+    /// then drives the world through this method.
+    pub fn step_with_area_overrides(
+        &mut self,
+        dt: f32,
+        gravity_overrides: &HashMap<BodyId, Vector2>,
+        damp_overrides: &HashMap<BodyId, f32>,
+        angular_damp_overrides: &HashMap<BodyId, f32>,
+    ) -> Vec<CollisionEvent> {
+        self.step_inner(
+            dt,
+            Some(gravity_overrides),
+            Some(damp_overrides),
+            Some(angular_damp_overrides),
+        )
+    }
+
+    /// Shared implementation of [`step`](Self::step) and
+    /// [`step_with_area_overrides`](Self::step_with_area_overrides).
+    fn step_inner(
+        &mut self,
+        dt: f32,
+        gravity_overrides: Option<&HashMap<BodyId, Vector2>>,
+        damp_overrides: Option<&HashMap<BodyId, f32>>,
+        angular_damp_overrides: Option<&HashMap<BodyId, f32>>,
+    ) -> Vec<CollisionEvent> {
+        // Phase 1: `integrate_forces` — world gravity + per-body damping go into
+        // the **velocity** only (a per-body area override replaces either when
+        // one is supplied). The transform is advanced in phase 4, after the
+        // contact solver has had its say, mirroring Godot's
+        // `integrate_forces → solve → integrate_velocities` order
+        // (`godot_step_2d.cpp:150,100,278`). Advancing it here instead is what
+        // made a resting stack sink a full tick of gravity every frame
+        // (pat-0q2kx.116).
+        let gravity = self.gravity;
+        let space = self.space;
+        for body in self.bodies.values_mut() {
+            let g = gravity_overrides
+                .and_then(|m| m.get(&body.id).copied())
+                .unwrap_or(gravity);
+            // Both damp overrides work the same way: `integrate` reads the
+            // body's own coefficients, so the effective value is swapped in
+            // around the call and restored afterwards. Angular is the pat-0q2kx.112
+            // half — an area could previously slow a body's travel but never
+            // its spin.
+            let saved_linear = body.linear_damp;
+            let saved_angular = body.angular_damp;
+            // An *area* override replaces the value outright; the space default
+            // is instead *added* to the body's own, which is Godot's
+            // `DAMP_MODE_COMBINE` and the mode every body starts in
+            // (pat-0q2kx.116).
+            if let Some(d) = damp_overrides.and_then(|m| m.get(&body.id).copied()) {
+                body.linear_damp = d;
+            } else {
+                body.linear_damp += space.default_linear_damp;
+            }
+            if let Some(d) = angular_damp_overrides.and_then(|m| m.get(&body.id).copied()) {
+                body.angular_damp = d;
+            } else {
+                body.angular_damp += space.default_angular_damp;
+            }
+            body.integrate_forces(dt, g);
+            body.linear_damp = saved_linear;
+            body.angular_damp = saved_angular;
+        }
+
+        // Build the set of jointed pairs that skip collision with each other.
+        //
+        // Only joints that actually ask for it: `Joint2D.disable_collision`
+        // defaults to true in Godot, but authoring it false must let the pair
+        // collide normally. Every jointed pair used to be excluded
+        // unconditionally, so `disable_collision = false` did nothing
+        // (pat-0q2kx.114).
+        let mut jointed_pairs: HashSet<(BodyId, BodyId)> = HashSet::new();
+        for jt in self.joints.values() {
+            if jt.is_enabled() && jt.base().disable_collision {
+                let a = jt.base().body_a;
+                let b = jt.base().body_b;
+                let pair = if a.0 < b.0 { (a, b) } else { (b, a) };
+                jointed_pairs.insert(pair);
+            }
+        }
+
+        // Phase 2: Collision detection. Contacts are collected as constraints
+        // rather than resolved on the spot — resolving pair-by-pair means the
+        // second pair undoes the first, which is exactly why a stack of boxes
+        // could never settle (pat-0q2kx.116).
+        //
+        // ⚠️ SORTED by id, and that is load-bearing, not tidiness. `bodies` is a
+        // `HashMap` with `std`'s randomly seeded `RandomState`, so its key order
+        // differs between processes *and* between two maps built in the same
+        // process. This loop's order is the order constraints enter
+        // `constraints`, and the sequential-impulse solver below is
+        // order-dependent — so an unsorted sweep makes the whole step
+        // nondeterministic (pat-21oab.1: the platformer demo ended at three
+        // different player X values at random). Godot's broadphase hands the
+        // solver a stable pair order; ours has to sort to get one.
+        let mut ids: Vec<BodyId> = self.bodies.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        let mut current_contacts = HashSet::new();
+        let mut events = Vec::new();
+        let mut constraints: Vec<ContactConstraint2D> = Vec::new();
+
+        // Rigid-ness per id, read once: the pair rule below is asked of every
+        // pair, so a HashMap lookup per side per pair would dominate it.
+        let rigid: Vec<bool> = ids
+            .iter()
+            .map(|id| self.bodies[id].body_type == BodyType::Rigid)
+            .collect();
+
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let id_a = ids[i];
+                let id_b = ids[j];
+
+                // 🔑 Godot forms no pair between two NON-dynamic bodies:
+                // `GodotBodyPair2D::setup` sets `collide_A/B = mode >
+                // BODY_MODE_KINEMATIC`, and with neither side colliding and no
+                // contact reporting (a RigidBody2D-only feature) returns
+                // `collided = false` (godot_body_pair_2d.cpp:258-268). This loop
+                // used to narrow-phase every static/kinematic pair anyway — a
+                // TileMapLayer's hundreds of static tile bodies made it
+                // quadratic in the LEVEL size: the official 2D Platformer demo's
+                // 341 tiles cost ~58k useless pairs per step and starved the
+                // editor.
+                if !rigid[i] && !rigid[j] {
+                    continue;
+                }
+
+                // Skip collision between jointed body pairs
+                let pair_key = if id_a.0 < id_b.0 {
+                    (id_a, id_b)
+                } else {
+                    (id_b, id_a)
+                };
+                if jointed_pairs.contains(&pair_key) {
+                    continue;
+                }
+
+                // Per-body collision exceptions (pat-s3rrv.100) — Godot's
+                // `add_collision_exception_with`, consulted by the broadphase
+                // when it forms a pair (`godot_body_2d.h`). Placed beside the
+                // jointed-pair skip because it answers the same question: this
+                // pair must not generate contacts, while both bodies keep
+                // colliding with everything else.
+                //
+                // ⚠️ Asked of BOTH sides via `excludes`. The exception is stored
+                // on whichever body the script called the method on, but the
+                // effect is mutual, and this loop visits each unordered pair
+                // once in id order — so testing only `a` would make the feature
+                // depend on which body happened to get the lower id.
+                if PhysicsBody2D::excludes(&self.bodies[&id_a], &self.bodies[&id_b]) {
+                    continue;
+                }
+
+                // Read shapes, positions, layers, and velocities.
+                //
+                // One-way collision is NOT hoisted here: it rides on each
+                // `ShapeOwner2D` instead, because Godot puts the flag on the
+                // `CollisionShape2D` child (pat-s3rrv.25). A body-level hoist is
+                // what made a solid torso and a one-way foot sensor mutually
+                // exclusive.
+                let (owners_a, owners_b, layer_a, mask_a, layer_b, mask_b, vel_a, vel_b) = {
+                    let a = &self.bodies[&id_a];
+                    let b = &self.bodies[&id_b];
+                    (
+                        // EVERY shape each body owns, in world space — an
+                        // authored `CollisionShape2D` offset is part of where the
+                        // geometry is, and a body may own several (pat-s3rrv.25).
+                        a.shape_owners(),
+                        b.shape_owners(),
+                        a.collision_layer,
+                        a.collision_mask,
+                        b.collision_layer,
+                        b.collision_mask,
+                        a.linear_velocity,
+                        b.linear_velocity,
+                    )
+                };
+
+                // Collision layer/mask filtering
+                if (layer_a & mask_b) == 0 && (layer_b & mask_a) == 0 {
+                    continue;
+                }
+
+                // Every shape of A against every shape of B (pat-s3rrv.25).
+                // The owner lists came out of the borrow block above already
+                // rotation-aware and collider-offset-aware, so the narrow phase
+                // sees each shape where it actually is (SAT in world space).
+                //
+                // ⚠️ The `continue`s inside now skip a SHAPE pair rather than the
+                // whole body pair. With one shape each — every scene today —
+                // these loops run exactly once and that is the same statement.
+                // With several, it is also the behaviour Godot wants: one-way
+                // collision is a property of a shape, so a body's solid collider
+                // must still block even when its one-way collider lets you pass.
+                for owner_a in &owners_a {
+                    for owner_b in &owners_b {
+                        let (shape_a, tf_a) = (&owner_a.shape, &owner_a.transform);
+                        let (shape_b, tf_b) = (&owner_b.shape, &owner_b.transform);
+                        if let Some(result) =
+                            collision::test_collision(shape_a, tf_a, shape_b, tf_b)
+                        {
+                            // `>= 0`, not `> 0`: shapes exactly TOUCHING collide.
+                            // Godot's SAT separates only on a strict gap
+                            // (`min_A > max_B || min_B > max_A`,
+                            // godot_collision_solver_2d_sat.cpp `test_axis`), and
+                            // `test_collision` already reports depth 0 as
+                            // colliding. Dropping it here made a body that
+                            // started resting on a floor fall into it for one
+                            // step before any impulse or friction applied.
+                            if result.colliding && result.depth >= 0.0 {
+                                // One-way collision check, per SHAPE: the flags
+                                // come off the owner, so A's solid collider still
+                                // blocks even when A's one-way collider lets B
+                                // through (pat-s3rrv.25).
+                                let approach_dir = vel_b - vel_a;
+                                if owner_a.one_way_collision
+                                    && approach_dir.dot(owner_a.one_way_direction) >= 0.0
+                                {
+                                    continue; // Body B is not approaching from the correct side of this shape of A
+                                }
+                                if owner_b.one_way_collision
+                                    && (-approach_dir).dot(owner_b.one_way_direction) >= 0.0
+                                {
+                                    continue; // Body A is not approaching from the correct side of this shape of B
+                                }
+                                // `one_way_collision_margin`: a one-way shape
+                                // blocks only while the contact is no deeper
+                                // than its margin. Past that the mover has
+                                // effectively passed through, and Godot drops
+                                // the contact rather than popping it back out
+                                // (`godot_space_2d.cpp:424`, against the
+                                // `valid_depth` set at `:949`).
+                                //
+                                // ⚠️ This is what makes a FAST body clip
+                                // through a thin one-way platform: it crosses
+                                // more than the margin in one step, so no
+                                // frame ever sees a shallow-enough contact.
+                                // Raising the margin is Godot's remedy and the
+                                // reason the property is authored per shape.
+                                if owner_a.one_way_collision
+                                    && result.depth > owner_a.one_way_margin
+                                {
+                                    continue;
+                                }
+                                if owner_b.one_way_collision
+                                    && result.depth > owner_b.one_way_margin
+                                {
+                                    continue;
+                                }
+
+                                let pair = if id_a.0 < id_b.0 {
+                                    (id_a, id_b)
+                                } else {
+                                    (id_b, id_a)
+                                };
+                                current_contacts.insert(pair);
+
+                                let state = if self.previous_contacts.contains(&pair) {
+                                    ContactState::Persisting
+                                } else {
+                                    ContactState::Entered
+                                };
+
+                                events.push(CollisionEvent {
+                                    body_a: id_a,
+                                    body_b: id_b,
+                                    contact_point: result.point,
+                                    normal: result.normal,
+                                    state,
+                                });
+
+                                // A box on a floor touches along an edge; the narrow
+                                // phase only reports its midpoint. Recovering the second
+                                // point is what stops a stacked box rocking corner to
+                                // corner.
+                                let manifold =
+                                    solver::build_manifold(shape_a, tf_a, shape_b, tf_b, &result);
+                                let (Some(body_a), Some(body_b)) =
+                                    (self.bodies.get(&id_a), self.bodies.get(&id_b))
+                                else {
+                                    continue;
+                                };
+                                if let Some(constraint) = ContactConstraint2D::new(
+                                    body_a,
+                                    body_b,
+                                    &manifold,
+                                    dt,
+                                    self.contact_solver.contact_bias,
+                                    self.contact_solver.max_penetration,
+                                ) {
+                                    constraints.push(constraint);
+                                }
+                            }
+                        }
+                    } // shape_b
+                } // shape_a
+            }
+        }
+
+        // Phase 3: solve every contact together, iteratively.
+        let contact_solver = self.contact_solver;
+        let bias_velocities =
+            contact_solver.solve(&mut self.bodies, &mut constraints, &mut self.contact_cache);
+
+        // A *newly entered* contact wakes both bodies — a sleeping box struck by
+        // another must resume simulating.
+        //
+        // ⚠️ Only a new one. Waking on every live contact means a box resting on
+        // the floor is woken every single tick and could never fall asleep,
+        // which defeats the point: the bodies that most deserve to sleep are
+        // exactly the ones in a permanent resting contact (pat-0q2kx.116).
+        for event in &events {
+            if event.state != ContactState::Entered {
+                continue;
+            }
+            for id in [event.body_a, event.body_b] {
+                if let Some(body) = self.bodies.get_mut(&id) {
+                    body.wake();
+                }
+            }
+        }
+
+        // Continuous collision detection (`RigidBody2D.continuous_cd`) needs the
+        // position from BEFORE the transforms advance, so the sweep has a start
+        // point (pat-s3rrv.100). Mirrors `gdphysics3d::world`'s `ccd_prev`.
+        //
+        // Only moving RIGID bodies are swept: a static or kinematic body is
+        // placed by the scene rather than integrated, and a sleeping one is not
+        // moving at all.
+        //
+        // Sorted for the same reason as the broadphase sweep above: `ccd_clamp`
+        // moves a body, so the order the sweeps run in is observable
+        // (pat-21oab.1).
+        let mut ccd_prev: Vec<(BodyId, Vector2)> = self
+            .bodies
+            .values()
+            .filter(|b| b.continuous_cd && b.body_type == BodyType::Rigid && !b.sleeping)
+            .map(|b| (b.id, b.position))
+            .collect();
+        ccd_prev.sort_unstable_by_key(|(id, _)| id.0);
+
+        // Phase 4: `integrate_velocities` — now that the solver has produced the
+        // final velocities, advance the transforms. The depenetration
+        // pseudo-velocity moves the transform here and is then dropped, so
+        // pushing an overlap apart never becomes kinetic energy.
+        for body in self.bodies.values_mut() {
+            let (bias_linear, bias_angular) = bias_velocities
+                .get(&body.id)
+                .copied()
+                .unwrap_or((Vector2::ZERO, 0.0));
+            body.integrate_velocities_biased(dt, bias_linear, bias_angular);
+        }
+
+        // Phase 4b: pull back any swept body that tunnelled through a static
+        // obstacle during the step just integrated.
+        for (id, prev) in ccd_prev {
+            self.ccd_clamp(id, prev);
+        }
+
+        // Phase 5: joint constraints (iterated for convergence), on the
+        // integrated transforms — the same state they saw before the solver
+        // rework, since `apply_joint_constraints` corrects positions.
+        //
+        // Sorted: `apply_joint_constraints` corrects positions, so a chain of
+        // joints converges to a different place depending on the order they are
+        // relaxed in, and `joints` is an unordered map (pat-21oab.1).
+        let mut joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        joint_ids.sort_unstable_by_key(|id| id.0);
         for _iter in 0..self.constraint_iterations {
             for &jid in &joint_ids {
                 let jt = &self.joints[&jid];
@@ -176,136 +907,27 @@ impl PhysicsWorld2D {
             }
         }
 
-        // Build set of jointed body pairs to skip collision between them
-        let mut jointed_pairs: HashSet<(BodyId, BodyId)> = HashSet::new();
-        for jt in self.joints.values() {
-            if jt.is_enabled() {
-                let a = jt.base().body_a;
-                let b = jt.base().body_b;
-                let pair = if a.0 < b.0 { (a, b) } else { (b, a) };
-                jointed_pairs.insert(pair);
-            }
-        }
-
-        // Phase 2 & 3: Collision detection and resolution
-        let ids: Vec<BodyId> = self.bodies.keys().copied().collect();
-        let mut current_contacts = HashSet::new();
-        let mut events = Vec::new();
-
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
-                let id_a = ids[i];
-                let id_b = ids[j];
-
-                // Skip collision between jointed body pairs
-                let pair_key = if id_a.0 < id_b.0 {
-                    (id_a, id_b)
-                } else {
-                    (id_b, id_a)
-                };
-                if jointed_pairs.contains(&pair_key) {
-                    continue;
-                }
-
-                // Read shapes, positions, layers, and one-way info
-                let (
-                    shape_a,
-                    pos_a,
-                    shape_b,
-                    pos_b,
-                    layer_a,
-                    mask_a,
-                    layer_b,
-                    mask_b,
-                    ow_a,
-                    ow_dir_a,
-                    ow_b,
-                    ow_dir_b,
-                    vel_a,
-                    vel_b,
-                ) = {
-                    let a = &self.bodies[&id_a];
-                    let b = &self.bodies[&id_b];
-                    (
-                        a.shape,
-                        a.position,
-                        b.shape,
-                        b.position,
-                        a.collision_layer,
-                        a.collision_mask,
-                        b.collision_layer,
-                        b.collision_mask,
-                        a.one_way_collision,
-                        a.one_way_direction,
-                        b.one_way_collision,
-                        b.one_way_direction,
-                        a.linear_velocity,
-                        b.linear_velocity,
-                    )
-                };
-
-                // Collision layer/mask filtering
-                if (layer_a & mask_b) == 0 && (layer_b & mask_a) == 0 {
-                    continue;
-                }
-
-                let tf_a = Transform2D::translated(pos_a);
-                let tf_b = Transform2D::translated(pos_b);
-
-                if let Some(result) = collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b) {
-                    if result.colliding && result.depth > 0.0 {
-                        // One-way collision check
-                        let approach_dir = vel_b - vel_a;
-                        if ow_a && approach_dir.dot(ow_dir_a) >= 0.0 {
-                            continue; // Body B is not approaching from the correct side of A
-                        }
-                        if ow_b && (-approach_dir).dot(ow_dir_b) >= 0.0 {
-                            continue; // Body A is not approaching from the correct side of B
-                        }
-
-                        let pair = if id_a.0 < id_b.0 {
-                            (id_a, id_b)
-                        } else {
-                            (id_b, id_a)
-                        };
-                        current_contacts.insert(pair);
-
-                        let state = if self.previous_contacts.contains(&pair) {
-                            ContactState::Persisting
-                        } else {
-                            ContactState::Entered
-                        };
-
-                        events.push(CollisionEvent {
-                            body_a: id_a,
-                            body_b: id_b,
-                            contact_point: result.point,
-                            normal: result.normal,
-                            state,
-                        });
-
-                        // SAFETY: id_a != id_b because i != j and IDs are unique.
-                        let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
-                        // SAFETY: We guarantee id_a != id_b, so these are disjoint entries.
-                        let body_a = unsafe { &mut *ptr }.get_mut(&id_a).unwrap();
-                        let body_b = unsafe { &mut *ptr }.get_mut(&id_b).unwrap();
-                        collision::separate_bodies(body_a, body_b, &result);
-                    }
-                }
-            }
-        }
-
-        // Detect exited contacts
-        for &pair in &self.previous_contacts {
-            if !current_contacts.contains(&pair) {
-                events.push(CollisionEvent {
-                    body_a: pair.0,
-                    body_b: pair.1,
-                    contact_point: Vector2::ZERO,
-                    normal: Vector2::ZERO,
-                    state: ContactState::Exited,
-                });
-            }
+        // Detect exited contacts.
+        //
+        // Drained in id order: `previous_contacts` is a `HashSet`, so emitting
+        // straight from it would append the Exited events in a random order and
+        // make the returned event list — which callers forward on as
+        // `body_shape_exited` signals — differ run to run (pat-21oab.1).
+        let mut exited: Vec<(BodyId, BodyId)> = self
+            .previous_contacts
+            .iter()
+            .copied()
+            .filter(|pair| !current_contacts.contains(pair))
+            .collect();
+        exited.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+        for (body_a, body_b) in exited {
+            events.push(CollisionEvent {
+                body_a,
+                body_b,
+                contact_point: Vector2::ZERO,
+                normal: Vector2::ZERO,
+                state: ContactState::Exited,
+            });
         }
 
         self.previous_contacts = current_contacts;
@@ -338,6 +960,340 @@ impl PhysicsWorld2D {
 
         closest
     }
+
+    /// Runs a Godot `PhysicsDirectSpaceState2D.intersect_ray` query
+    /// (pat-nzgdu.124): the closest body along `from -> to` that survives the
+    /// query's filters, or `None`.
+    ///
+    /// Unlike [`raycast`](Self::raycast) / [`raycast_filtered`](Self::raycast_filtered),
+    /// this takes Godot's parameter object ([`RayQuery2D`] ≙
+    /// `PhysicsRayQueryParameters2D`) and follows Godot's mask semantics — see
+    /// [`RayQuery2D::collision_mask`].
+    ///
+    /// `hit_from_inside` reproduces Godot's rule in both directions: a ray whose
+    /// `from` lies inside a shape either reports that shape at `from` with a
+    /// zero normal (when set), or does not report that shape **at all** (when
+    /// clear) — it does not punch out through the far wall.
+    pub fn intersect_ray(&self, query: &RayQuery2D) -> Option<RaycastHit> {
+        // Areas live in a separate AreaStore that this world does not own, so
+        // an areas-only query can never hit anything here.
+        if !query.collide_with_bodies {
+            return None;
+        }
+        let delta = query.to - query.from;
+        let max_distance = delta.length();
+        if max_distance < 1e-10 {
+            return None;
+        }
+        let dir = delta.normalized();
+
+        let mut inside: Option<RaycastHit> = None;
+        let mut closest: Option<RaycastHit> = None;
+
+        for (&id, body) in &self.bodies {
+            if query.exclude.contains(&id) {
+                continue;
+            }
+            if (body.collision_layer & query.collision_mask) == 0 {
+                continue;
+            }
+
+            // World -> local, mirroring point_query.
+            let starts_inside = body.shape_owners().into_iter().any(|o| {
+                o.shape
+                    .contains_point(o.transform.affine_inverse().xform(query.from))
+            });
+            if starts_inside {
+                if query.hit_from_inside {
+                    // Godot reports an inside hit at the ray origin with a zero
+                    // normal. Several bodies may contain `from`; pick the lowest
+                    // id so the result is deterministic (BodyId is not Ord, and
+                    // the body map is unordered) rather than map-order dependent.
+                    let better = inside.as_ref().is_none_or(|c| id.0 < c.body_id.0);
+                    if better {
+                        inside = Some(RaycastHit {
+                            body_id: id,
+                            point: query.from,
+                            normal: Vector2::ZERO,
+                            distance: 0.0,
+                        });
+                    }
+                }
+                continue;
+            }
+
+            if let Some(hit) = raycast_shape(query.from, dir, max_distance, body) {
+                if closest.as_ref().is_none_or(|c| hit.distance < c.distance) {
+                    closest = Some(hit);
+                }
+            }
+        }
+
+        // An inside hit is at distance 0, so it always wins.
+        inside.or(closest)
+    }
+
+    /// Casts a ray like [`raycast`](Self::raycast) but honoring a Godot
+    /// `RayCast2D`-style filter: bodies whose id is in `exclude` are skipped
+    /// (e.g. `add_exception` / `exclude_parent`), and a body is only hit when
+    /// its `collision_layer` intersects `collision_mask`. Passing
+    /// `collision_mask == 0` disables the mask so every layer is eligible
+    /// (matching the unfiltered [`raycast`](Self::raycast)). Returns the closest
+    /// surviving hit.
+    pub fn raycast_filtered(
+        &self,
+        origin: Vector2,
+        direction: Vector2,
+        max_distance: f32,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Option<RaycastHit> {
+        let dir = direction.normalized();
+        if dir.length_squared() < 1e-10 {
+            return None;
+        }
+
+        let mut closest: Option<RaycastHit> = None;
+        for (&id, body) in &self.bodies {
+            if exclude.contains(&id) {
+                continue;
+            }
+            if collision_mask != 0 && (body.collision_layer & collision_mask) == 0 {
+                continue;
+            }
+            if let Some(hit) = raycast_shape(origin, dir, max_distance, body) {
+                if closest.is_none() || hit.distance < closest.as_ref().unwrap().distance {
+                    closest = Some(hit);
+                }
+            }
+        }
+        closest
+    }
+
+    /// Returns the [`BodyId`]s of all bodies whose shape contains `world_point`,
+    /// for input picking (Godot `CollisionObject2D` picking / `_intersect_point`).
+    ///
+    /// The world point is transformed into each body's LOCAL space — using the
+    /// same rotation-aware [`PhysicsBody2D::shape_world_transform`] convention the
+    /// place a body's shape in the world (see [`step_inner`](Self::step_inner)) —
+    /// before the shape's [`Shape2D::contains_point`] test, which expects a
+    /// shape-local point.
+    ///
+    /// Results are sorted deterministically by ascending [`BodyId`] so
+    /// callers/tests are stable; a scene layer can re-sort by draw/z order.
+    ///
+    /// Every body is considered pickable: [`PhysicsBody2D`] has no
+    /// pickable/monitorable flag, so none is respected here.
+    pub fn point_query(&self, world_point: Vector2) -> Vec<BodyId> {
+        let mut hits: Vec<BodyId> = self
+            .bodies
+            .iter()
+            .filter_map(|(&id, body)| {
+                // World -> local: invert the body's world transform, mirroring
+                // the `shape_world_transform()` the narrow-phase builds to place
+                // this body's shape in the world.
+                // ANY collider the body owns, not just the first
+                // (pat-s3rrv.25). A picking click on an L-shaped body's second
+                // arm used to miss it entirely.
+                body.shape_owners()
+                    .into_iter()
+                    .any(|o| {
+                        o.shape
+                            .contains_point(o.transform.affine_inverse().xform(world_point))
+                    })
+                    .then_some(id)
+            })
+            .collect();
+        // `BodyId` is not `Ord`; sort by its inner id for a deterministic order.
+        hits.sort_by_key(|id| id.0);
+        hits
+    }
+
+    /// Returns the smallest [`BodyId`] whose shape contains `world_point`, or
+    /// `None` if the point hits no body. Convenience over [`point_query`].
+    ///
+    /// [`point_query`]: Self::point_query
+    /// Like [`point_query`](Self::point_query), but also reports **which**
+    /// collider of each body contained the point (pat-s3rrv.25).
+    ///
+    /// The index is into [`PhysicsBody2D::shape_owners`], i.e. `0` is the
+    /// primary shape and `1..` are `extra_shapes` in scene order — which is the
+    /// `shape_idx` Godot passes to `_input_event` and `_mouse_shape_enter`.
+    ///
+    /// Reports the FIRST matching collider per body rather than all of them:
+    /// Godot's picking delivers one `shape_idx` per object per event, and
+    /// overlapping colliders on one body would otherwise fire the handler twice
+    /// for a single click.
+    pub fn point_query_with_shape(&self, world_point: Vector2) -> Vec<(BodyId, usize)> {
+        let mut hits: Vec<(BodyId, usize)> = self
+            .bodies
+            .iter()
+            .filter_map(|(&id, body)| {
+                body.shape_owners()
+                    .into_iter()
+                    .position(|o| {
+                        o.shape
+                            .contains_point(o.transform.affine_inverse().xform(world_point))
+                    })
+                    .map(|idx| (id, idx))
+            })
+            .collect();
+        hits.sort_by_key(|(id, _)| id.0);
+        hits
+    }
+
+    pub fn point_query_first(&self, world_point: Vector2) -> Option<BodyId> {
+        self.point_query(world_point).into_iter().next()
+    }
+
+    /// Tests `shape` placed at `transform` against every body and returns all
+    /// overlaps (Godot `ShapeCast2D`). Bodies in `exclude` are skipped and
+    /// `collision_mask` filters by layer (`0` = every layer). Results are sorted
+    /// by ascending penetration `depth`, so `hits[0]` is the shallowest contact
+    /// and `hits.len()` is the collision count.
+    ///
+    /// This is a positional overlap query (the cast shape resolved at its target
+    /// transform); a full swept sub-step search can layer on top later.
+    pub fn shape_cast(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Vec<ShapeCastHit> {
+        let mut hits: Vec<ShapeCastHit> = Vec::new();
+        for (&id, body) in &self.bodies {
+            if exclude.contains(&id) {
+                continue;
+            }
+            if collision_mask != 0 && (body.collision_layer & collision_mask) == 0 {
+                continue;
+            }
+            let deepest = body
+                .shape_owners()
+                .into_iter()
+                .filter_map(|o| {
+                    collision::test_collision(shape, &transform, &o.shape, &o.transform)
+                })
+                .filter(|r| r.colliding)
+                .max_by(|a, b| a.depth.total_cmp(&b.depth));
+            if let Some(result) = deepest {
+                if result.colliding {
+                    hits.push(ShapeCastHit {
+                        body_id: id,
+                        point: result.point,
+                        normal: result.normal,
+                        depth: result.depth,
+                    });
+                }
+            }
+        }
+        hits.sort_by(|a, b| {
+            a.depth
+                .partial_cmp(&b.depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits
+    }
+
+    /// Godot `PhysicsDirectSpaceState2D.collide_shape` (pat-s3rrv.26).
+    ///
+    /// Contact points as **pairs**, in the documented order: for each pair the
+    /// first point lies on the *query* shape and the second on the collider
+    /// (`doc/classes/PhysicsDirectSpaceState2D.xml`). [`shape_cast`] reports one
+    /// contact on the collider surface plus an outward `normal` and a
+    /// penetration `depth`, so the query shape's matching point is that contact
+    /// pushed back along the normal by the penetration.
+    ///
+    /// [`shape_cast`]: Self::shape_cast
+    pub fn collide_shape(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+        max_results: usize,
+    ) -> Vec<Vector2> {
+        let mut out = Vec::new();
+        for hit in self
+            .shape_cast(shape, transform, exclude, collision_mask)
+            .into_iter()
+            .take(max_results)
+        {
+            out.push(hit.point + hit.normal * (-hit.depth));
+            out.push(hit.point);
+        }
+        out
+    }
+
+    /// Godot `PhysicsDirectSpaceState2D.get_rest_info` (pat-s3rrv.26).
+    ///
+    /// The **nearest** contact when several overlap. [`shape_cast`] sorts
+    /// ascending by penetration depth, so that is simply its first hit.
+    ///
+    /// [`shape_cast`]: Self::shape_cast
+    pub fn shape_rest_info(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Option<ShapeCastHit> {
+        self.shape_cast(shape, transform, exclude, collision_mask)
+            .into_iter()
+            .next()
+    }
+
+    /// Godot `PhysicsDirectSpaceState2D.cast_motion` (pat-s3rrv.26).
+    ///
+    /// `[safe, unsafe]` fractions of `motion`, each in `0..=1`: the largest
+    /// fraction that moves without colliding, and the smallest that collides.
+    ///
+    /// Godot's edge cases, both of which a bare bisection would get wrong:
+    /// `[1.0, 1.0]` when the whole motion is clear, and `[0.0, 0.0]` when the
+    /// shape already overlaps before moving at all.
+    pub fn cast_motion(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        motion: Vector2,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> [f32; 2] {
+        let at = |frac: f32| {
+            let mut tf = transform;
+            tf.origin = transform.origin + motion * frac;
+            tf
+        };
+        if !self
+            .shape_cast(shape, at(0.0), exclude, collision_mask)
+            .is_empty()
+        {
+            return [0.0, 0.0];
+        }
+        if self
+            .shape_cast(shape, at(1.0), exclude, collision_mask)
+            .is_empty()
+        {
+            return [1.0, 1.0];
+        }
+        // `lo` is always clear and `hi` always collides, so the interval always
+        // brackets the transition; 16 halvings resolve it to ~1.5e-5 of the
+        // motion, finer than a pixel for any realistic motion length.
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..16 {
+            let mid = (lo + hi) * 0.5;
+            if self
+                .shape_cast(shape, at(mid), exclude, collision_mask)
+                .is_empty()
+            {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        [lo, hi]
+    }
 }
 
 impl Default for PhysicsWorld2D {
@@ -353,20 +1309,225 @@ fn raycast_shape(
     max_distance: f32,
     body: &PhysicsBody2D,
 ) -> Option<RaycastHit> {
-    match body.shape {
+    // Godot intersects the ray in the SHAPE's own space, so a rotated body
+    // collides as it is drawn. This previously passed `body.position` as the
+    // shape centre and ignored `body.rotation` entirely: a rotated rectangle
+    // was ray-tested as though it were still axis-aligned, which silently
+    // reported hits on faces that had turned away (pat-0q2kx.32).
+    //
+    // `shape_world_transform` is rigid — rotation and translation, no scale — so
+    // hit distance survives the round trip unchanged and a unit direction stays
+    // unit-length.
+    // The NEAREST hit across every collider the body owns (pat-s3rrv.25).
+    //
+    // ⚠️ Nearest, not first and not deepest. A ray must report the surface it
+    // reaches soonest: on an L-shaped body whose second arm is closer to the
+    // origin, returning the first collider in scene order would place the hit
+    // point and normal on a face the ray passes *through* on its way, and a
+    // RayCast2D driving a wall-stick or a laser would aim at the wrong surface.
+    // Each collider is transformed back to world space with ITS OWN transform
+    // before the distances are compared.
+    body.shape_owners()
+        .into_iter()
+        .filter_map(|owner| {
+            let (shape, xform) = (owner.shape, owner.transform);
+            let inv = xform.affine_inverse();
+            let hit = raycast_shape_local(
+                inv.xform(origin),
+                inv.basis_xform(dir),
+                max_distance,
+                &shape,
+                body.id,
+            )?;
+            Some(RaycastHit {
+                body_id: hit.body_id,
+                point: xform.xform(hit.point),
+                normal: xform.basis_xform(hit.normal),
+                distance: hit.distance,
+            })
+        })
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
+}
+
+/// Ray-shape intersection with the shape at the origin, unrotated.
+fn raycast_shape_local(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    shape: &Shape2D,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    match *shape {
         Shape2D::Circle { radius } => {
-            ray_circle(origin, dir, max_distance, body.position, radius, body.id)
+            ray_circle(origin, dir, max_distance, Vector2::ZERO, radius, body_id)
         }
         Shape2D::Rectangle { half_extents } => ray_aabb(
             origin,
             dir,
             max_distance,
-            body.position,
+            Vector2::ZERO,
             half_extents,
-            body.id,
+            body_id,
         ),
-        _ => None, // Segment and capsule raycasts not yet implemented
+        Shape2D::Capsule { radius, height } => ray_capsule(
+            origin,
+            dir,
+            max_distance,
+            Vector2::ZERO,
+            radius,
+            height,
+            body_id,
+        ),
+        Shape2D::Segment { a, b } => ray_edges(origin, dir, max_distance, &[(a, b)], body_id),
+        // A convex hull is its closed boundary: the nearest edge crossing is the
+        // entry point. Winding order is irrelevant because `ray_edges` orients
+        // each normal against the ray.
+        Shape2D::ConvexPolygon { points, count } => {
+            let n = count as usize;
+            if n < 2 {
+                return None;
+            }
+            let edges: Vec<(Vector2, Vector2)> =
+                (0..n).map(|i| (points[i], points[(i + 1) % n])).collect();
+            ray_edges(origin, dir, max_distance, &edges, body_id)
+        }
+        // Godot's ConcavePolygonShape2D is a segment soup: consecutive PAIRS,
+        // not a closed loop, so the edges must not wrap around.
+        Shape2D::ConcavePolygon { points, count } => {
+            let n = count as usize;
+            let edges: Vec<(Vector2, Vector2)> = (0..n / 2)
+                .map(|i| (points[i * 2], points[i * 2 + 1]))
+                .collect();
+            if edges.is_empty() {
+                return None;
+            }
+            ray_edges(origin, dir, max_distance, &edges, body_id)
+        }
+        Shape2D::WorldBoundary { normal, distance } => {
+            ray_world_boundary(origin, dir, max_distance, normal, distance, body_id)
+        }
+        // A separation ray is a segment from the origin along local +Y.
+        Shape2D::SeparationRay { length } => ray_edges(
+            origin,
+            dir,
+            max_distance,
+            &[(Vector2::ZERO, Vector2::new(0.0, length))],
+            body_id,
+        ),
     }
+}
+
+/// Nearest intersection of a ray with a set of line segments.
+///
+/// Shared by every polyline-ish shape (segment, convex hull boundary, concave
+/// soup, separation ray). Each returned normal is flipped to face the incoming
+/// ray, so callers need not care about winding order.
+fn ray_edges(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    edges: &[(Vector2, Vector2)],
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    let mut best: Option<RaycastHit> = None;
+    for &(a, b) in edges {
+        let e = b - a;
+        let denom = dir.cross(e);
+        if denom.abs() < 1e-9 {
+            // Parallel (or a degenerate edge): no single crossing point.
+            continue;
+        }
+        let rel = a - origin;
+        let t = rel.cross(e) / denom;
+        let u = rel.cross(dir) / denom;
+        if t < 0.0 || t > max_distance || !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        if best.as_ref().is_some_and(|c| t >= c.distance) {
+            continue;
+        }
+        let mut normal = Vector2::new(e.y, -e.x).normalized();
+        if normal.dot(dir) > 0.0 {
+            normal = -normal;
+        }
+        best = Some(RaycastHit {
+            body_id,
+            point: origin + dir * t,
+            normal,
+            distance: t,
+        });
+    }
+    best
+}
+
+/// Ray vs an infinite half-plane (`WorldBoundaryShape2D`).
+///
+/// The solid region is the side the normal points AWAY from, so only a ray
+/// travelling toward that side crosses the surface. A ray leaving the solid
+/// side is already inside the shape — that is `hit_from_inside`'s business,
+/// handled by the caller's `contains_point` test.
+fn ray_world_boundary(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    normal: Vector2,
+    distance: f32,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    let denom = dir.dot(normal);
+    if denom >= -1e-9 {
+        return None;
+    }
+    let t = (distance - origin.dot(normal)) / denom;
+    if t < 0.0 || t > max_distance {
+        return None;
+    }
+    Some(RaycastHit {
+        body_id,
+        point: origin + dir * t,
+        normal,
+        distance: t,
+    })
+}
+
+/// Ray vs vertical capsule (Godot CapsuleShape2D: height along Y, hemispheres).
+fn ray_capsule(
+    origin: Vector2,
+    dir: Vector2,
+    max_dist: f32,
+    center: Vector2,
+    radius: f32,
+    height: f32,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    // Approximate capsule as two circles + AABB slab; take nearest hit.
+    let half = (height * 0.5 - radius).max(0.0);
+    let c1 = Vector2::new(center.x, center.y - half);
+    let c2 = Vector2::new(center.x, center.y + half);
+    let mut best: Option<RaycastHit> = None;
+    for c in [c1, c2] {
+        if let Some(h) = ray_circle(origin, dir, max_dist, c, radius, body_id) {
+            if best
+                .as_ref()
+                .map(|b| h.distance < b.distance)
+                .unwrap_or(true)
+            {
+                best = Some(h);
+            }
+        }
+    }
+    // Cylinder body as AABB
+    let half_ext = Vector2::new(radius, half.max(0.0));
+    if let Some(h) = ray_aabb(origin, dir, max_dist, center, half_ext, body_id) {
+        if best
+            .as_ref()
+            .map(|b| h.distance < b.distance)
+            .unwrap_or(true)
+        {
+            best = Some(h);
+        }
+    }
+    best
 }
 
 /// Ray vs circle intersection.
@@ -531,6 +1692,8 @@ mod tests {
     #[test]
     fn world_step_rigid_body_moves() {
         let mut world = PhysicsWorld2D::new();
+        // Isolate constant-velocity motion from gravity for this assertion.
+        world.set_gravity(Vector2::ZERO);
         let mut body = make_rigid_circle(Vector2::ZERO, 1.0);
         body.linear_velocity = Vector2::new(0.0, 10.0); // falling
         let id = world.add_body(body);
@@ -542,6 +1705,200 @@ mod tests {
     }
 
     #[test]
+    fn world_default_gravity_matches_godot() {
+        let world = PhysicsWorld2D::new();
+        assert_eq!(world.gravity(), Vector2::new(0.0, 980.0));
+    }
+
+    #[test]
+    fn world_rigid_body_falls_under_default_gravity() {
+        // Under default gravity, a rigid body should fall ~0.5*g*t² in +Y.
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::ZERO, 1.0));
+
+        let dt = 1.0 / 60.0;
+        let steps = 60;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let t = dt * steps as f32;
+        let expected = 0.5 * 980.0 * t * t; // ≈ 490 px
+        let y = world.get_body(id).unwrap().position.y;
+        assert!(
+            (y - expected).abs() < expected * 0.05,
+            "fell {y}, expected ≈ {expected} (0.5*g*t²)"
+        );
+        assert!(y > 0.0, "body must fall in +Y");
+    }
+
+    #[test]
+    fn world_gravity_scale_zero_and_double() {
+        // gravity_scale=0 does not fall; gravity_scale=2 falls twice as far.
+        let dt = 1.0 / 60.0;
+        let steps = 30;
+
+        let mut world = PhysicsWorld2D::new();
+        let mut b0 = make_rigid_circle(Vector2::ZERO, 1.0);
+        b0.collision_layer = 0; // avoid any inter-body collision
+        b0.collision_mask = 0;
+        b0.gravity_scale = 0.0;
+        let mut b1 = make_rigid_circle(Vector2::new(100.0, 0.0), 1.0);
+        b1.collision_layer = 0;
+        b1.collision_mask = 0;
+        b1.gravity_scale = 1.0;
+        let mut b2 = make_rigid_circle(Vector2::new(200.0, 0.0), 1.0);
+        b2.collision_layer = 0;
+        b2.collision_mask = 0;
+        b2.gravity_scale = 2.0;
+        let id0 = world.add_body(b0);
+        let id1 = world.add_body(b1);
+        let id2 = world.add_body(b2);
+
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let y0 = world.get_body(id0).unwrap().position.y;
+        let y1 = world.get_body(id1).unwrap().position.y;
+        let y2 = world.get_body(id2).unwrap().position.y;
+        assert!(y0.abs() < 1e-5, "gravity_scale=0 should not fall, got {y0}");
+        assert!(y1 > 0.0, "gravity_scale=1 should fall, got {y1}");
+        // Integration is linear in gravity, so 2x scale falls exactly 2x.
+        assert!(
+            (y2 - 2.0 * y1).abs() < 1e-2,
+            "gravity_scale=2 ({y2}) should fall 2x gravity_scale=1 ({y1})"
+        );
+    }
+
+    #[test]
+    fn world_linear_damp_decays_velocity() {
+        // No gravity + linear damping: velocity decays by (1 - dt*d) per step.
+        let mut world = PhysicsWorld2D::new();
+        world.set_gravity(Vector2::ZERO);
+        let dt = 1.0 / 60.0;
+        let d = 3.0_f32;
+        let mut body = make_rigid_circle(Vector2::ZERO, 1.0);
+        body.collision_layer = 0;
+        body.collision_mask = 0;
+        body.linear_velocity = Vector2::new(50.0, 0.0);
+        body.linear_damp = d;
+        let id = world.add_body(body);
+
+        let steps = 45;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let expected = 50.0 * (1.0 - dt * d).powi(steps);
+        let vx = world.get_body(id).unwrap().linear_velocity.x;
+        assert!(
+            (vx - expected).abs() < 1e-2,
+            "damped velocity {vx} != expected {expected}"
+        );
+        assert!(vx < 50.0 && vx > 0.0, "velocity should decay, got {vx}");
+    }
+
+    #[test]
+    fn world_step_with_area_overrides_applies_per_body_gravity_and_damp() {
+        use std::collections::HashMap;
+
+        // Body A gets a zero-gravity override (as if inside an anti-gravity
+        // area); body B is absent from the map and falls under world gravity.
+        let mut world = PhysicsWorld2D::new();
+        let mut a = make_rigid_circle(Vector2::ZERO, 1.0);
+        a.collision_layer = 0;
+        a.collision_mask = 0;
+        let mut b = make_rigid_circle(Vector2::new(1000.0, 0.0), 1.0);
+        b.collision_layer = 0;
+        b.collision_mask = 0;
+        let id_a = world.add_body(a);
+        let id_b = world.add_body(b);
+
+        let mut gravity_overrides: HashMap<BodyId, Vector2> = HashMap::new();
+        gravity_overrides.insert(id_a, Vector2::ZERO); // A: no gravity
+        let damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+        // This test predates `angular_damp_overrides` and covers the linear
+        // channel only; an empty map is "no area overrides this axis".
+        let angular_damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            world.step_with_area_overrides(
+                dt,
+                &gravity_overrides,
+                &damp_overrides,
+                &angular_damp_overrides,
+            );
+        }
+
+        let ya = world.get_body(id_a).unwrap().position.y;
+        let yb = world.get_body(id_b).unwrap().position.y;
+        assert!(
+            ya.abs() < 1e-5,
+            "override to zero gravity must not fall, got {ya}"
+        );
+        assert!(yb > 0.0, "body without override must fall, got {yb}");
+
+        // A damp override replaces the body's own damping during integration and
+        // is restored afterwards (the stored field is left untouched).
+        let mut world2 = PhysicsWorld2D::new();
+        world2.set_gravity(Vector2::ZERO);
+        let mut c = make_rigid_circle(Vector2::ZERO, 1.0);
+        c.collision_layer = 0;
+        c.collision_mask = 0;
+        c.linear_velocity = Vector2::new(100.0, 0.0);
+        c.linear_damp = 0.0; // no self-damping
+        let id_c = world2.add_body(c);
+
+        let mut damp2: HashMap<BodyId, f32> = HashMap::new();
+        damp2.insert(id_c, 5.0); // strong area damping
+        let no_gravity: HashMap<BodyId, Vector2> = HashMap::new();
+        // Linear damping only — this case asserts `linear_velocity`, so the
+        // angular channel is deliberately left unoverridden.
+        let no_angular_damp: HashMap<BodyId, f32> = HashMap::new();
+        for _ in 0..30 {
+            world2.step_with_area_overrides(dt, &no_gravity, &damp2, &no_angular_damp);
+        }
+        let body_c = world2.get_body(id_c).unwrap();
+        assert!(
+            body_c.linear_velocity.x < 100.0,
+            "damp override must decay velocity, got {}",
+            body_c.linear_velocity.x
+        );
+        assert_eq!(
+            body_c.linear_damp, 0.0,
+            "the body's own linear_damp must be restored after the step"
+        );
+    }
+
+    #[test]
+    fn world_static_body_unaffected_by_gravity() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_static_rect(Vector2::new(7.0, 3.0), 5.0));
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+        let b = world.get_body(id).unwrap();
+        assert_eq!(b.position, Vector2::new(7.0, 3.0), "static must not fall");
+        assert_eq!(b.linear_velocity, Vector2::ZERO);
+    }
+
+    /// Steps `world` with no gravity until an overlap has settled.
+    ///
+    /// 🔑 Not `step(0.0)`: the solver resolves penetration with a bias
+    /// VELOCITY integrated over `dt` and then dropped (Godot's
+    /// `GodotBodyPair2D` bias, so pushing an overlap apart never becomes
+    /// kinetic energy). A zero-dt step therefore moves nothing — these tests
+    /// were written for the old instant position projection.
+    fn settle(world: &mut PhysicsWorld2D) {
+        world.set_gravity(Vector2::ZERO);
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+    }
+
+    #[test]
     fn world_two_bodies_collide_and_separate() {
         let mut world = PhysicsWorld2D::new();
 
@@ -549,16 +1906,20 @@ mod tests {
         let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
         let id_b = world.add_body(make_rigid_circle(Vector2::new(8.0, 0.0), 5.0));
 
-        world.step(0.0); // zero dt — just collision detection
+        settle(&mut world);
 
         let a = world.get_body(id_a).unwrap();
         let b = world.get_body(id_b).unwrap();
-        // Bodies should have been pushed apart
+        // Pushed apart to touching, less Godot's resting slop
+        // (`contact_max_allowed_penetration`, 0.3): 10 - 0.3 = 9.7 exactly.
         let dist = (b.position - a.position).length();
+        let want = 10.0 - crate::solver::DEFAULT_MAX_PENETRATION;
         assert!(
-            dist >= 10.0 - EPSILON,
-            "Bodies should be separated: dist = {dist}"
+            (dist - want).abs() < 1e-2,
+            "Bodies should settle at {want}: dist = {dist}"
         );
+        // ...and the push-out injects no kinetic energy.
+        assert!(a.linear_velocity.length() < 1e-2 && b.linear_velocity.length() < 1e-2);
     }
 
     #[test]
@@ -567,7 +1928,7 @@ mod tests {
         let static_id = world.add_body(make_static_rect(Vector2::ZERO, 5.0));
         let rigid_id = world.add_body(make_rigid_circle(Vector2::new(6.0, 0.0), 2.0));
 
-        world.step(0.0);
+        settle(&mut world);
 
         let s = world.get_body(static_id).unwrap();
         assert_eq!(s.position, Vector2::ZERO, "Static body must not move");
@@ -577,6 +1938,209 @@ mod tests {
             r.position.x > 6.0,
             "Rigid body should be pushed away from static"
         );
+    }
+
+    // pat-nzgdu.58: the gdphysics2d query layer behind RayCast2D/ShapeCast2D —
+    // filtered raycast (exclusions + collision mask) and a shape overlap cast.
+    // (Per-node tick state + interpreter dispatch are a separate lane.)
+    #[test]
+    fn raycast2d_shapecast2d_physics_tick() {
+        // Two bodies on the +x axis: a wall on layer 2 at x=5, a target on
+        // layer 1 at x=10 (both radius 1).
+        let mut world = PhysicsWorld2D::new();
+        let mut wall = make_rigid_circle(Vector2::new(5.0, 0.0), 1.0);
+        wall.collision_layer = 2;
+        let wall_id = world.add_body(wall);
+        let mut target = make_rigid_circle(Vector2::new(10.0, 0.0), 1.0);
+        target.collision_layer = 1;
+        let target_id = world.add_body(target);
+
+        let px = Vector2::new(1.0, 0.0);
+
+        // Unfiltered ray (mask 0) hits the CLOSEST body — the wall at x=5.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 0)
+            .expect("ray should hit the wall");
+        assert_eq!(hit.body_id, wall_id);
+
+        // Excluding the wall lets the ray reach the target behind it, with a
+        // normal facing back toward the ray origin.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[wall_id], 0)
+            .expect("ray should reach the target when the wall is excluded");
+        assert_eq!(hit.body_id, target_id);
+        assert!(
+            hit.normal.x < 0.0,
+            "collision normal must face the ray, got {:?}",
+            hit.normal
+        );
+
+        // A mask matching only layer 1 skips the layer-2 wall and hits the target.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 1)
+            .expect("layer-1 mask should hit the target");
+        assert_eq!(hit.body_id, target_id);
+        // A mask matching only layer 2 hits the wall.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 2)
+            .expect("layer-2 mask should hit the wall");
+        assert_eq!(hit.body_id, wall_id);
+
+        // ShapeCast: a unit circle placed on the wall overlaps it.
+        let mut at_wall = Transform2D::IDENTITY;
+        at_wall.origin = Vector2::new(5.0, 0.0);
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, at_wall, &[], 0);
+        assert!(
+            !cast.is_empty(),
+            "collision_count must be > 0 against the wall"
+        );
+        assert!(
+            cast.iter().any(|h| h.body_id == wall_id),
+            "shape_cast must report the overlapping wall; got {cast:?}"
+        );
+
+        // Excluding the wall removes it from the overlap results.
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, at_wall, &[wall_id], 0);
+        assert!(
+            cast.iter().all(|h| h.body_id != wall_id),
+            "excluded wall must not appear in shape_cast"
+        );
+
+        // A shape far from every body reports no overlaps.
+        let mut far = Transform2D::IDENTITY;
+        far.origin = Vector2::new(1000.0, 0.0);
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, far, &[], 0);
+        assert_eq!(cast.len(), 0);
+    }
+
+    // -- pat-nzgdu.124: PhysicsDirectSpaceState2D.intersect_ray ---------------
+
+    #[test]
+    fn intersect_ray_returns_collider_position_and_normal() {
+        // The bead's acceptance shape: a ray into a static body reports that
+        // body's id, the hit point, and the surface normal.
+        let mut world = PhysicsWorld2D::new();
+        let wall = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        let hit = world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)))
+            .expect("ray hits the wall");
+        assert_eq!(hit.body_id, wall);
+        // Rect half-extent 1 centred at x=5 => near face at x=4.
+        assert!(approx_eq(hit.point.x, 4.0), "point {:?}", hit.point);
+        assert!(approx_eq(hit.point.y, 0.0), "point {:?}", hit.point);
+        // Normal faces back along the ray.
+        assert!(approx_eq(hit.normal.x, -1.0), "normal {:?}", hit.normal);
+        assert!(approx_eq(hit.distance, 4.0));
+    }
+
+    #[test]
+    fn intersect_ray_excluding_the_body_returns_nothing() {
+        // Second half of the acceptance: excluding the hit body empties the result.
+        let mut world = PhysicsWorld2D::new();
+        let wall = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        let query =
+            RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)).with_exclude(vec![wall]);
+        assert!(world.intersect_ray(&query).is_none());
+    }
+
+    #[test]
+    fn intersect_ray_returns_the_closest_body() {
+        let mut world = PhysicsWorld2D::new();
+        let near = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+        let _far = world.add_body(make_static_rect(Vector2::new(9.0, 0.0), 1.0));
+
+        let hit = world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(20.0, 0.0)))
+            .expect("hit");
+        assert_eq!(hit.body_id, near, "closest body wins");
+    }
+
+    #[test]
+    fn intersect_ray_honors_godot_collision_mask_semantics() {
+        let mut world = PhysicsWorld2D::new();
+        let mut wall = make_static_rect(Vector2::new(5.0, 0.0), 1.0);
+        wall.collision_layer = 0b0010;
+        let wall_id = world.add_body(wall);
+
+        let ray = |mask: u32| {
+            world.intersect_ray(
+                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)).with_collision_mask(mask),
+            )
+        };
+
+        // Matching layer hits; non-matching does not.
+        assert_eq!(ray(0b0010).expect("match").body_id, wall_id);
+        assert!(ray(0b0001).is_none(), "non-matching layer must not hit");
+        // Default (u32::MAX) hits everything.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)))
+            .is_some());
+        // GODOT SEMANTICS: mask 0 hits NOTHING. This deliberately differs from
+        // raycast_filtered, where 0 means "every layer".
+        assert!(ray(0).is_none(), "mask 0 must hit nothing (Godot)");
+        assert!(
+            world
+                .raycast_filtered(Vector2::ZERO, Vector2::new(1.0, 0.0), 100.0, &[], 0)
+                .is_some(),
+            "raycast_filtered keeps its 0 = every layer meaning",
+        );
+    }
+
+    #[test]
+    fn intersect_ray_hit_from_inside() {
+        let mut world = PhysicsWorld2D::new();
+        let body = world.add_body(make_static_rect(Vector2::ZERO, 2.0));
+
+        // Ray starting inside the shape: ignored entirely by default...
+        let outward = RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0));
+        assert!(
+            world.intersect_ray(&outward).is_none(),
+            "a ray starting inside must not punch out through the far wall",
+        );
+
+        // ...and reported at the origin with a zero normal when requested.
+        let hit = world
+            .intersect_ray(&outward.clone().with_hit_from_inside(true))
+            .expect("inside hit");
+        assert_eq!(hit.body_id, body);
+        assert_eq!(hit.point, Vector2::ZERO);
+        assert_eq!(hit.normal, Vector2::ZERO);
+        assert!(approx_eq(hit.distance, 0.0));
+    }
+
+    #[test]
+    fn intersect_ray_degenerate_and_bodies_disabled() {
+        let mut world = PhysicsWorld2D::new();
+        world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        // Zero-length ray.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::ZERO))
+            .is_none());
+        // Ray stops short of the body.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(3.0, 0.0)))
+            .is_none());
+        // Areas-only query: this world owns no areas, so nothing can match.
+        assert!(world
+            .intersect_ray(
+                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0))
+                    .with_collide_with_bodies(false)
+                    .with_collide_with_areas(true),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn ray_query_defaults_match_godot() {
+        let q = RayQuery2D::new(Vector2::ZERO, Vector2::new(1.0, 0.0));
+        assert_eq!(q.collision_mask, u32::MAX);
+        assert!(q.collide_with_bodies);
+        assert!(!q.collide_with_areas);
+        assert!(!q.hit_from_inside);
+        assert!(q.exclude.is_empty());
     }
 
     #[test]
@@ -607,6 +2171,79 @@ mod tests {
 
         let hit = world.raycast(Vector2::ZERO, Vector2::new(1.0, 0.0), 10.0);
         assert!(hit.is_none(), "Body is beyond max_distance");
+    }
+
+    // ---- point_query (input-picking foundation) tests ----
+
+    #[test]
+    fn point_query_hits_body_containing_point() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        // A world point inside the radius-5 circle centred at the origin.
+        let hits = world.point_query(Vector2::new(1.0, 2.0));
+        assert!(hits.contains(&id), "point inside circle must hit the body");
+    }
+
+    #[test]
+    fn point_query_misses_point_outside() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        // A world point well outside the radius-5 circle.
+        let hits = world.point_query(Vector2::new(100.0, 100.0));
+        assert!(
+            !hits.contains(&id),
+            "point outside circle must not hit the body"
+        );
+        assert!(hits.is_empty(), "no bodies should match, got {hits:?}");
+    }
+
+    #[test]
+    fn point_query_respects_body_position() {
+        let mut world = PhysicsWorld2D::new();
+        // Body offset to (100, 0) with radius 5 — proves the world->local transform.
+        let id = world.add_body(make_rigid_circle(Vector2::new(100.0, 0.0), 5.0));
+        // A point at the body's world position maps to local (0,0) → inside.
+        assert!(
+            world.point_query(Vector2::new(100.0, 0.0)).contains(&id),
+            "point at the body's world position must hit it"
+        );
+        // A point at the world origin is 100 units away → outside.
+        assert!(
+            !world.point_query(Vector2::new(0.0, 0.0)).contains(&id),
+            "world origin must miss a body offset to (100, 0)"
+        );
+    }
+
+    #[test]
+    fn point_query_returns_all_overlapping_bodies_sorted() {
+        let mut world = PhysicsWorld2D::new();
+        // Two bodies both covering the world origin; ids are assigned
+        // incrementally, so id_a.0 < id_b.0.
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        let id_b = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
+        assert!(
+            id_a.0 < id_b.0,
+            "ids must be incremental for this assertion"
+        );
+
+        let hits = world.point_query(Vector2::new(0.0, 0.0));
+        assert_eq!(
+            hits,
+            vec![id_a, id_b],
+            "both overlapping bodies, ascending BodyId order"
+        );
+
+        // The convenience returns the smallest matching id.
+        assert_eq!(
+            world.point_query_first(Vector2::new(0.0, 0.0)),
+            Some(id_a),
+            "point_query_first returns the smallest matching BodyId"
+        );
+        assert_eq!(
+            world.point_query_first(Vector2::new(1000.0, 1000.0)),
+            None,
+            "point_query_first returns None when nothing matches"
+        );
     }
 
     #[test]
@@ -652,16 +2289,22 @@ mod tests {
         let id_a = world.add_body(body_a);
         let id_b = world.add_body(body_b);
 
-        let events = world.step(0.0);
+        world.set_gravity(Vector2::ZERO);
+        let events = world.step(1.0 / 60.0);
         assert!(
             !events.is_empty(),
             "Matching layer/mask should produce collision events"
         );
+        settle(&mut world);
 
         let a = world.get_body(id_a).unwrap();
         let b = world.get_body(id_b).unwrap();
         let dist = (b.position - a.position).length();
-        assert!(dist >= 10.0 - EPSILON, "Bodies should be separated");
+        // Started at 8: resolved to touching less the 0.3 resting slop.
+        assert!(
+            dist >= 10.0 - crate::solver::DEFAULT_MAX_PENETRATION - 1e-2,
+            "Bodies should be separated: dist = {dist}"
+        );
     }
 
     #[test]
@@ -676,10 +2319,56 @@ mod tests {
     }
 
     #[test]
+    fn step_narrowphase_is_rotation_aware() {
+        use std::f32::consts::FRAC_PI_2;
+
+        // Thin horizontal bar shape (4 wide, 1 tall).
+        let make_bar = |pos: Vector2, rot: f32| {
+            let mut b = PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Static,
+                pos,
+                Shape2D::Rectangle {
+                    half_extents: Vector2::new(2.0, 0.5),
+                },
+                1.0,
+            );
+            b.rotation = rot;
+            b
+        };
+
+        // Axis-aligned bars 0.2 apart on Y produce no contact.
+        let mut world = PhysicsWorld2D::new();
+        world.add_body(make_bar(Vector2::new(0.0, 0.0), 0.0));
+        world.add_body(make_bar(Vector2::new(0.0, 1.2), 0.0));
+        assert!(
+            world.step(0.0).is_empty(),
+            "axis-aligned bars 0.2 apart must not collide"
+        );
+
+        // Rotating bar A by 90° makes it span Y ∈ [-2, 2] and reach bar B.
+        let mut rotated_world = PhysicsWorld2D::new();
+        // Bar A is dynamic: two static bars form no pair (Godot never pairs
+        // two non-dynamic bodies), so the contact needs one rigid side.
+        let mut bar_a = make_bar(Vector2::new(0.0, 0.0), FRAC_PI_2);
+        bar_a.body_type = BodyType::Rigid;
+        rotated_world.add_body(bar_a);
+        rotated_world.add_body(make_bar(Vector2::new(0.0, 1.2), 0.0));
+        assert!(
+            !rotated_world.step(0.0).is_empty(),
+            "rotating bar A by 90° must create a contact (narrow-phase reads rotation)"
+        );
+    }
+
+    #[test]
     fn persisting_contact_detected() {
         let mut world = PhysicsWorld2D::new();
-        // Two overlapping static rects — they won't move apart
-        let id_a = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
+        // A rigid rect overlapping a static one, stepped with dt = 0 so it does
+        // not move apart. Two STATIC rects form no pair at all in Godot
+        // (godot_body_pair_2d.cpp:258-268), which this sweep now matches.
+        let mut a = make_static_rect(Vector2::new(0.0, 0.0), 5.0);
+        a.body_type = BodyType::Rigid;
+        let id_a = world.add_body(a);
         let id_b = world.add_body(make_static_rect(Vector2::new(4.0, 0.0), 5.0));
 
         let events1 = world.step(0.0);
@@ -929,5 +2618,286 @@ mod tests {
         // Should not panic
         world.step(1.0 / 60.0);
         assert!(world.get_body(id_a).is_some());
+    }
+}
+
+#[cfg(test)]
+mod capsule_segment_ray_tests {
+    use super::*;
+    use crate::body::{BodyType, PhysicsBody2D};
+    use crate::shape::Shape2D;
+    use gdcore::math::Vector2;
+
+    #[test]
+    fn raycast_hits_capsule() {
+        let mut world = PhysicsWorld2D::new();
+        let body = PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Capsule {
+                radius: 1.0,
+                height: 4.0,
+            },
+            0.0,
+        );
+        world.add_body(body);
+        let hit = world.raycast(Vector2::new(-10.0, 0.0), Vector2::new(1.0, 0.0), 20.0);
+        assert!(hit.is_some(), "should hit capsule");
+    }
+
+    #[test]
+    fn raycast_hits_segment() {
+        let mut world = PhysicsWorld2D::new();
+        let body = PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Segment {
+                a: Vector2::new(0.0, -2.0),
+                b: Vector2::new(0.0, 2.0),
+            },
+            0.0,
+        );
+        world.add_body(body);
+        let hit = world.raycast(Vector2::new(-5.0, 0.0), Vector2::new(1.0, 0.0), 20.0);
+        assert!(hit.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.50 — a 10-box stack resting on a static floor must stay
+    // stable: it must not explode, tunnel through the floor, or collapse.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ten_box_stack_stays_stable() {
+        // Gravity is (0, +980): +y points *down*, so smaller y is higher up.
+        let mut world = PhysicsWorld2D::new();
+
+        // Static floor centred at y = 0 with half-height 5 → top surface at y = -5.
+        const FLOOR_TOP: f32 = -5.0;
+        const BOX_HALF: f32 = 2.0; // 4×4 boxes
+        world.add_body(PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Rectangle {
+                half_extents: Vector2::new(100.0, 5.0),
+            },
+            0.0,
+        ));
+
+        // Ten dynamic boxes, axis-aligned and centred on x = 0, each starting a
+        // hair above its resting position so they settle onto one another.
+        const N: usize = 10;
+        // Resting centre of box i: FLOOR_TOP - BOX_HALF - i * (2*BOX_HALF).
+        let rest_y = |i: usize| FLOOR_TOP - BOX_HALF - (i as f32) * (2.0 * BOX_HALF);
+        let mut ids = Vec::new();
+        for i in 0..N {
+            // 0.1 gap between boxes so nothing starts inter-penetrating.
+            let y = rest_y(i) - 0.1 * (i as f32 + 1.0);
+            let body = PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Rigid,
+                Vector2::new(0.0, y),
+                Shape2D::Rectangle {
+                    half_extents: Vector2::new(BOX_HALF, BOX_HALF),
+                },
+                1.0,
+            );
+            ids.push(world.add_body(body));
+        }
+
+        // Simulate 5 seconds at 60 Hz — plenty of time to settle or blow up.
+        for _ in 0..300 {
+            world.step(1.0 / 60.0);
+        }
+
+        let ys: Vec<f32> = ids
+            .iter()
+            .map(|&id| world.get_body(id).unwrap().position.y)
+            .collect();
+        let xs: Vec<f32> = ids
+            .iter()
+            .map(|&id| world.get_body(id).unwrap().position.x)
+            .collect();
+
+        for i in 0..N {
+            // 1. Nothing diverged to NaN/inf (catches solver explosions).
+            assert!(
+                xs[i].is_finite() && ys[i].is_finite(),
+                "box {i} position must stay finite, got ({}, {})",
+                xs[i],
+                ys[i]
+            );
+            // 2. No box tunnels through the floor. A box centre below
+            //    FLOOR_TOP - BOX_HALF + slop means it sank into the floor.
+            assert!(
+                ys[i] <= FLOOR_TOP - BOX_HALF + 1.0,
+                "box {i} sank into/through the floor (y = {})",
+                ys[i]
+            );
+            // 3. Centred contacts impart no horizontal drift.
+            assert!(
+                xs[i].abs() < 1.0,
+                "box {i} drifted horizontally (x = {})",
+                xs[i]
+            );
+            // 4. The whole stack stayed within a generous bounding region
+            //    (no upward explosion).
+            assert!(
+                ys[i] > rest_y(N - 1) - 10.0,
+                "box {i} flew upward out of the stack (y = {})",
+                ys[i]
+            );
+        }
+
+        // 5. The stack did not collapse into a single point — the top box is
+        //    still well above the bottom one (rest separation is 36 units).
+        assert!(
+            ys[N - 1] < ys[0] - 20.0,
+            "stack collapsed: top box y = {} vs bottom box y = {}",
+            ys[N - 1],
+            ys[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod determinism_order_tests {
+    use super::*;
+
+    fn static_rect(pos: Vector2, half: Vector2) -> PhysicsBody2D {
+        PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            pos,
+            Shape2D::Rectangle { half_extents: half },
+            1.0,
+        )
+    }
+
+    /// pat-21oab.1 regression, the direct one: the broad-phase sweep in
+    /// `step_inner` built its id list straight out of `self.bodies.keys()`, a
+    /// randomly seeded `HashMap`, so the order contacts entered the constraint
+    /// list — and therefore the order the sequential-impulse solver relaxed
+    /// them in — changed from run to run.
+    ///
+    /// Twelve mutually overlapping bodies make all 66 pairs collide, and the
+    /// returned event list is the sweep order made observable. Asserting it is
+    /// strictly ascending in `(body_a, body_b)` catches the bug outright rather
+    /// than probabilistically: an unsorted sweep would have to hit the single
+    /// id-sorted permutation out of 12! to pass.
+    #[test]
+    fn broadphase_sweep_visits_pairs_in_id_order() {
+        const N: u64 = 12;
+        let mut world = PhysicsWorld2D::new();
+        let mut ids: Vec<BodyId> = Vec::new();
+        for i in 0..N {
+            // Staggered rather than coincident: every pair still overlaps (the
+            // spread is 11 px against 100 px half-extents) but no two centres
+            // share a point, so the narrow phase returns a well-defined normal.
+            // RIGID, not static: Godot forms no contact pair between two
+            // non-dynamic bodies (godot_body_pair_2d.cpp:258-268), and the
+            // sweep now skips them the same way.
+            let mut b = static_rect(Vector2::new(i as f32, 0.0), Vector2::new(100.0, 100.0));
+            b.body_type = BodyType::Rigid;
+            ids.push(world.add_body(b));
+        }
+        // Read the ids back rather than assuming a base: `add_body` hands them
+        // out from `next_id`, which starts at 1, not 0.
+        assert!(
+            ids.windows(2).all(|w| w[0].0 < w[1].0),
+            "add_body should hand out ascending ids; got {ids:?}"
+        );
+        let mut expected: Vec<(u64, u64)> = Vec::new();
+        for a in 0..ids.len() {
+            for b in (a + 1)..ids.len() {
+                expected.push((ids[a].0, ids[b].0));
+            }
+        }
+
+        let events = world.step(1.0 / 60.0);
+        let pairs: Vec<(u64, u64)> = events
+            .iter()
+            .filter(|e| e.state != ContactState::Exited)
+            .map(|e| (e.body_a.0, e.body_b.0))
+            .collect();
+
+        // Exact count, not `>= 1`: it proves the sweep really visited every
+        // unordered pair rather than bailing out early on one of them.
+        assert_eq!(
+            pairs.len(),
+            (N * (N - 1) / 2) as usize,
+            "every unordered pair of overlapping bodies should report a contact"
+        );
+        for w in pairs.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "contact events must come out in ascending (body_a, body_b) \
+                 order; got {:?} before {:?} — the broad-phase sweep is \
+                 iterating bodies in HashMap order again (pat-21oab.1)",
+                w[0],
+                w[1]
+            );
+        }
+        // Ascending alone would still hold if the sweep dropped a pair and
+        // reported a different set; this pins the exact sequence.
+        assert_eq!(pairs, expected, "unexpected contact pair sequence");
+    }
+
+    /// pat-21oab.1 regression at the symptom level: the shape the platformer
+    /// demo failed in. Eight identically built worlds inside ONE process —
+    /// every `HashMap` gets its own `RandomState`, so under the bug these
+    /// disagree, which is why `deterministic_two_runs_identical` passed about 2
+    /// runs in 6. Bit equality, not an epsilon: physics fed identical inputs
+    /// must reproduce exactly.
+    #[test]
+    fn repeated_runs_in_one_process_are_bit_identical() {
+        fn run() -> Vec<(f32, f32)> {
+            let mut world = PhysicsWorld2D::new();
+            let player = world.add_body(PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Rigid,
+                Vector2::new(100.0, 400.0),
+                Shape2D::Circle { radius: 16.0 },
+                1.0,
+            ));
+            for pos in [
+                Vector2::new(200.0, 450.0),
+                Vector2::new(350.0, 380.0),
+                Vector2::new(500.0, 320.0),
+            ] {
+                world.add_body(static_rect(pos, Vector2::new(60.0, 10.0)));
+            }
+            world.add_body(static_rect(
+                Vector2::new(320.0, 550.0),
+                Vector2::new(320.0, 20.0),
+            ));
+
+            let mut history = Vec::new();
+            for frame in 0..120 {
+                if let Some(body) = world.get_body_mut(player) {
+                    body.linear_velocity.x = 200.0;
+                    if frame == 35 {
+                        body.apply_impulse(Vector2::new(0.0, -400.0));
+                    }
+                    body.apply_force(Vector2::new(0.0, 980.0));
+                }
+                world.step(1.0 / 60.0);
+                let p = world.get_body(player).unwrap().position;
+                history.push((p.x, p.y));
+            }
+            history
+        }
+
+        let first = run();
+        for attempt in 1..8 {
+            assert_eq!(
+                run(),
+                first,
+                "run {attempt} diverged from run 0 — physics is order-dependent \
+                 on HashMap iteration again (pat-21oab.1)"
+            );
+        }
     }
 }

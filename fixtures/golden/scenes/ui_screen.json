@@ -1,0 +1,66 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_ui_screen",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "ColorRect",
+          "name": "Background",
+          "path": "/root/UIRoot/Background",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "TextureRect",
+              "name": "Logo",
+              "path": "/root/UIRoot/VBoxContainer/Logo",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Label",
+              "name": "Title",
+              "path": "/root/UIRoot/VBoxContainer/Title",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "StartButton",
+              "path": "/root/UIRoot/VBoxContainer/StartButton",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "OptionsButton",
+              "path": "/root/UIRoot/VBoxContainer/OptionsButton",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "QuitButton",
+              "path": "/root/UIRoot/VBoxContainer/QuitButton",
+              "properties": {}
+            }
+          ],
+          "class": "VBoxContainer",
+          "name": "VBoxContainer",
+          "path": "/root/UIRoot/VBoxContainer",
+          "properties": {}
+        }
+      ],
+      "class": "Control",
+      "name": "UIRoot",
+      "path": "/root/UIRoot",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

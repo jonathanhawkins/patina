@@ -466,3 +466,28 @@ mod tests {
         assert!(!wm.is_open(id));
     }
 }
+
+/// An RGBA icon image for window decoration or custom cursors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowIcon {
+    pub width: u32,
+    pub height: u32,
+    pub rgba_data: Vec<u8>,
+}
+
+impl WindowIcon {
+    /// Creates a new icon from raw RGBA data.
+    ///
+    /// Returns `None` if the data length doesn't match `width * height * 4`.
+    pub fn new(width: u32, height: u32, rgba_data: Vec<u8>) -> Option<Self> {
+        if rgba_data.len() == (width * height * 4) as usize {
+            Some(Self {
+                width,
+                height,
+                rgba_data,
+            })
+        } else {
+            None
+        }
+    }
+}

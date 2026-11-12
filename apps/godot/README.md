@@ -148,7 +148,7 @@ Dumps ClassDB metadata for 17 core Godot classes that match Patina's `classdb_pa
 
 ## Running the Lab
 
-> **Prerequisite:** A Godot 4.x binary matching the version in `project.godot` must be installed, and godot-rust must compile against the local GDExtension API headers.
+> **Prerequisite:** A Godot 4.6.1-stable binary must be installed. The extension is compiled with godot-rust 0.2.4 (GDExtension API level 4.4). Godot 4.6.1 is backward-compatible with extensions compiled at 4.4 API level — the `.gdextension` file declares `compatibility_minimum = "4.2"` so Godot will load it. No godot-rust release supports 4.6 API level yet (latest is 0.4.5/4.5 API as of December 2025); upgrading godot-rust is deferred until a 4.6-compatible release ships.
 
 ```bash
 # Build the extension
@@ -175,4 +175,4 @@ Probe lines can be parsed with `jq` or the oracle tooling in `tools/`.
 | `resource_probe` | Implemented | `gdresource` oracle tests |
 | `classdb_probe` | Implemented | `gdobject` ClassDB parity |
 
-All probes compile against godot-rust 0.2 and emit machine-readable JSON. Running them requires a local Godot 4 binary with matching GDExtension API.
+All probes compile against godot-rust 0.2.4 (GDExtension API 4.4) and emit machine-readable JSON. Running them requires a local Godot 4.6.1-stable binary. The extension loads correctly under Godot 4.6.1 via backward-compatible GDExtension ABI.

@@ -3,21 +3,58 @@
 //! Audio runtime, stream plumbing, and basic mixer
 //! for the Patina Engine runtime.
 
+pub mod biquad;
 pub mod bus;
 pub mod decode;
+pub mod diagnostics;
+pub mod effects;
+pub mod ima_adpcm;
+pub mod import;
 pub mod mixer;
+pub mod ogg_packet_sequence;
+pub mod output;
+pub mod player;
 pub mod sample;
+pub mod sample_pool;
 pub mod server;
+pub mod spatial;
 pub mod stream;
 pub mod wav;
+pub mod web_output;
 
 pub use bus::AudioBus;
-pub use decode::{AudioBuffer, DecodeError};
+pub use decode::{
+    clear_mp3_decoder, decode_mp3, install_mp3_decoder, installed_mp3_decoder, is_mp3, AudioBuffer,
+    AudioStreamGenerator, DecodeError, Mp3Decoder, PolyphonicPlayer,
+};
+pub use effects::{
+    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectCompressor, AudioEffectDelay,
+    AudioEffectDistortion, AudioEffectEQ, AudioEffectFilter, AudioEffectHardLimiter,
+    AudioEffectLimiter, AudioEffectReverb, AudioEffectSpectrumAnalyzer, DistortionMode,
+    EffectChain, FilterMode,
+};
 pub use mixer::AudioMixer;
+/// The cpal device backend only exists off wasm32. Re-exporting it
+/// unconditionally is what actually kept this crate from compiling for the web
+/// even after `cpal` itself was target-gated — the `use` resolved to nothing and
+/// failed the build before any browser code was reached (pat-u3l8c.112).
+#[cfg(not(target_arch = "wasm32"))]
+pub use output::{live_device_capture, live_device_stats, PlatformAudioError, PlatformAudioOutput};
+pub use output::{
+    mix_and_write, mix_and_write_gain, CaptureAudioOutput, DeviceAudioStats, SharedRing,
+};
+pub use player::AudioStreamPlayer;
 pub use sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout, NullAudioOutput};
 pub use server::{AudioServer, PlaybackId};
 pub use stream::{AudioStreamPlayback, LoopMode, PlaybackState};
 pub use wav::{decode_wav, parse_wav_header, WavError, WavHeader};
+/// The web device layer: the ring an `AudioWorkletProcessor` drains, plus the
+/// JS that registers it. Exported on every target so the producer/consumer
+/// contract stays unit-testable natively (pat-0q2kx.59, pat-u3l8c.112).
+pub use web_output::{
+    audio_worklet_glue, resample_interleaved, AudioRingBuffer, SharedWebAudioOutput,
+    WebAudioOutput, WORKLET_QUEUE_DEPTH,
+};
 
 #[cfg(test)]
 mod tests {

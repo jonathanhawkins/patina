@@ -1,0 +1,25 @@
+; Conformance fixture (pat-9gjpr). A complete, runnable Godot project, checked
+; against real Godot with `node scripts/godot-reference.mjs <this dir>`.
+;
+; Seams under test on the GPU editor/Play path:
+; - a custom `shader_type spatial` ShaderMaterial whose body needs the real
+;   GDShader front end (a local, an `if`, a user function, a source_color
+;   uniform) — the GPU path used to draw it as one flat colour;
+; - Label3D `no_depth_test = true` behind an opaque box (draws over it);
+; - Label3D `double_sided = false` seen from behind (culled).
+
+config_version=5
+
+[application]
+
+config/name="custom_spatial_shader"
+run/main_scene="res://main.tscn"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=240
+
+[rendering]
+
+environment/defaults/default_clear_color=Color(0.1, 0.1, 0.12, 1)

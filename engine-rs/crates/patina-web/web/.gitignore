@@ -1,0 +1,5 @@
+# wasm-bindgen output from build-web.sh / scripts/web.sh
+patina_web.js
+patina_web.d.ts
+patina_web_bg.wasm
+patina_web_bg.wasm.d.ts

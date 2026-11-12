@@ -1,0 +1,47 @@
+{
+  "fixture_id": "scene_minimal_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "Minimal3D",
+        "class": "Node3D",
+        "path": "/root/Minimal3D",
+        "children": ["Camera", "Mesh", "Sun", "Floor"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Minimal3D/Camera",
+        "children": []
+      },
+      {
+        "name": "Mesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Minimal3D/Mesh",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/Minimal3D/Sun",
+        "children": []
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Minimal3D/Floor",
+        "children": ["FloorShape"]
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Minimal3D/Floor/FloorShape",
+        "children": []
+      }
+    ]
+  }
+}

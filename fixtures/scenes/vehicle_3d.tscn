@@ -1,0 +1,53 @@
+[gd_scene format=3 uid="uid://vehicle3d"]
+
+[node name="Track" type="Node3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.95, -0.31, 0, 0.31, 0.95, 0, 5, 12)
+fov = 60.0
+near = 0.05
+far = 500.0
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.0
+shadow_enabled = true
+
+[node name="Chassis" type="RigidBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+mass = 800.0
+
+[node name="ChassisShape" type="CollisionShape3D" parent="Chassis"]
+
+[node name="ChassisMesh" type="MeshInstance3D" parent="Chassis"]
+
+[node name="WheelFL" type="RigidBody3D" parent="Chassis"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, -0.5, 1.5)
+mass = 20.0
+
+[node name="WheelFLShape" type="CollisionShape3D" parent="Chassis/WheelFL"]
+
+[node name="WheelFR" type="RigidBody3D" parent="Chassis"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, -0.5, 1.5)
+mass = 20.0
+
+[node name="WheelFRShape" type="CollisionShape3D" parent="Chassis/WheelFR"]
+
+[node name="WheelRL" type="RigidBody3D" parent="Chassis"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, -0.5, -1.5)
+mass = 20.0
+
+[node name="WheelRLShape" type="CollisionShape3D" parent="Chassis/WheelRL"]
+
+[node name="WheelRR" type="RigidBody3D" parent="Chassis"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, -0.5, -1.5)
+mass = 20.0
+
+[node name="WheelRRShape" type="CollisionShape3D" parent="Chassis/WheelRR"]
+
+[node name="Ground" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, 0)
+
+[node name="GroundShape" type="CollisionShape3D" parent="Ground"]
+
+[node name="GroundMesh" type="MeshInstance3D" parent="Ground"]

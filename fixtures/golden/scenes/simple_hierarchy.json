@@ -1,0 +1,37 @@
+{
+  "fixture_id": "scene_simple_hierarchy",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node2D",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "Child1",
+          "class": "Node2D",
+          "path": "/root/Root/Child1",
+          "children": [
+            {
+              "name": "GrandChild",
+              "class": "Node2D",
+              "path": "/root/Root/Child1/GrandChild",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {}
+        },
+        {
+          "name": "Child2",
+          "class": "Node2D",
+          "path": "/root/Root/Child2",
+          "children": [],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

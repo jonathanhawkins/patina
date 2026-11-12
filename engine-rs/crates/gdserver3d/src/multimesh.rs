@@ -1,0 +1,320 @@
+//! MultiMesh3D: instanced rendering data for MultiMeshInstance3D nodes.
+//!
+//! A [`MultiMesh3D`] holds a single shared [`Mesh3D`] and per-instance
+//! transforms, matching Godot's `MultiMesh` resource semantics. The CPU
+//! renderer expands each instance into a separate draw call; a future GPU
+//! backend can use hardware instancing.
+
+use gdcore::math::Color;
+use gdcore::math3d::Transform3D;
+
+use crate::mesh::Mesh3D;
+
+/// Transform format for MultiMesh instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformFormat {
+    /// 2D transforms (Transform2D) — not yet supported, stored as 3D identity.
+    Transform2D,
+    /// 3D transforms (Transform3D).
+    #[default]
+    Transform3D,
+}
+
+/// A multi-mesh resource: one shared mesh drawn at many positions.
+///
+/// Mirrors Godot's `MultiMesh` resource. Each instance has its own
+/// [`Transform3D`] and an optional per-instance color.
+#[derive(Debug, Clone)]
+pub struct MultiMesh3D {
+    /// The shared mesh geometry drawn for every instance.
+    pub mesh: Option<Mesh3D>,
+    /// Transform format (2D or 3D).
+    pub transform_format: TransformFormat,
+    /// Per-instance transforms. Length equals instance count.
+    pub instance_transforms: Vec<Transform3D>,
+    /// Optional per-instance colors. When non-empty, length must equal
+    /// `instance_transforms.len()`.
+    pub instance_colors: Vec<Color>,
+    /// Optional per-instance custom data (Godot `INSTANCE_CUSTOM`, a `vec4`
+    /// modeled as a [`Color`]). When non-empty, length must equal
+    /// `instance_transforms.len()`.
+    pub instance_custom_data: Vec<Color>,
+    /// Whether per-instance custom data is used.
+    pub use_custom_data: bool,
+    /// How many instances are drawn, or `-1` for all (Godot
+    /// `visible_instance_count`). See [`MultiMesh3D::visible_count`].
+    pub visible_instance_count: i64,
+}
+
+impl MultiMesh3D {
+    /// Creates a new empty MultiMesh with the given instance count.
+    ///
+    /// All transforms default to [`Transform3D::IDENTITY`].
+    pub fn new(instance_count: usize) -> Self {
+        Self {
+            mesh: None,
+            transform_format: TransformFormat::Transform3D,
+            instance_transforms: vec![Transform3D::IDENTITY; instance_count],
+            instance_colors: Vec::new(),
+            instance_custom_data: Vec::new(),
+            use_custom_data: false,
+            visible_instance_count: -1,
+        }
+    }
+
+    /// Returns the number of instances.
+    pub fn instance_count(&self) -> usize {
+        self.instance_transforms.len()
+    }
+
+    /// Sets the transform for a specific instance. No-op if index is out of range.
+    pub fn set_instance_transform(&mut self, index: usize, transform: Transform3D) {
+        if index < self.instance_transforms.len() {
+            self.instance_transforms[index] = transform;
+        }
+    }
+
+    /// Gets the transform for a specific instance, or [`Transform3D::IDENTITY`]
+    /// if out of range.
+    pub fn get_instance_transform(&self, index: usize) -> Transform3D {
+        self.instance_transforms
+            .get(index)
+            .copied()
+            .unwrap_or(Transform3D::IDENTITY)
+    }
+
+    /// Sets the per-instance color for a specific instance.
+    ///
+    /// Initializes the color array to white if not yet allocated.
+    pub fn set_instance_color(&mut self, index: usize, color: Color) {
+        if self.instance_colors.is_empty() && !self.instance_transforms.is_empty() {
+            self.instance_colors = vec![Color::WHITE; self.instance_transforms.len()];
+        }
+        if index < self.instance_colors.len() {
+            self.instance_colors[index] = color;
+        }
+    }
+
+    /// Gets the per-instance color, defaulting to white.
+    pub fn get_instance_color(&self, index: usize) -> Color {
+        self.instance_colors
+            .get(index)
+            .copied()
+            .unwrap_or(Color::WHITE)
+    }
+
+    /// Resizes the instance count, truncating or extending with identity
+    /// transforms.
+    pub fn set_instance_count(&mut self, count: usize) {
+        self.instance_transforms
+            .resize(count, Transform3D::IDENTITY);
+        if !self.instance_colors.is_empty() {
+            self.instance_colors.resize(count, Color::WHITE);
+        }
+        if !self.instance_custom_data.is_empty() {
+            self.instance_custom_data.resize(count, Color::TRANSPARENT);
+        }
+    }
+
+    /// Flattens this multimesh into the per-instance buffer that a
+    /// GPU-instanced draw call would upload.
+    ///
+    /// Each entry pairs the instance's world-space transform (composed as
+    /// `base * per_instance` so the host node's transform stacks first) with
+    /// the per-instance colour. If `instance_colors` is empty the buffer
+    /// reports `Color::WHITE` for every instance, matching Godot's default.
+    /// The returned `Vec` length always matches `instance_count`, so the
+    /// renderer can issue one instanced draw of `len()` rather than expanding
+    /// to `len()` separate per-instance draws.
+    pub fn flatten_instance_data(&self, base: Transform3D) -> Vec<MultiMeshInstanceData> {
+        let has_colors = !self.instance_colors.is_empty();
+        self.instance_transforms
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| MultiMeshInstanceData {
+                transform: base * t,
+                color: if has_colors {
+                    self.get_instance_color(i)
+                } else {
+                    Color::WHITE
+                },
+            })
+            .collect()
+    }
+
+    /// Sets the per-instance custom data for a specific instance (Godot
+    /// `set_instance_custom_data`). Lazily allocates the custom-data array to
+    /// transparent and enables [`use_custom_data`](Self::use_custom_data) on
+    /// first use.
+    pub fn set_instance_custom_data(&mut self, index: usize, data: Color) {
+        if self.instance_custom_data.is_empty() && !self.instance_transforms.is_empty() {
+            self.instance_custom_data = vec![Color::TRANSPARENT; self.instance_transforms.len()];
+            self.use_custom_data = true;
+        }
+        if index < self.instance_custom_data.len() {
+            self.instance_custom_data[index] = data;
+        }
+    }
+
+    /// Gets the per-instance custom data, defaulting to transparent
+    /// (`Color(0, 0, 0, 0)`), matching Godot's zeroed `INSTANCE_CUSTOM`.
+    pub fn get_instance_custom_data(&self, index: usize) -> Color {
+        self.instance_custom_data
+            .get(index)
+            .copied()
+            .unwrap_or(Color::TRANSPARENT)
+    }
+
+    /// The number of instances actually drawn: [`visible_instance_count`] clamped
+    /// to `0..=instance_count`, or all instances when it is the `-1` "draw all"
+    /// sentinel (or any negative value).
+    ///
+    /// [`visible_instance_count`]: Self::visible_instance_count
+    pub fn visible_count(&self) -> usize {
+        let n = self.instance_count();
+        if self.visible_instance_count < 0 {
+            n
+        } else {
+            (self.visible_instance_count as usize).min(n)
+        }
+    }
+
+    /// Like [`flatten_instance_data`](Self::flatten_instance_data) but emits only
+    /// the first [`visible_count`](Self::visible_count) instances, honoring
+    /// `visible_instance_count`.
+    pub fn flatten_visible_instance_data(&self, base: Transform3D) -> Vec<MultiMeshInstanceData> {
+        let visible = self.visible_count();
+        self.flatten_instance_data(base)
+            .into_iter()
+            .take(visible)
+            .collect()
+    }
+}
+
+/// One row of a GPU-instanced draw buffer for a [`MultiMesh3D`].
+///
+/// Mirrors the layout the wgpu pipeline binds as `@vertex` per-instance
+/// inputs: a world-space transform plus a colour. The CPU rasterizer can use
+/// the same struct to issue one batched draw rather than expanding to
+/// `instance_count` per-instance draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiMeshInstanceData {
+    /// World-space transform for this instance.
+    pub transform: Transform3D,
+    /// Per-instance colour modulation.
+    pub color: Color,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdcore::math::Vector3;
+    use gdcore::math3d::Basis;
+
+    #[test]
+    fn new_creates_identity_transforms() {
+        let mm = MultiMesh3D::new(5);
+        assert_eq!(mm.instance_count(), 5);
+        for i in 0..5 {
+            assert_eq!(mm.get_instance_transform(i), Transform3D::IDENTITY);
+        }
+    }
+
+    #[test]
+    fn set_get_instance_transform() {
+        let mut mm = MultiMesh3D::new(3);
+        let t = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(1.0, 2.0, 3.0),
+        };
+        mm.set_instance_transform(1, t);
+        assert_eq!(
+            mm.get_instance_transform(1).origin,
+            Vector3::new(1.0, 2.0, 3.0)
+        );
+        assert_eq!(mm.get_instance_transform(0), Transform3D::IDENTITY);
+    }
+
+    #[test]
+    fn out_of_range_transform_returns_identity() {
+        let mm = MultiMesh3D::new(2);
+        assert_eq!(mm.get_instance_transform(99), Transform3D::IDENTITY);
+    }
+
+    #[test]
+    fn set_instance_color_initializes_array() {
+        let mut mm = MultiMesh3D::new(3);
+        assert!(mm.instance_colors.is_empty());
+        mm.set_instance_color(0, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(mm.instance_colors.len(), 3);
+        assert_eq!(mm.get_instance_color(0), Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(mm.get_instance_color(1), Color::WHITE);
+    }
+
+    #[test]
+    fn resize_instance_count() {
+        let mut mm = MultiMesh3D::new(2);
+        mm.set_instance_count(5);
+        assert_eq!(mm.instance_count(), 5);
+        mm.set_instance_count(1);
+        assert_eq!(mm.instance_count(), 1);
+    }
+
+    #[test]
+    fn empty_multimesh() {
+        let mm = MultiMesh3D::new(0);
+        assert_eq!(mm.instance_count(), 0);
+        assert_eq!(mm.get_instance_color(0), Color::WHITE);
+    }
+
+    #[test]
+    fn default_transform_format() {
+        let mm = MultiMesh3D::new(1);
+        assert_eq!(mm.transform_format, TransformFormat::Transform3D);
+    }
+
+    #[test]
+    fn instance_custom_data_roundtrip() {
+        let mut mm = MultiMesh3D::new(3);
+        // Unset -> transparent default, array not yet allocated.
+        assert!(mm.instance_custom_data.is_empty());
+        assert!(!mm.use_custom_data);
+        assert_eq!(mm.get_instance_custom_data(0), Color::TRANSPARENT);
+        // Setting lazily allocates and enables custom data.
+        mm.set_instance_custom_data(1, Color::new(0.25, 0.5, 0.75, 1.0));
+        assert_eq!(mm.instance_custom_data.len(), 3);
+        assert!(mm.use_custom_data);
+        assert_eq!(
+            mm.get_instance_custom_data(1),
+            Color::new(0.25, 0.5, 0.75, 1.0)
+        );
+        assert_eq!(mm.get_instance_custom_data(0), Color::TRANSPARENT);
+        // Resizing keeps custom data in step with the instance count.
+        mm.set_instance_count(4);
+        assert_eq!(mm.instance_custom_data.len(), 4);
+        assert_eq!(mm.get_instance_custom_data(3), Color::TRANSPARENT);
+    }
+
+    #[test]
+    fn visible_instance_count_controls_drawn_count() {
+        let mut mm = MultiMesh3D::new(5);
+        // -1 sentinel -> all instances.
+        assert_eq!(mm.visible_count(), 5);
+        assert_eq!(
+            mm.flatten_visible_instance_data(Transform3D::IDENTITY)
+                .len(),
+            5
+        );
+        // Limit to 2.
+        mm.visible_instance_count = 2;
+        assert_eq!(mm.visible_count(), 2);
+        assert_eq!(
+            mm.flatten_visible_instance_data(Transform3D::IDENTITY)
+                .len(),
+            2
+        );
+        // Over-count clamps to the instance count.
+        mm.visible_instance_count = 99;
+        assert_eq!(mm.visible_count(), 5);
+    }
+}

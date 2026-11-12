@@ -1,0 +1,83 @@
+{
+  "fixture_id": "scene_indoor_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "Indoor3D",
+        "class": "Node3D",
+        "path": "/root/Indoor3D",
+        "children": ["Camera", "Table", "Chair", "Lamp", "CeilingLight", "Floor", "WallLeft", "WallRight"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Indoor3D/Camera",
+        "children": []
+      },
+      {
+        "name": "Table",
+        "class": "MeshInstance3D",
+        "path": "/root/Indoor3D/Table",
+        "children": []
+      },
+      {
+        "name": "Chair",
+        "class": "MeshInstance3D",
+        "path": "/root/Indoor3D/Chair",
+        "children": []
+      },
+      {
+        "name": "Lamp",
+        "class": "MeshInstance3D",
+        "path": "/root/Indoor3D/Lamp",
+        "children": []
+      },
+      {
+        "name": "CeilingLight",
+        "class": "OmniLight3D",
+        "path": "/root/Indoor3D/CeilingLight",
+        "children": []
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Indoor3D/Floor",
+        "children": ["FloorShape"]
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Indoor3D/Floor/FloorShape",
+        "children": []
+      },
+      {
+        "name": "WallLeft",
+        "class": "StaticBody3D",
+        "path": "/root/Indoor3D/WallLeft",
+        "children": ["WallLeftShape"]
+      },
+      {
+        "name": "WallLeftShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Indoor3D/WallLeft/WallLeftShape",
+        "children": []
+      },
+      {
+        "name": "WallRight",
+        "class": "StaticBody3D",
+        "path": "/root/Indoor3D/WallRight",
+        "children": ["WallRightShape"]
+      },
+      {
+        "name": "WallRightShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Indoor3D/WallRight/WallRightShape",
+        "children": []
+      }
+    ]
+  }
+}

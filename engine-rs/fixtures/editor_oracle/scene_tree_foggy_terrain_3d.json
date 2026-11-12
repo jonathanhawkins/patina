@@ -1,0 +1,103 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/foggy_terrain_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Environment",
+				"node_class": "WorldEnvironment",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Environment",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Fog",
+				"node_class": "FogVolume",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Fog",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Lantern",
+				"node_class": "OmniLight3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Lantern",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Terrain",
+				"node_class": "MeshInstance3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Terrain",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "GroundShape",
+						"node_class": "CollisionShape3D",
+						"owner": "FoggyTerrain3D",
+						"path": "/root/FoggyTerrain3D/Ground/GroundShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Ground",
+				"node_class": "StaticBody3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/Ground",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "RockShape",
+						"node_class": "CollisionShape3D",
+						"owner": "FoggyTerrain3D",
+						"path": "/root/FoggyTerrain3D/FallingRock/RockShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "RockMesh",
+						"node_class": "MeshInstance3D",
+						"owner": "FoggyTerrain3D",
+						"path": "/root/FoggyTerrain3D/FallingRock/RockMesh",
+						"scene_file_path": ""
+					}
+				],
+				"name": "FallingRock",
+				"node_class": "RigidBody3D",
+				"owner": "FoggyTerrain3D",
+				"path": "/root/FoggyTerrain3D/FallingRock",
+				"scene_file_path": ""
+			}
+		],
+		"name": "FoggyTerrain3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/FoggyTerrain3D",
+		"scene_file_path": "res://scenes/foggy_terrain_3d.tscn"
+	}
+}

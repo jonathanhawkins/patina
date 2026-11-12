@@ -12,6 +12,9 @@ pub mod canvas_layer;
 pub mod material;
 pub mod mesh;
 pub mod parallax;
+/// Interpreted subset of `shader_type particles`, run per particle by the CPU
+/// simulator (pat-0q2kx.261).
+pub mod particles_shader;
 pub mod server;
 pub mod server3d;
 pub mod shader;
@@ -22,19 +25,24 @@ pub use canvas::{CanvasItem, CanvasItemId, DrawCommand};
 pub use canvas_layer::CanvasLayer;
 pub use material::{
     BlendMode, CanvasItemMaterial, CullMode, LightMode, Material3D, StandardMaterial3D,
-    TransparencyMode, VisualShader, VisualShaderConnection, VisualShaderNode, VisualShaderNodeType,
+    TransparencyMode, VisualShader, VisualShaderConnection, VisualShaderMode, VisualShaderNode,
+    VisualShaderNodeType,
 };
 pub use mesh::{Mesh3D, PrimitiveType};
-pub use parallax::ParallaxLayer;
+// `ParallaxBackground` was missing from this re-export while `ParallaxLayer`
+// was present, so a consumer crate could name a layer but not the background
+// that drives it — and the render-path wiring this family needs lives in
+// `gdscene`/`gdeditor` (pat-0q2kx.192).
+pub use parallax::{Parallax2D, ParallaxBackground, ParallaxLayer, ScrollLimits};
 pub use server::{FrameData, RenderingServer2D};
 pub use server3d::{
     perspective_projection_matrix, FrameData3D, Instance3D, Instance3DId, RenderingServer3D,
     Viewport3D,
 };
 pub use shader::{
-    eval_color_expr, eval_float_expr, execute_fragment, parse_fragment_body, parse_uniforms,
-    tokenize_shader, ColorExpr, CompiledShader, FloatExpr, FragmentContext, FragmentInstruction,
-    Shader, ShaderCompiler, ShaderKeyword, ShaderMaterial, ShaderProcessor, ShaderToken,
-    ShaderType, ShaderUniform, UniformType, UvAxis,
+    eval_color_expr, eval_float_expr, execute_fragment, parse_fragment_body, parse_sky_body,
+    parse_uniforms, tokenize_shader, ColorExpr, CompiledShader, FloatExpr, FragmentContext,
+    FragmentInstruction, Shader, ShaderCompiler, ShaderKeyword, ShaderMaterial, ShaderProcessor,
+    ShaderToken, ShaderType, ShaderUniform, UniformType, UvAxis, Vec3Axis,
 };
 pub use viewport::Viewport;

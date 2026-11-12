@@ -1,0 +1,12 @@
+; pat-mgixk.54 fixture: a project whose main scene drives the DirAccess surface.
+;
+; Booted with an explicit `user://` root (boot_project_with_user_root): plain
+; `boot_project` leaves `user://` unmapped, and every call below would then fail
+; for a reason unrelated to the bindings under test.
+
+config_version=5
+
+[application]
+
+config/name="DirAccess Surface"
+run/main_scene="res://main.tscn"

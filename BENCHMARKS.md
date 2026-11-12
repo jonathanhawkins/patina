@@ -269,6 +269,49 @@ cargo run --example benchmarks > benchmark_results.json  # Save to file
 | `variant_conversion` | 1000 Variant JSON roundtrips |
 | `render_frame_2d` | 100 canvas items into 640x480 framebuffer |
 
+### Current Baselines (2026-03-20, post-4.6.1 repin, debug profile, Apple M-series)
+
+Run with `cargo run --example benchmarks` from `engine-rs/`:
+
+| Benchmark | avg_us | Notes |
+|-----------|--------|-------|
+| `scene_load` | 46 µs | Parse demo_2d.tscn (5 nodes), 100 iters |
+| `resource_load` | 23 µs | Parse 4-property .tres resource, 100 iters |
+| `physics_step_2d` | 195,361 µs | 100 rigid circles, 60 frames at 60 Hz |
+| `physics_step_3d` | 174,970 µs | 100 rigid spheres, 60 frames at 60 Hz |
+| `variant_conversion` | 2,016 µs | 1000 Variant JSON roundtrips, 100 iters |
+| `render_frame_2d` | 2,483 µs | 100 canvas items, 640×480, 100 iters |
+
+### Test-Based Runtime Baselines (2026-03-20, post-4.6.1 repin, debug profile)
+
+Run with `cargo test bench_ -- --nocapture 2>&1 | grep '\[bench\]'`:
+
+| Benchmark | Time | Per-unit |
+|-----------|------|----------|
+| `step_1000_frames minimal` | 11.58 ms | 0.012 ms/frame |
+| `step_1000_frames hierarchy` | 37.67 ms | 0.038 ms/frame |
+| `step_1000_frames space_shooter` | 48.86 ms | 0.049 ms/frame |
+| `step_1000_frames physics_playground` | 76.34 ms | 0.076 ms/frame |
+| `step_1000_frames platformer` | 148.12 ms | 0.148 ms/frame |
+| `load_instance minimal` | 1.43 ms / 100x | 0.014 ms/iter |
+| `load_instance hierarchy` | 6.05 ms / 100x | 0.060 ms/iter |
+| `load_instance space_shooter` | 8.00 ms / 100x | 0.080 ms/iter |
+| `load_instance physics_playground` | 10.55 ms / 100x | 0.105 ms/iter |
+| `load_instance platformer` | 16.68 ms / 100x | 0.167 ms/iter |
+| `physics platformer` | 9.10 ms / 100 frames | 0.091 ms/frame |
+| `physics physics_playground` | 5.79 ms / 100 frames | 0.058 ms/frame |
+| `physics space_shooter` | 3.64 ms / 100 frames | 0.036 ms/frame |
+| `parse player.gd` | 7.99 ms / 100x | 0.080 ms/iter |
+| `parse enemy_spawner.gd` | 4.37 ms / 100x | 0.044 ms/iter |
+| `parse test_variables.gd` | 3.57 ms / 100x | 0.036 ms/iter |
+| `parse test_movement.gd` | 3.30 ms / 100x | 0.033 ms/iter |
+| `parse test_move.gd` | 2.41 ms / 100x | 0.024 ms/iter |
+| `variant_roundtrip` | 1.21 ms / 100x | 0.012 ms/iter |
+
+These numbers are from a debug build; release builds will be materially faster.
+Compare future runs against these baselines using the thresholds above.
+No behavioral differences were observed versus 4.5.x baselines after the repin.
+
 Each runs 100 iterations. Output format:
 
 ```json

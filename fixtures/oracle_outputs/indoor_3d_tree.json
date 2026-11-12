@@ -1,0 +1,95 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Room",
+					"path": "/root/Room/Camera"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Table",
+					"owner": "/root/Room",
+					"path": "/root/Room/Table"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Chair",
+					"owner": "/root/Room",
+					"path": "/root/Room/Chair"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "Lamp",
+					"owner": "/root/Room",
+					"path": "/root/Room/Lamp"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "CeilingLight",
+					"owner": "/root/Room",
+					"path": "/root/Room/CeilingLight"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "FloorShape",
+							"owner": "/root/Room",
+							"path": "/root/Room/Floor/FloorShape"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Floor",
+					"owner": "/root/Room",
+					"path": "/root/Room/Floor"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "WallShape",
+							"owner": "/root/Room",
+							"path": "/root/Room/Wall_Back/WallShape"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Wall_Back",
+					"owner": "/root/Room",
+					"path": "/root/Room/Wall_Back"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Room",
+			"owner": "/root",
+			"path": "/root/Room"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

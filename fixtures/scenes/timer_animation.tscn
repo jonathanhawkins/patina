@@ -1,0 +1,20 @@
+[gd_scene format=3 uid="uid://timer_animation"]
+
+[node name="Root" type="Node"]
+
+[node name="OneShot" type="Timer" parent="."]
+wait_time = 2.0
+one_shot = true
+
+[node name="Repeating" type="Timer" parent="."]
+wait_time = 0.5
+one_shot = false
+
+[node name="Player" type="AnimationPlayer" parent="."]
+
+[node name="Mesh" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+
+[node name="Skeleton" type="Skeleton3D" parent="Mesh"]
+
+[node name="BoneAttachment" type="BoneAttachment3D" parent="Mesh/Skeleton"]

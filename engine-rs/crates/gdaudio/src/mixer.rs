@@ -68,10 +68,719 @@ impl AudioMixer {
         let bus = self.buses.remove(from);
         self.buses.insert(to, bus);
     }
+
+    /// Rebuilds the mixer's buses from a `default_bus_layout.tres`, effect
+    /// chains included (pat-0q2kx.56).
+    ///
+    /// Godot loads this file at startup (`AudioServer::load_default_bus_layout`,
+    /// `servers/audio/audio_server.cpp:1626`) from the project setting
+    /// `audio/buses/default_bus_layout`. The resource carries the bus table in
+    /// its `[resource]` section and each effect as a `[sub_resource]` block that
+    /// a bus references by id:
+    ///
+    /// ```text
+    /// [sub_resource type="AudioEffectAmplify" id="Amplify_1"]
+    /// volume_db = 6.0
+    ///
+    /// [resource]
+    /// bus/1/name = "Music"
+    /// bus/1/effect/0/effect = SubResource("Amplify_1")
+    /// bus/1/effect/0/enabled = true
+    /// ```
+    ///
+    /// ⚠️ A slot with `enabled = false` is SKIPPED rather than inserted and
+    /// bypassed — Patina's [`EffectChain`] has no per-slot enable flag, and
+    /// inserting a disabled effect as if it were live would silently colour
+    /// every bus that has one.
+    ///
+    /// Returns the resulting bus count. Unknown effect types are skipped (the
+    /// bus still loads), so a project using an effect Patina has not
+    /// implemented yet keeps its bus layout instead of failing to boot.
+    pub fn load_bus_layout_tres(&mut self, text: &str) -> usize {
+        let doc = parse_tres_sections(text);
+        let entries: Vec<(&str, &str)> = doc
+            .resource
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let count = self.load_bus_layout(entries);
+
+        // Effects are attached after the buses exist, so a slot referring to a
+        // bus the layout never declared simply finds no target.
+        for (key, value) in &doc.resource {
+            let Some((bus_idx, slot_field)) = parse_effect_key(key) else {
+                continue;
+            };
+            if slot_field != "effect" {
+                continue;
+            }
+            let Some(id) = parse_sub_resource_id(value) else {
+                continue;
+            };
+            // The sibling `enabled` key governs this slot; Godot defaults it to
+            // true when absent.
+            let enabled_key = key
+                .rsplit_once('/')
+                .map(|(base, _)| format!("{base}/enabled"));
+            let enabled = enabled_key
+                .and_then(|k| {
+                    doc.resource
+                        .iter()
+                        .find(|(dk, _)| *dk == k)
+                        .map(|(_, v)| v.as_str())
+                })
+                .map(|v| v.trim() == "true")
+                .unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+            let Some(props) = doc.sub_resources.get(&id) else {
+                continue;
+            };
+            let Some(effect) = effect_from_sub_resource(&props.type_name, &props.fields) else {
+                continue;
+            };
+            if let Some(bus) = self.buses.get_mut(bus_idx) {
+                bus.effects_mut().add(effect);
+            }
+        }
+        count
+    }
+
+    /// Rebuilds the mixer's buses from a Godot audio-bus-layout description.
+    ///
+    /// Accepts the layout's `key → value` entries using Godot's
+    /// `bus/<index>/<field>` naming — as found in `default_bus_layout.tres` or a
+    /// project.godot `[audio_bus_layout]` block. Recognized fields: `name`,
+    /// `volume_db`, `send`, `send_db`, `mute`, `solo`, `bypass_fx`. Buses are created in
+    /// ascending index order (index 0 is the Master bus, defaulted if absent);
+    /// string values may be quoted, and unrecognized keys/fields are ignored.
+    ///
+    /// An empty layout leaves the mixer unchanged. Returns the resulting bus
+    /// count.
+    pub fn load_bus_layout<'a, I>(&mut self, entries: I) -> usize
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        use std::collections::BTreeMap;
+
+        // Group `bus/<idx>/<field>` entries by bus index (BTreeMap keeps the
+        // indices ordered so buses rebuild in the layout's order).
+        let mut layout: BTreeMap<usize, BTreeMap<String, String>> = BTreeMap::new();
+        for (key, value) in entries {
+            let Some(rest) = key.trim().strip_prefix("bus/") else {
+                continue;
+            };
+            let mut parts = rest.splitn(2, '/');
+            let Some(idx) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Some(field) = parts.next() else {
+                continue;
+            };
+            layout
+                .entry(idx)
+                .or_default()
+                .insert(field.to_string(), unquote(value.trim()).to_string());
+        }
+
+        if layout.is_empty() {
+            return self.bus_count();
+        }
+
+        let max_idx = *layout.keys().max().expect("layout is non-empty");
+        let mut buses = Vec::with_capacity(max_idx + 1);
+        for i in 0..=max_idx {
+            let fields = layout.get(&i);
+            let name = fields
+                .and_then(|f| f.get("name"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    if i == 0 {
+                        "Master".to_string()
+                    } else {
+                        format!("Bus{i}")
+                    }
+                });
+            let mut bus = AudioBus::new(name);
+            if let Some(f) = fields {
+                if let Some(v) = f.get("volume_db").and_then(|s| s.parse::<f32>().ok()) {
+                    bus.set_volume_db(v);
+                }
+                if let Some(v) = f.get("send_db").and_then(|s| s.parse::<f32>().ok()) {
+                    bus.set_send_db(v);
+                }
+                if let Some(v) = f.get("send") {
+                    bus.set_send(v.as_str());
+                }
+                if let Some(v) = f.get("mute") {
+                    bus.set_mute(v.as_str() == "true");
+                }
+                if let Some(v) = f.get("solo") {
+                    bus.set_solo(v.as_str() == "true");
+                }
+                if let Some(v) = f.get("bypass_fx") {
+                    bus.set_bypass(v.as_str() == "true");
+                }
+            }
+            buses.push(bus);
+        }
+        self.buses = buses;
+        self.bus_count()
+    }
+
+    /// Convenience wrapper for [`Self::load_bus_layout`] that parses a raw
+    /// `[audio_bus_layout]` section body: one `key = value` per line, with blank
+    /// lines, `[section]` headers, and `;` comments ignored.
+    pub fn load_bus_layout_str(&mut self, section: &str) -> usize {
+        let entries: Vec<(&str, &str)> = section
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('[') || line.starts_with(';') {
+                    return None;
+                }
+                line.split_once('=').map(|(k, v)| (k.trim(), v.trim()))
+            })
+            .collect();
+        self.load_bus_layout(entries)
+    }
+}
+
+/// Strips a single pair of surrounding double quotes from a Godot string value
+/// (`"Master"` → `Master`), leaving unquoted values untouched.
+/// A `[sub_resource]` block: its Godot type name and its `key = value` fields.
+struct SubResourceBlock {
+    type_name: String,
+    fields: std::collections::HashMap<String, String>,
+}
+
+/// The parts of a `.tres` this loader needs.
+struct TresDoc {
+    /// `[resource]` entries, in file order — order matters because effect slots
+    /// are indexed and must attach in sequence.
+    resource: Vec<(String, String)>,
+    sub_resources: std::collections::HashMap<String, SubResourceBlock>,
+}
+
+/// Splits a `.tres` into its `[sub_resource]` blocks and `[resource]` entries
+/// (pat-0q2kx.56).
+///
+/// Deliberately minimal: a bus layout is a flat list of scalars, so this reads
+/// section headers and `key = value` lines and ignores everything else. It does
+/// NOT try to be a general Godot resource parser — `gdresource` owns that — and
+/// a line it cannot make sense of is skipped rather than failing the boot.
+fn parse_tres_sections(text: &str) -> TresDoc {
+    let mut doc = TresDoc {
+        resource: Vec::new(),
+        sub_resources: std::collections::HashMap::new(),
+    };
+    // None = before any section we care about.
+    let mut current: Option<String> = None;
+    let mut in_resource = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_resource = false;
+            current = None;
+            if line.starts_with("[resource") {
+                in_resource = true;
+            } else if line.starts_with("[sub_resource") {
+                let type_name = section_attr(line, "type").unwrap_or_default();
+                if let Some(id) = section_attr(line, "id") {
+                    doc.sub_resources.insert(
+                        id.clone(),
+                        SubResourceBlock {
+                            type_name,
+                            fields: std::collections::HashMap::new(),
+                        },
+                    );
+                    current = Some(id);
+                }
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim().to_string(), value.trim().to_string());
+        if in_resource {
+            doc.resource.push((key, value));
+        } else if let Some(id) = current.as_ref() {
+            if let Some(block) = doc.sub_resources.get_mut(id) {
+                block.fields.insert(key, value);
+            }
+        }
+    }
+    doc
+}
+
+/// Reads `name="value"` out of a section header line.
+fn section_attr(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Splits `bus/<i>/effect/<j>/<field>` into the bus index and the field name.
+fn parse_effect_key(key: &str) -> Option<(usize, &str)> {
+    let rest = key.strip_prefix("bus/")?;
+    let (idx, rest) = rest.split_once('/')?;
+    let idx = idx.parse::<usize>().ok()?;
+    let rest = rest.strip_prefix("effect/")?;
+    let (_slot, field) = rest.split_once('/')?;
+    Some((idx, field))
+}
+
+/// Extracts the id from a `SubResource("id")` reference.
+fn parse_sub_resource_id(value: &str) -> Option<String> {
+    let inner = value
+        .trim()
+        .strip_prefix("SubResource(")?
+        .strip_suffix(')')?;
+    Some(unquote(inner.trim()).to_string())
+}
+
+/// Builds an effect from a `[sub_resource]` block's Godot type name
+/// (pat-0q2kx.56).
+///
+/// Returns `None` for a type Patina has not implemented, which the caller
+/// treats as "skip this slot" — a project using an unmodelled effect keeps its
+/// bus layout rather than failing to boot.
+fn effect_from_sub_resource(
+    type_name: &str,
+    fields: &std::collections::HashMap<String, String>,
+) -> Option<Box<dyn crate::effects::AudioEffect>> {
+    use crate::effects::{
+        AudioEffectAmplify, AudioEffectCapture, AudioEffectChorus, AudioEffectCompressor,
+        AudioEffectDelay, AudioEffectDistortion, AudioEffectFilter, AudioEffectFilterCascade,
+        AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectPanner, AudioEffectPhaser,
+        AudioEffectPitchShift, AudioEffectRecord, AudioEffectReverb, AudioEffectSpectrumAnalyzer,
+        AudioEffectStereoEnhance, ChorusVoice, DistortionMode, CHORUS_MAX_VOICES,
+    };
+
+    let f = |name: &str, default: f32| -> f32 {
+        fields
+            .get(name)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+
+    // ⚠️ Booleans need their own reader (pat-mgixk.84). A `.tres` writes them as
+    // `true`/`false`, which `parse::<f32>()` rejects — so reading `tap1_active`
+    // through `f` would silently fall back to the default for EVERY authored
+    // value, including an explicit `false`. That is the quietest possible bug:
+    // the tap is on because the parse failed, not because the project said so.
+    let b = |name: &str, default: bool| -> bool {
+        fields
+            .get(name)
+            .map(|v| v.trim() == "true")
+            .unwrap_or(default)
+    };
+
+    // pat-s3rrv.54 — Godot's documented filter defaults
+    // (doc/classes/AudioEffectFilter.xml): cutoff_hz 2000, resonance 1.0,
+    // gain 1.0, db DB_6.
+    //
+    // ⚠️ `resonance` was 0.5 here, which is NOT Godot's default. Nothing pinned
+    // it, so a layout that omits the field has been building a differently
+    // shaped filter than Godot would.
+    let cutoff = f("cutoff_hz", 2000.0);
+    let resonance = f("resonance", 1.0);
+    // `gain` is a LINEAR multiplier in Godot while the shelf constructors take
+    // dB, so 1.0 must mean 0 dB rather than 1 dB. A non-positive gain has no dB
+    // value at all, so it clamps instead of producing -inf.
+    let gain_linear = f("gain", 1.0);
+    let gain_db = if gain_linear > 0.0 {
+        20.0 * gain_linear.log10()
+    } else {
+        0.0
+    };
+    // `db` is an ENUM INDEX (DB_6=0 … DB_24=3), not a dB number. One biquad is
+    // 12 dB/oct; Godot steepens the skirt by cascading identical stages.
+    let stages = (f("db", 0.0) as usize).saturating_add(1).clamp(1, 4);
+
+    // One stage stays a bare filter so the common case allocates nothing extra;
+    // more becomes a cascade. Both carry the Godot class name, because `name()`
+    // is "Filter" for all seven classes and a bus slot has to say which it is.
+    let filter =
+        |proto: AudioEffectFilter, class: &'static str| -> Box<dyn crate::effects::AudioEffect> {
+            if stages > 1 {
+                Box::new(AudioEffectFilterCascade::repeated(proto, stages, class))
+            } else {
+                Box::new(proto.with_godot_class(class))
+            }
+        };
+
+    match type_name {
+        "AudioEffectAmplify" => Some(Box::new(AudioEffectAmplify::new(f("volume_db", 0.0)))),
+        // pat-s3rrv.141: the two script-driven taps. Without these arms a bus
+        // layout naming them dropped the slot, so a project whose Record bus was
+        // authored in the editor produced a mixer that could never record.
+        //
+        // ⚠️ `buffer_length` defaults to 0.1 s, NOT 0.0 — a zero here leaves the
+        // ring unsized and every drain returns empty forever.
+        "AudioEffectCapture" => Some(Box::new(AudioEffectCapture::with_buffer_length(f(
+            "buffer_length",
+            0.1,
+        )))),
+        "AudioEffectRecord" => {
+            let mut rec = AudioEffectRecord::new();
+            // ⚠️ 1 = FORMAT_16_BITS is the default; `f(.., 0.0)` would mean
+            // 8-bit and silently halve the resolution of every recording made
+            // from an authored layout.
+            rec.set_format(f("format", 1.0) as i64);
+            Some(Box::new(rec))
+        }
+        // pat-mgixk.84: this arm used to be a bare `AudioEffectReverb::new()`,
+        // so every authored field was discarded — a layout that set `wet` or
+        // `room_size` in the editor produced the DSP's own hard-coded "roomy"
+        // preset instead.
+        //
+        // ⚠️ The DSP's `new()` is NOT Godot's defaults (it is wet 0.35 / dry 0.7
+        // / feedback 0.5 / delay 0.04s against Godot's 0.5 / 1.0 / 0.8 / 0.15s),
+        // so the defaults below are deliberately taken from
+        // `doc/classes/AudioEffectReverb.xml` rather than from `new()`. That
+        // means an authored Reverb with NO fields also changes behaviour — in
+        // the direction of Godot, which is the point of the bead. No existing
+        // test asserts on a factory-built Reverb's output; the two in
+        // `effects.rs` construct it directly and the `server.rs` one only names
+        // a bus "Reverb".
+        //
+        // ⚠️ `damping`, `hipass`, `predelay_feedback` and `spread` have no
+        // counterpart in this DSP (a single feedback delay line), so they are
+        // read by nothing. Left to the audio-effect-dsp-parity bead rather than
+        // approximated onto `feedback`, which would make two different Godot
+        // knobs move the same number.
+        "AudioEffectReverb" => {
+            let mut reverb = AudioEffectReverb::new();
+            reverb.wet = f("wet", 0.5);
+            reverb.dry = f("dry", 1.0);
+            // Godot's `room_size` is the tail-length control, which in a
+            // feedback-delay reverb is the feedback coefficient.
+            reverb.feedback = f("room_size", 0.8);
+            // Godot authors the pre-delay in MILLIseconds; the field is seconds.
+            reverb.delay_secs = f("predelay_msec", 150.0) / 1000.0;
+            Some(Box::new(reverb))
+        }
+        // pat-mgixk.84: Delay / Distortion / SpectrumAnalyzer. The DSP for all
+        // three already existed and was unit-tested in `effects.rs`; nothing
+        // could name them from a bus layout, so the slot was dropped and
+        // `AudioServer.get_bus_effect_instance` had no analyzer to hand back —
+        // which is the standard visualizer setup.
+        //
+        // Defaults are Godot's, from `doc/classes/AudioEffect*.xml`.
+        "AudioEffectDelay" => {
+            let mut delay = AudioEffectDelay::new();
+            delay.dry = f("dry", 1.0);
+            delay.tap1_active = b("tap1_active", true);
+            delay.tap1_delay_ms = f("tap1_delay_ms", 250.0);
+            delay.tap1_level_db = f("tap1_level_db", -6.0);
+            delay.tap2_active = b("tap2_active", true);
+            delay.tap2_delay_ms = f("tap2_delay_ms", 500.0);
+            delay.tap2_level_db = f("tap2_level_db", -12.0);
+            delay.feedback_active = b("feedback_active", false);
+            delay.feedback_delay_ms = f("feedback_delay_ms", 340.0);
+            delay.feedback_level_db = f("feedback_level_db", -6.0);
+            delay.feedback_lowpass = f("feedback_lowpass", 16000.0);
+            // ⚠️ `tap1_pan` / `tap2_pan` (Godot 0.2 / -0.4) have no field: this
+            // DSP sums the taps mono into both channels. Reading them would
+            // need per-tap panning in `effects.rs`, which belongs to the
+            // dsp-parity bead — recorded here so the gap is visible rather than
+            // looking like an oversight.
+            Some(Box::new(delay))
+        }
+        "AudioEffectDistortion" => {
+            let mut dist = AudioEffectDistortion::new();
+            // `mode` is an ENUM INDEX in the `.tres`, and the order is Godot's
+            // (MODE_CLIP 0, ATAN 1, LOFI 2, OVERDRIVE 3, WAVESHAPE 4). An
+            // unknown index falls back to Clip, Godot's default, rather than
+            // dropping the whole effect.
+            dist.mode = match f("mode", 0.0) as i64 {
+                1 => DistortionMode::ATan,
+                2 => DistortionMode::LoFi,
+                3 => DistortionMode::Overdrive,
+                4 => DistortionMode::WaveShape,
+                _ => DistortionMode::Clip,
+            };
+            // Godot names these `pre_gain`/`post_gain` and documents both in
+            // decibels, which is what the fields store.
+            dist.pre_gain_db = f("pre_gain", 0.0);
+            dist.post_gain_db = f("post_gain", 0.0);
+            dist.drive = f("drive", 0.0);
+            // ⚠️ `keep_hf_hz` (Godot 16000) has no field — this DSP has no
+            // high-frequency bypass. Same disposition as the pans above.
+            Some(Box::new(dist))
+        }
+        // ⚠️ Godot's property is `buffer_length`, not `buffer_length_secs`, and
+        // its default is 2.0 s — the constructor's own parameter name is the
+        // field, not the authored key.
+        //
+        // `fft_size` (an enum index, default 2 = 2048) and `tap_back_pos` have
+        // no counterpart: this analyzer sizes its window from the buffer
+        // length. Deferred, not approximated.
+        "AudioEffectSpectrumAnalyzer" => Some(Box::new(AudioEffectSpectrumAnalyzer::new(f(
+            "buffer_length",
+            2.0,
+        )))),
+        // pat-mgixk.89: the modulation family. These had no DSP at all, so a
+        // Godot layout naming any of them lost the slot entirely.
+        //
+        // Defaults are Godot's, from `doc/classes/AudioEffect*.xml`, and the
+        // keys are the SERIALIZED property names from each
+        // `audio_effect_*.cpp` `ADD_PROPERTY` — which for this family are the
+        // plain underscore names, unlike Chorus's `voice/N/...` paths.
+        "AudioEffectPanner" => Some(Box::new(AudioEffectPanner::new(f("pan", 0.0)))),
+        "AudioEffectStereoEnhance" => {
+            let mut fx = AudioEffectStereoEnhance::new();
+            fx.pan_pullout = f("pan_pullout", 1.0);
+            fx.time_pullout_ms = f("time_pullout_ms", 0.0);
+            fx.surround = f("surround", 0.0);
+            Some(Box::new(fx))
+        }
+        "AudioEffectPhaser" => {
+            let mut fx = AudioEffectPhaser::new();
+            fx.range_min_hz = f("range_min_hz", 440.0);
+            fx.range_max_hz = f("range_max_hz", 1600.0);
+            fx.rate_hz = f("rate_hz", 0.5);
+            fx.feedback = f("feedback", 0.7);
+            fx.depth = f("depth", 1.0);
+            Some(Box::new(fx))
+        }
+        // 🔑 Chorus is the one class in this family whose authored keys are
+        // PATHS, not flat names: `voice/1/delay_ms`, and **1-indexed**
+        // (`audio_effect_chorus.cpp` registers `voice/%d/...` starting at 1
+        // while the array is 0-based). Reading `voice/0/...` or `voice_1_delay`
+        // would find nothing and silently leave every voice at its default,
+        // which is the failure this arm exists to avoid.
+        // ⚠️ `oversampling` is registered as a FLOAT upstream despite being a
+        // count, and `fft_size` is an ENUM INDEX (0..=4 -> 256..4096), not a
+        // size in samples. Reading fft_size as a literal window length would
+        // ask for a 3-frame window.
+        "AudioEffectPitchShift" => {
+            let mut fx = AudioEffectPitchShift::new();
+            fx.pitch_scale = f("pitch_scale", 1.0);
+            fx.oversampling = f("oversampling", 4.0);
+            fx.fft_size = f("fft_size", 3.0) as i64;
+            Some(Box::new(fx))
+        }
+        "AudioEffectChorus" => {
+            let mut fx = AudioEffectChorus::new();
+            // Godot clamps voice_count to 1..=MAX_VOICES; a layout asking for
+            // more would otherwise index past the array.
+            fx.voice_count = (f("voice_count", 2.0) as usize).clamp(1, CHORUS_MAX_VOICES);
+            fx.dry = f("dry", 1.0);
+            fx.wet = f("wet", 0.5);
+            for i in 0..CHORUS_MAX_VOICES {
+                // ⚠️ Defaults per slot are NOT uniform: voices 1 and 2 are
+                // pre-configured by Godot's constructor, 3 and 4 fall back to
+                // the bare `Voice()` values. `AudioEffectChorus::new()` already
+                // encodes that, so each default below is read off the voice it
+                // is overwriting rather than hard-coded.
+                let d = fx.voices[i];
+                let key = |name: &str| format!("voice/{}/{}", i + 1, name);
+                fx.voices[i] = ChorusVoice {
+                    delay_ms: f(&key("delay_ms"), d.delay_ms),
+                    rate_hz: f(&key("rate_hz"), d.rate_hz),
+                    depth_ms: f(&key("depth_ms"), d.depth_ms),
+                    level_db: f(&key("level_db"), d.level_db),
+                    cutoff_hz: f(&key("cutoff_hz"), d.cutoff_hz),
+                    pan: f(&key("pan"), d.pan),
+                };
+            }
+            Some(Box::new(fx))
+        }
+        // pat-s3rrv.54: the whole filter family. The biquad DSP already existed
+        // and was unit-tested; only three of the eight classes could be named
+        // from a bus layout, and the other five were silently dropped.
+        "AudioEffectLowPassFilter" => Some(filter(
+            AudioEffectFilter::low_pass(cutoff, resonance),
+            "AudioEffectLowPassFilter",
+        )),
+        "AudioEffectHighPassFilter" => Some(filter(
+            AudioEffectFilter::high_pass(cutoff, resonance),
+            "AudioEffectHighPassFilter",
+        )),
+        "AudioEffectBandPassFilter" => Some(filter(
+            AudioEffectFilter::band_pass(cutoff, resonance),
+            "AudioEffectBandPassFilter",
+        )),
+        "AudioEffectNotchFilter" => Some(filter(
+            AudioEffectFilter::notch(cutoff, resonance),
+            "AudioEffectNotchFilter",
+        )),
+        "AudioEffectLowShelfFilter" => Some(filter(
+            AudioEffectFilter::low_shelf(cutoff, gain_db),
+            "AudioEffectLowShelfFilter",
+        )),
+        "AudioEffectHighShelfFilter" => Some(filter(
+            AudioEffectFilter::high_shelf(cutoff, gain_db),
+            "AudioEffectHighShelfFilter",
+        )),
+        // Bounded from BOTH sides, so a high-pass and a low-pass in series
+        // rather than any single response; `db` repeats the pair.
+        //
+        // ⚠️ APPROXIMATION, flagged rather than hidden: Godot's BANDLIMIT is its
+        // own mode in `audio_filter_sw.h` and Patina's `FilterMode` has no
+        // equivalent. HP+LP at one corner is the right SHAPE, not a bit-exact
+        // match.
+        "AudioEffectBandLimitFilter" => Some(Box::new(AudioEffectFilterCascade::new(
+            (0..stages)
+                .flat_map(|_| {
+                    [
+                        AudioEffectFilter::high_pass(cutoff, resonance),
+                        AudioEffectFilter::low_pass(cutoff, resonance),
+                    ]
+                })
+                .collect(),
+            "AudioEffectBandLimitFilter",
+        ))),
+        // The base class is instantiable in Godot and defaults to a low-pass
+        // response; a layout naming it should not lose its slot.
+        "AudioEffectFilter" => Some(filter(
+            AudioEffectFilter::low_pass(cutoff, resonance),
+            "AudioEffectFilter",
+        )),
+        // pat-s3rrv.53: the dynamics family. The DSP existed and was unit-tested;
+        // without these arms a bus layout naming them built an EMPTY chain, so a
+        // Master bus ending in a compressor silently did nothing.
+        "AudioEffectCompressor" => {
+            // ⚠️ Godot stores attack in MICROSECONDS (`attack_us`, default 20.0)
+            // while the sibling is `release_ms`. `AudioEffectCompressor::new`
+            // takes milliseconds, so this MUST divide by 1000 — passing 20.0
+            // straight through is a 1000x attack time that still runs, just
+            // with an envelope that never catches transients.
+            let mut c = AudioEffectCompressor::new(
+                f("threshold", 0.0),
+                f("ratio", 4.0),
+                f("attack_us", 20.0) / 1000.0,
+                f("release_ms", 250.0),
+            );
+            c.gain_db = f("gain", 0.0);
+            // pat-s3rrv.53: the `sidechain` bus name was parsed and DROPPED, so
+            // a layout configuring ducking produced a compressor keyed off its
+            // own input — audibly "the compressor does nothing much" rather than
+            // an error. `.tres` string values arrive quoted.
+            c.set_sidechain_bus(
+                fields
+                    .get("sidechain")
+                    .map(|v| v.trim().trim_matches('"').to_string()),
+            );
+            Some(Box::new(c))
+        }
+        "AudioEffectLimiter" => Some(Box::new(AudioEffectLimiter::new(
+            f("ceiling_db", -0.1),
+            f("soft_clip_db", 2.0),
+        ))),
+        "AudioEffectHardLimiter" => Some(Box::new(AudioEffectHardLimiter::new(
+            // -0.3 is upstream's HardLimiter default and differs from Limiter's
+            // -0.1 (doc/classes/AudioEffectHardLimiter.xml).
+            f("ceiling_db", -0.3),
+            f("pre_gain_db", 0.0),
+        ))),
+        _ => None,
+    }
+}
+
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 impl Default for AudioMixer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod bus_layout_tests {
+    use super::*;
+    use crate::effects::AudioEffectAmplify;
+
+    const LAYOUT: &str = r#"
+[audio_bus_layout]
+
+bus/0/name = "Master"
+bus/0/volume_db = 0.0
+bus/0/mute = false
+bus/1/name = "Music"
+bus/1/volume_db = -6.0
+bus/1/send = "Master"
+bus/1/mute = false
+bus/2/name = "SFX"
+bus/2/volume_db = -3.0
+bus/2/send = "Master"
+bus/2/solo = true
+"#;
+
+    #[test]
+    fn load_bus_layout_str_builds_named_buses() {
+        let mut mixer = AudioMixer::new();
+        let count = mixer.load_bus_layout_str(LAYOUT);
+        assert_eq!(count, 3);
+        assert_eq!(mixer.bus_count(), 3);
+        assert_eq!(mixer.get_bus(0).unwrap().name(), "Master");
+        assert_eq!(mixer.get_bus(1).unwrap().name(), "Music");
+        assert_eq!(mixer.get_bus(2).unwrap().name(), "SFX");
+        assert!((mixer.get_bus(1).unwrap().volume_db() - (-6.0)).abs() < 1e-6);
+        assert_eq!(mixer.get_bus(1).unwrap().send(), "Master");
+        assert!(mixer.get_bus(2).unwrap().is_solo());
+        assert!(!mixer.get_bus(1).unwrap().is_solo());
+    }
+
+    #[test]
+    fn load_bus_layout_ignores_unknown_and_unquotes() {
+        let mut mixer = AudioMixer::new();
+        let entries = vec![
+            ("bus/0/name", "\"Master\""),
+            ("bus/1/name", "\"Ambience\""),
+            ("bus/1/send", "\"Master\""),
+            ("bus/1/pitch_scale", "2.0"), // unrecognized field → ignored
+            ("some/other/key", "5"),      // non-bus key → ignored
+        ];
+        let count = mixer.load_bus_layout(entries);
+        assert_eq!(count, 2);
+        assert_eq!(mixer.get_bus(1).unwrap().name(), "Ambience"); // quotes stripped
+        assert_eq!(mixer.get_bus(1).unwrap().send(), "Master");
+    }
+
+    #[test]
+    fn missing_master_index_still_defaults_to_master() {
+        // A layout that only defines bus/1 must still yield a Master at index 0.
+        let mut mixer = AudioMixer::new();
+        let count = mixer.load_bus_layout(vec![("bus/1/name", "\"Voice\"")]);
+        assert_eq!(count, 2);
+        assert_eq!(mixer.get_bus(0).unwrap().name(), "Master");
+        assert_eq!(mixer.get_bus(1).unwrap().name(), "Voice");
+    }
+
+    #[test]
+    fn empty_layout_keeps_existing_master() {
+        let mut mixer = AudioMixer::new();
+        let count = mixer.load_bus_layout_str("[audio_bus_layout]\n; nothing here\n");
+        assert_eq!(count, 1); // just the default Master
+        assert_eq!(mixer.get_bus(0).unwrap().name(), "Master");
+    }
+
+    #[test]
+    fn scene_can_add_effect_to_loaded_bus() {
+        // Bead ACCEPT: "scene can add effect to bus."
+        let mut mixer = AudioMixer::new();
+        mixer.load_bus_layout_str(LAYOUT);
+        let sfx = mixer.get_bus_by_name("SFX").expect("SFX bus from layout");
+        let bus = mixer.get_bus_mut(sfx).unwrap();
+        assert!(bus.effects().is_empty());
+        bus.effects_mut()
+            .add(Box::new(AudioEffectAmplify::new(6.0)));
+        assert_eq!(bus.effects().len(), 1);
     }
 }

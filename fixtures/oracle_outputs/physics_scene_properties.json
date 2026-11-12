@@ -19,15 +19,7 @@
 							"name": "CollisionShape",
 							"path": "/root/PhysicsWorld/DynamicCrate/CollisionShape",
 							"properties": {
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "RectangleShape2D",
-										"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-									}
-								}
+
 							}
 						}
 					],
@@ -35,25 +27,13 @@
 					"name": "DynamicCrate",
 					"path": "/root/PhysicsWorld/DynamicCrate",
 					"properties": {
-						"collision_mask": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 3
-						},
-						"mass": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 5.0
-						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
 							"type": "Vector2",
 							"value": {
 								"x": 200.0,
-								"y": 100.0
+								"y": 50.0
 							}
 						}
 					}
@@ -66,15 +46,7 @@
 							"name": "CollisionShape",
 							"path": "/root/PhysicsWorld/BouncyBall/CollisionShape",
 							"properties": {
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "CircleShape2D",
-										"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-									}
-								}
+
 							}
 						}
 					],
@@ -82,24 +54,6 @@
 					"name": "BouncyBall",
 					"path": "/root/PhysicsWorld/BouncyBall",
 					"properties": {
-						"collision_mask": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 3
-						},
-						"continuous_cd": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 1
-						},
-						"gravity_scale": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 1.5
-						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -119,24 +73,7 @@
 							"name": "CollisionShape",
 							"path": "/root/PhysicsWorld/StaticPlatform/CollisionShape",
 							"properties": {
-								"scale": {
-									"class_type": "",
-									"hint": 5,
-									"type": "Vector2",
-									"value": {
-										"x": 8.0,
-										"y": 0.5
-									}
-								},
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "RectangleShape2D",
-										"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-									}
-								}
+
 							}
 						}
 					],
@@ -144,25 +81,13 @@
 					"name": "StaticPlatform",
 					"path": "/root/PhysicsWorld/StaticPlatform",
 					"properties": {
-						"collision_layer": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 2
-						},
-						"collision_mask": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 0
-						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
 							"type": "Vector2",
 							"value": {
 								"x": 300.0,
-								"y": 400.0
+								"y": 300.0
 							}
 						}
 					}
@@ -175,24 +100,7 @@
 							"name": "CollisionShape",
 							"path": "/root/PhysicsWorld/KillZone/CollisionShape",
 							"properties": {
-								"scale": {
-									"class_type": "",
-									"hint": 5,
-									"type": "Vector2",
-									"value": {
-										"x": 20.0,
-										"y": 1.0
-									}
-								},
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "RectangleShape2D",
-										"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-									}
-								}
+
 							}
 						}
 					],
@@ -200,18 +108,6 @@
 					"name": "KillZone",
 					"path": "/root/PhysicsWorld/KillZone",
 					"properties": {
-						"collision_layer": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 4
-						},
-						"monitorable": {
-							"class_type": "",
-							"hint": 0,
-							"type": "bool",
-							"value": false
-						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -231,24 +127,7 @@
 							"name": "CollisionShape",
 							"path": "/root/PhysicsWorld/Ground/CollisionShape",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 0.0,
-										"y": 500.0
-									}
-								},
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "WorldBoundaryShape2D",
-										"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-									}
-								}
+
 							}
 						}
 					],
@@ -256,17 +135,14 @@
 					"name": "Ground",
 					"path": "/root/PhysicsWorld/Ground",
 					"properties": {
-						"collision_layer": {
+						"position": {
 							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 2
-						},
-						"collision_mask": {
-							"class_type": "",
-							"hint": 8,
-							"type": "int",
-							"value": 0
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 400.0,
+								"y": 500.0
+							}
 						}
 					}
 				}

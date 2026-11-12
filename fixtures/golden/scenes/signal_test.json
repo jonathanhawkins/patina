@@ -1,0 +1,29 @@
+{
+  "fixture_id": "scene_signal_test",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node2D",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "Emitter",
+          "class": "Node2D",
+          "path": "/root/Root/Emitter",
+          "children": [],
+          "properties": {}
+        },
+        {
+          "name": "Listener",
+          "class": "Node2D",
+          "path": "/root/Root/Listener",
+          "children": [],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

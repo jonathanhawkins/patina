@@ -26,20 +26,61 @@ This document defines the smallest acceptable audio contract for the current Pat
 - Parses RIFF/WAV files (fmt + data chunks) into `AudioSampleBuffer` (f32 PCM)
 - Supports 8-bit unsigned, 16-bit signed, 24-bit signed, 32-bit float
 - Mono and stereo layouts; normalizes all formats to `f32`
-- **Note**: Decode-to-buffer only — no real audio output or streaming playback
+- **Note**: WAV decodes to a PCM buffer; playback and device output are handled
+  by the mixer + platform output described below. (This line previously read
+  "no real audio output", which is no longer accurate — see Platform output.)
 
-## Deferred (Not in Current Scope)
+## Platform output (pat-p0s82.1)
 
-The following are explicitly out of scope until runtime parity exits are met:
+- **`PlatformAudioOutput`** (`output.rs`): real device output via `cpal`
+  (CoreAudio on macOS, WASAPI on Windows, ALSA/Pulse on Linux).
+- **`mix_and_write`**: pumps `AudioServer::mix` into any `AudioOutputStream`.
+- **`CaptureAudioOutput`**: records PCM for tests / offline capture.
+- **`NullAudioOutput`**: still available for headless CI.
 
-- **Actual audio output**: No platform audio backend (WASAPI, CoreAudio, ALSA/PulseAudio)
-- **OGG/MP3 decoding**: Only WAV is decoded; OGG and MP3 remain stubs
-- **Effects processing**: No reverb, EQ, compression, or bus effects chain
-- **Spatial audio**: No 2D/3D positional audio or distance attenuation
-- **Audio streaming**: No background file streaming or buffer management
-- **Bus send routing**: No bus-to-bus send topology (only flat bus list)
-- **PingPong loop mode**: Only `None` and `Forward` loops implemented
-- **AudioServer singleton**: No global AudioServer — mixer is standalone
+## Implemented beyond the minimal milestone
+
+The subsystem has moved well past the "stub" contract above. Verified in-tree
+(2026-07-16 reconciliation, pat-z35r2.20):
+
+- **Decoding**: WAV, OGG, and **MP3** (`decode_mp3` via minimp3, pat-p0s82.13)
+  all decode to `f32` PCM buffers (`decode.rs`); `import.rs` covers the
+  resource-import path.
+- **Effects chain** (`effects.rs`, pat-p0s82.2 / pat-u3l8c.107): `AudioEffectFilter`
+  (RBJ biquad low/high/band/notch/peak/shelf), sidechain `AudioEffectCompressor`,
+  `AudioEffectLimiter`/`AudioEffectHardLimiter`, `AudioEffectSpectrumAnalyzer`,
+  `AudioEffectAmplify` — applied per-bus in the mixer.
+- **Bus-to-bus send routing**: `AudioServer::mix` (`server.rs`) runs the full bus
+  send graph — per-bus volume, effect chain, mute/solo audibility gate, and
+  `send`/`send_db` routing into a target bus, plus effect `bypass`
+  (pat-nzgdu.26/.27).
+- **Bus-layout load**: `AudioMixer::load_bus_layout_str` / `load_bus_layout`
+  parse a Godot `[audio_bus_layout]` / `default_bus_layout.tres` section into
+  named buses (name/volume_db/send/send_db/mute/solo/bypass_fx).
+- **Real device output**: `PlatformAudioOutput` (`output.rs`, cpal) + `mix_and_write`,
+  and `gdscene::audio_server_bridge` pumps `AudioServer::mix` — so mixed output
+  reaches a device. The earlier "no real audio output / nothing pumps `mix()`"
+  claim is no longer accurate.
+- **Procedural audio**: `AudioStreamGenerator` (`decode.rs`) exposes the
+  `push_frame` buffer API.
+
+## Remaining gaps (NOT 1:1 complete)
+
+Precise deltas versus Godot 4.6.1 — see the
+[1:1 scorecard](../../../prd/PORT_1TO1_SCORECARD_2026-07-11.md):
+
+- **Script-facing `AudioServer` singleton**: the Rust `AudioServer` exists and
+  the mixer honors bus layout/send/solo/effects, but GDScript access via the
+  interpreter singleton (`AudioServer.set_bus_volume_db`/`set_bus_mute`/
+  `set_bus_solo`/`add_bus_effect`) is not yet wired (pat-nzgdu.26 delivered the
+  mixer half; the interpreter dispatch remains).
+- **Boot-time bus-layout auto-load**: the mixer *can* parse a bus layout, but
+  auto-loading `res://default_bus_layout.tres` at project boot is not wired.
+- **Streaming**: decoding is whole-buffer; there is no incremental background
+  file streaming / buffer management yet.
+- **Loop modes**: only `None` and `Forward`; `PingPong` is not implemented.
+- **Godot oracle parity**: no automated Godot-vs-Patina audio parity comparison
+  yet, and no fixture scene gates audible output.
 
 ## Test Coverage
 

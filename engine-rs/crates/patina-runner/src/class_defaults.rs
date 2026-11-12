@@ -14,6 +14,28 @@ use std::sync::LazyLock;
 /// A property default: (property_name, default_value).
 type PropDefault = (&'static str, Variant);
 
+/// Replaces an inherited default in place, for a subclass whose constructor
+/// changes one.
+///
+/// Godot's property dump strips a value equal to the *instantiated* class's
+/// default, so a subclass that overrides an inherited default in its
+/// constructor needs the overridden value here or every instance reports the
+/// property as though it had been authored.
+///
+/// 🔑 This has to replace rather than append: [`should_output_property`] returns
+/// on the FIRST entry whose name matches, so a second entry for the same key is
+/// silently ignored and the stale inherited value keeps winning. Panics on an
+/// unknown name, because a typo would otherwise be exactly that silent no-op.
+fn override_default(props: &mut [PropDefault], name: &str, value: Variant) {
+    for entry in props.iter_mut() {
+        if entry.0 == name {
+            entry.1 = value;
+            return;
+        }
+    }
+    panic!("`{name}` is not an inherited default here, so there is nothing to override");
+}
+
 /// Map from class name → list of property defaults (including inherited).
 static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyLock::new(|| {
     let mut m: HashMap<&str, Vec<PropDefault>> = HashMap::new();
@@ -56,7 +78,22 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
     };
 
     // -- PhysicsBody2D = CollisionObject2D --
-    let physics_body_2d = collision_object_2d.clone();
+    // -- PhysicsBody2D = CollisionObject2D, but NOT pickable --
+    //
+    // `PhysicsBody2D::PhysicsBody2D` calls `set_pickable(false)`
+    // (scene/2d/physics/physics_body_2d.cpp:46), and the class reference records
+    // the override: `input_pickable ... overrides="CollisionObject2D"
+    // default="false"` (doc/classes/PhysicsBody2D.xml:71). Only `Area2D` keeps
+    // CollisionObject2D's `true`.
+    //
+    // Inherited unchanged, every StaticBody2D/RigidBody2D/CharacterBody2D
+    // reported `input_pickable = false` as a non-default value, which Godot's
+    // own dump strips — 22 nodes across the golden scenes.
+    let physics_body_2d = {
+        let mut v = collision_object_2d.clone();
+        override_default(&mut v, "input_pickable", Variant::Bool(false));
+        v
+    };
 
     // -- StaticBody2D --
     let static_body_2d: Vec<PropDefault> = {
@@ -231,6 +268,151 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
     m.insert("Label", label);
     m.insert("Button", button);
 
+    // -- Node3D (base for all 3D nodes) --
+    let identity_transform = gdcore::math3d::Transform3D {
+        basis: gdcore::math3d::Basis::IDENTITY,
+        origin: gdcore::math::Vector3::ZERO,
+    };
+    let node3d: Vec<PropDefault> = vec![
+        ("transform", Variant::Transform3D(identity_transform)),
+        ("visible", Variant::Bool(true)),
+    ];
+
+    // -- Camera3D = Node3D + camera properties --
+    let camera_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("fov", Variant::Float(75.0)),
+            ("near", Variant::Float(0.05)),
+            ("far", Variant::Float(4000.0)),
+            ("current", Variant::Bool(false)),
+        ]);
+        v
+    };
+
+    // -- MeshInstance3D = Node3D + mesh properties --
+    let mesh_instance_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.push(("cast_shadow", Variant::Int(1)));
+        v
+    };
+
+    // -- Light3D base = Node3D + light properties --
+    let light_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("light_energy", Variant::Float(1.0)),
+            ("light_color", Variant::Color(gdcore::math::Color::WHITE)),
+            ("shadow_enabled", Variant::Bool(false)),
+            ("shadow_bias", Variant::Float(0.1)),
+            ("shadow_blur", Variant::Float(1.0)),
+        ]);
+        v
+    };
+
+    // -- DirectionalLight3D = Light3D + directional properties --
+    let directional_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("directional_shadow_mode", Variant::Int(2)),
+            ("directional_shadow_max_distance", Variant::Float(100.0)),
+        ]);
+        v
+    };
+
+    // -- OmniLight3D = Light3D + omni properties --
+    let omni_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("omni_range", Variant::Float(5.0)),
+            ("omni_attenuation", Variant::Float(1.0)),
+            ("omni_shadow_mode", Variant::Int(1)),
+        ]);
+        v
+    };
+
+    // -- SpotLight3D = Light3D + spot properties --
+    let spot_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("spot_range", Variant::Float(5.0)),
+            ("spot_attenuation", Variant::Float(1.0)),
+            ("spot_angle", Variant::Float(45.0)),
+            ("spot_angle_attenuation", Variant::Float(1.0)),
+        ]);
+        // `SpotLight3D::SpotLight3D` sets PARAM_SHADOW_BIAS to 0.03
+        // (scene/3d/light_3d.cpp:682), against Light3D's 0.1
+        // (light_3d.cpp:490) — `shadow_bias ... overrides="Light3D"
+        // default="0.03"` (doc/classes/SpotLight3D.xml:19).
+        override_default(&mut v, "shadow_bias", Variant::Float(0.03));
+        v
+    };
+
+    // -- CollisionObject3D = Node3D + collision properties --
+    let collision_object_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("collision_layer", Variant::Int(1)),
+            ("collision_mask", Variant::Int(1)),
+        ]);
+        v
+    };
+
+    // -- PhysicsBody3D / StaticBody3D --
+    let physics_body_3d = collision_object_3d.clone();
+
+    // -- RigidBody3D = PhysicsBody3D + rigid properties --
+    let rigid_body_3d: Vec<PropDefault> = {
+        let mut v = physics_body_3d.clone();
+        v.extend([
+            ("mass", Variant::Float(1.0)),
+            ("gravity_scale", Variant::Float(1.0)),
+            ("freeze", Variant::Bool(false)),
+        ]);
+        v
+    };
+
+    // -- CharacterBody3D = PhysicsBody3D + character properties --
+    let character_body_3d: Vec<PropDefault> = {
+        let mut v = physics_body_3d.clone();
+        v.push(("velocity", Variant::Vector3(gdcore::math::Vector3::ZERO)));
+        v
+    };
+
+    // -- Area3D = CollisionObject3D + area properties --
+    let area_3d: Vec<PropDefault> = {
+        let mut v = collision_object_3d.clone();
+        v.extend([
+            ("monitoring", Variant::Bool(true)),
+            ("monitorable", Variant::Bool(true)),
+        ]);
+        v
+    };
+
+    // -- CollisionShape3D = Node3D + disabled --
+    let collision_shape_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.push(("disabled", Variant::Bool(false)));
+        v
+    };
+
+    m.insert("Node3D", node3d.clone());
+    m.insert("Camera3D", camera_3d);
+    m.insert("MeshInstance3D", mesh_instance_3d);
+    m.insert("MultiMeshInstance3D", node3d.clone());
+    m.insert("Light3D", light_3d);
+    m.insert("DirectionalLight3D", directional_light_3d);
+    m.insert("OmniLight3D", omni_light_3d);
+    m.insert("SpotLight3D", spot_light_3d);
+    m.insert("CollisionObject3D", collision_object_3d);
+    m.insert("PhysicsBody3D", physics_body_3d.clone());
+    m.insert("StaticBody3D", physics_body_3d.clone());
+    m.insert("RigidBody3D", rigid_body_3d);
+    m.insert("CharacterBody3D", character_body_3d);
+    m.insert("Area3D", area_3d);
+    m.insert("CollisionShape3D", collision_shape_3d);
+    m.insert("Marker3D", node3d);
+
     m
 });
 
@@ -280,6 +462,12 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
         (Variant::Nil, Variant::Nil) => true,
         (Variant::Bool(a), Variant::Bool(b)) => a == b,
         (Variant::Int(a), Variant::Int(b)) => a == b,
+        // A `.tscn` may author an int/enum property as a bool
+        // (`cast_shadow = true`); Godot converts on assignment, so the stored
+        // value is `1` and compares equal to an Int default of 1.
+        (Variant::Bool(a), Variant::Int(b)) | (Variant::Int(b), Variant::Bool(a)) => {
+            i64::from(*a) == *b
+        }
         (Variant::Float(a), Variant::Float(b)) => (*a - *b).abs() < FLOAT_TOL,
         (Variant::String(a), Variant::String(b)) => a == b,
         (Variant::Vector2(a), Variant::Vector2(b)) => {
@@ -297,6 +485,24 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
                 && (f64::from(a.b) - f64::from(b.b)).abs() < FLOAT_TOL
                 && (f64::from(a.a) - f64::from(b.a)).abs() < FLOAT_TOL
         }
+        (Variant::Transform3D(a), Variant::Transform3D(b)) => {
+            let ab = a.basis;
+            let bb = b.basis;
+            let ao = a.origin;
+            let bo = b.origin;
+            (f64::from(ab.x.x) - f64::from(bb.x.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.x.y) - f64::from(bb.x.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.x.z) - f64::from(bb.x.z)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.x) - f64::from(bb.y.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.y) - f64::from(bb.y.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.z) - f64::from(bb.y.z)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.x) - f64::from(bb.z.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.y) - f64::from(bb.z.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.z) - f64::from(bb.z.z)).abs() < FLOAT_TOL
+                && (f64::from(ao.x) - f64::from(bo.x)).abs() < FLOAT_TOL
+                && (f64::from(ao.y) - f64::from(bo.y)).abs() < FLOAT_TOL
+                && (f64::from(ao.z) - f64::from(bo.z)).abs() < FLOAT_TOL
+        }
         _ => false,
     }
 }
@@ -309,6 +515,16 @@ mod tests {
     // -----------------------------------------------------------------------
     // should_output_property: basic filtering
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn bool_authored_on_an_int_default_compares_by_value() {
+        // `cast_shadow = true` in a .tscn equals the Int default 1 (Godot
+        // converts on assignment); `false` (0) differs and is output.
+        assert!(variant_eq(&Variant::Bool(true), &Variant::Int(1)));
+        assert!(variant_eq(&Variant::Int(0), &Variant::Bool(false)));
+        assert!(!variant_eq(&Variant::Bool(false), &Variant::Int(1)));
+        assert!(!variant_eq(&Variant::Bool(true), &Variant::Int(2)));
+    }
 
     #[test]
     fn internal_properties_never_output() {
@@ -501,6 +717,71 @@ mod tests {
         ));
     }
 
+    /// A `PhysicsBody2D` subclass is NOT pickable by default, so the value its
+    /// constructor sets must be stripped.
+    ///
+    /// Both directions, per class: the `false` case is the regression (it was
+    /// reported as authored on every physics body in the golden scenes), and the
+    /// `true` case proves the override did not simply make the key unreadable.
+    #[test]
+    fn physics_body_2d_input_pickable_default_is_false() {
+        for class in ["StaticBody2D", "RigidBody2D", "CharacterBody2D"] {
+            assert!(
+                !should_output_property(class, "input_pickable", &Variant::Bool(false)),
+                "{class} inherits PhysicsBody2D's `set_pickable(false)`, so `false` \
+                 is its default and Godot's dump strips it"
+            );
+            assert!(
+                should_output_property(class, "input_pickable", &Variant::Bool(true)),
+                "a scene that authors `input_pickable = true` on a {class} is \
+                 overriding the default and must still be reported"
+            );
+        }
+    }
+
+    /// `Area2D` keeps `CollisionObject2D`'s `true` — the override above must not
+    /// have reached it.
+    ///
+    /// 🔑 This is the half that catches an over-broad fix: `Area2D` derives from
+    /// `collision_object_2d`, not `physics_body_2d`, and Godot gives it no
+    /// override (doc/classes/Area2D.xml declares none).
+    #[test]
+    fn area2d_input_pickable_default_stays_true() {
+        assert!(!should_output_property(
+            "Area2D",
+            "input_pickable",
+            &Variant::Bool(true)
+        ));
+        assert!(should_output_property(
+            "Area2D",
+            "input_pickable",
+            &Variant::Bool(false)
+        ));
+    }
+
+    /// `SpotLight3D` overrides `Light3D`'s `shadow_bias`, and the sibling light
+    /// classes do not.
+    #[test]
+    fn spotlight3d_shadow_bias_default_is_point_zero_three() {
+        assert!(!should_output_property(
+            "SpotLight3D",
+            "shadow_bias",
+            &Variant::Float(0.03)
+        ));
+        assert!(should_output_property(
+            "SpotLight3D",
+            "shadow_bias",
+            &Variant::Float(0.1)
+        ));
+        // Light3D itself and the other two subclasses keep 0.1.
+        for class in ["Light3D", "OmniLight3D", "DirectionalLight3D"] {
+            assert!(
+                !should_output_property(class, "shadow_bias", &Variant::Float(0.1)),
+                "{class} has no constructor override, so 0.1 is still its default"
+            );
+        }
+    }
+
     #[test]
     fn rigidbody2d_mass_nondefault_output() {
         assert!(should_output_property(
@@ -622,6 +903,135 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // should_output_property: Camera3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn camera3d_current_default_not_output() {
+        // current=false is the default, so it should NOT be output.
+        assert!(!should_output_property(
+            "Camera3D",
+            "current",
+            &Variant::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn camera3d_current_true_is_output() {
+        // current=true differs from default, so it SHOULD be output.
+        assert!(should_output_property(
+            "Camera3D",
+            "current",
+            &Variant::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn camera3d_fov_default_not_output() {
+        assert!(!should_output_property(
+            "Camera3D",
+            "fov",
+            &Variant::Float(75.0)
+        ));
+    }
+
+    #[test]
+    fn camera3d_fov_nondefault_output() {
+        assert!(should_output_property(
+            "Camera3D",
+            "fov",
+            &Variant::Float(90.0)
+        ));
+    }
+
+    #[test]
+    fn camera3d_transform_identity_not_output() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        assert!(!should_output_property(
+            "Camera3D",
+            "transform",
+            &Variant::Transform3D(identity)
+        ));
+    }
+
+    #[test]
+    fn camera3d_transform_nonidentity_output() {
+        let t = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, 2.0, 5.0),
+        };
+        assert!(should_output_property(
+            "Camera3D",
+            "transform",
+            &Variant::Transform3D(t)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: Node3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node3d_visible_default_not_output() {
+        assert!(!should_output_property(
+            "Node3D",
+            "visible",
+            &Variant::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn node3d_visible_false_output() {
+        assert!(should_output_property(
+            "Node3D",
+            "visible",
+            &Variant::Bool(false)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: DirectionalLight3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn directionallight3d_shadow_enabled_default_not_output() {
+        assert!(!should_output_property(
+            "DirectionalLight3D",
+            "shadow_enabled",
+            &Variant::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn directionallight3d_shadow_enabled_true_output() {
+        assert!(should_output_property(
+            "DirectionalLight3D",
+            "shadow_enabled",
+            &Variant::Bool(true)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: StaticBody3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn staticbody3d_transform_nonidentity_output() {
+        let t = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, -1.0, 0.0),
+        };
+        assert!(should_output_property(
+            "StaticBody3D",
+            "transform",
+            &Variant::Transform3D(t)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
     // variant_eq
     // -----------------------------------------------------------------------
 
@@ -658,5 +1068,33 @@ mod tests {
     #[test]
     fn variant_eq_different_types() {
         assert!(!variant_eq(&Variant::Int(0), &Variant::Float(0.0)));
+    }
+
+    #[test]
+    fn variant_eq_transform3d_identity() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        assert!(variant_eq(
+            &Variant::Transform3D(identity),
+            &Variant::Transform3D(identity)
+        ));
+    }
+
+    #[test]
+    fn variant_eq_transform3d_different() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        let moved = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, 2.0, 5.0),
+        };
+        assert!(!variant_eq(
+            &Variant::Transform3D(identity),
+            &Variant::Transform3D(moved)
+        ));
     }
 }

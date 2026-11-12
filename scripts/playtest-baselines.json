@@ -1,0 +1,18 @@
+{
+  "dodge_the_creeps": {
+    "render_ms": 2.5,
+    "recorded": "2026-11-04"
+  },
+  "platformer": {
+    "render_ms": 13.7,
+    "recorded": "2026-11-04"
+  },
+  "pong": {
+    "render_ms": 2.4,
+    "recorded": "2026-11-04"
+  },
+  "spark_keeper": {
+    "render_ms": 2.5,
+    "recorded": "2026-11-04"
+  }
+}

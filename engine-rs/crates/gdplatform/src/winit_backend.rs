@@ -16,7 +16,22 @@ use crate::backend::PlatformBackend;
 use crate::input::{InputState, Key};
 use crate::window::{WindowConfig, WindowEvent, WindowId, WindowManager};
 use gdcore::math::Color;
-use gdrender2d::FrameBuffer;
+
+/// A frame of pixels the windowed backend can present.
+///
+/// Deliberately local (same shape as `gdrender2d::FrameBuffer`) so gdplatform
+/// does NOT depend on gdrender2d: that edge closed a package cycle —
+/// gdrender2d → gdscene → gdplatform → gdrender2d — which makes cargo refuse
+/// to build the whole workspace (pat-h84ou). Renderers convert into this at
+/// the present boundary.
+pub struct PresentFrame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Row-major RGBA pixels.
+    pub pixels: Vec<Color>,
+}
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -116,10 +131,10 @@ pub fn color_to_u32(color: Color) -> u32 {
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
-/// Writes all pixels from a [`FrameBuffer`] into a softbuffer [`softbuffer::Surface`] buffer.
+/// Writes all pixels from a [`PresentFrame`] into a softbuffer [`softbuffer::Surface`] buffer.
 pub fn blit_framebuffer(
     surface: &mut softbuffer::Surface<Arc<Window>, Arc<Window>>,
-    fb: &FrameBuffer,
+    fb: &PresentFrame,
 ) {
     let width = NonZeroU32::new(fb.width).expect("framebuffer width must be > 0");
     let height = NonZeroU32::new(fb.height).expect("framebuffer height must be > 0");
@@ -275,7 +290,7 @@ impl WinitPlatform {
     }
 
     /// Presents a framebuffer to the window surface.
-    pub fn present(&mut self, fb: &FrameBuffer) {
+    pub fn present(&mut self, fb: &PresentFrame) {
         blit_framebuffer(&mut self.winit_window.surface, fb);
     }
 }
@@ -306,7 +321,7 @@ impl PlatformBackend for WinitPlatform {
 /// Application handler that drives the game loop.
 struct WinitApp<F>
 where
-    F: FnMut(&mut InputState, f64) -> Option<FrameBuffer>,
+    F: FnMut(&mut InputState, f64) -> Option<PresentFrame>,
 {
     config: WindowConfig,
     game_loop: F,
@@ -317,7 +332,7 @@ where
 
 impl<F> ApplicationHandler for WinitApp<F>
 where
-    F: FnMut(&mut InputState, f64) -> Option<FrameBuffer>,
+    F: FnMut(&mut InputState, f64) -> Option<PresentFrame>,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.winit_window.is_some() {
@@ -414,10 +429,10 @@ where
 /// Creates a winit event loop, opens a window, and runs the provided game loop each frame.
 ///
 /// The `game_loop` closure receives the current [`InputState`] and delta time (seconds),
-/// and optionally returns a [`FrameBuffer`] to present.
+/// and optionally returns a [`PresentFrame`] to present.
 pub fn run_with_winit(
     config: WindowConfig,
-    game_loop: impl FnMut(&mut InputState, f64) -> Option<FrameBuffer>,
+    game_loop: impl FnMut(&mut InputState, f64) -> Option<PresentFrame>,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

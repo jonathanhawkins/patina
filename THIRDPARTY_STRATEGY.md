@@ -189,3 +189,82 @@ The following are major third-party dependencies in upstream Godot's `thirdparty
 | Pending | All |
 
 This table will be updated as classification decisions are made.
+
+
+## C# / mono (pat-z35r2.15)
+
+**Classification: Deferred (bucket 4 — reimplement later or wrap)**
+
+Patina does not ship a C# / mono runtime in `engine-rs`. Godot's `modules/mono`
+is out of v1 1:1 scope. GDScript remains the primary scripting path.
+
+## Jolt physics (pat-p0s82.27)
+
+**Classification: Reimplemented cleanly (bucket 4) — Jolt itself deferred, out
+of v1 scope**
+
+Godot 4.6 makes Jolt the default 3D physics backend for **new** projects.
+Patina reimplemented 3D physics as its own `gdphysics3d`, which is the only 3D
+backend. Patina ships **no** Jolt option in v1.
+
+This is a decision on record, not a pending task.
+`prd/GODOT_4_6_1_RELEASE_DELTA_AUDIT.md` lists "Jolt Physics as 3D default" in
+its **Out-of-Scope Changes** table ("3D deferred"), and
+`engine-rs/tests/release_suite/release_delta_461_audit_test.rs` asserts that
+entry stays there — so adopting Jolt in v1 would contradict a tested scope
+decision. Godot's flip also affects new projects only; existing projects keep
+their previous backend, so it creates no fixture-corpus delta for Patina to
+match.
+
+No `jolt` cargo feature is shipped, deliberately. An off-by-default flag with
+nothing behind it would advertise a backend that does not exist, and would
+still have to be kept compiling against `gdphysics3d`'s traits for no benefit.
+The dependency is not vendored either (`grep -i jolt engine-rs/Cargo.lock` →
+no match).
+
+**Reopen when** 3D physics enters milestone scope *and* a fixture pins
+behaviour where Godot-Jolt's solver differs from Patina's. Classify as bucket 2
+then (wrap `joltc` / `jolt-rust` via FFI, MIT), put it behind an off-by-default
+`jolt` feature, and add the rigid-body / character parity tests with it.
+
+## FBX (pat-p0s82.24)
+
+**Classification: Wrap via FFI / ufbx (bucket 2)**
+
+Prefer `ufbx` (C, permissive) via FFI or pure-Rust port when FBX import is
+scheduled. Not started; glTF is the preferred interchange format.
+
+## GDExtension native plugins (pat-0q2kx.252)
+
+**Classification: Deferred (bucket 2 — wrap via FFI when scheduled). Metadata
+recognition ships now; execution does not.**
+
+Patina recognises `.gdextension` manifests and executes nothing from them.
+`gdcore::gdextension_host` parses the INI-style descriptor, resolves the
+per-platform library path and entry symbol, and records that metadata;
+`GDExtensionManager` exposes the registry to scripts
+(`load_extension` / `is_extension_loaded` / `get_loaded_extensions` /
+`get_extension`, plus `GDExtension` under `Resource`). **No library is `dlopen`'d
+and no native entry point is called.**
+
+That split is deliberate, and the honest statuses follow from it: a manifest that
+parses and names a library for the current platform reports `LOAD_STATUS_OK`
+("recognised and registered"), while a missing or unreadable manifest — or one
+with no library for this platform — reports `LOAD_STATUS_FAILED` rather than
+claiming a load that did not happen. `reload_extension` reports
+`LOAD_STATUS_NEEDS_RESTART`, since nothing is running in-process to reload.
+
+Note for future audits: Godot's `LoadStatus` is a plain enum numbering from 0
+(`core/extension/gdextension_manager.h:54-58`), so **`LOAD_STATUS_FAILED` is 1**
+and `2` is `LOAD_STATUS_ALREADY_LOADED`. pat-0q2kx.252's own acceptance text says
+"LOAD_STATUS_FAILED (2)"; that number is a transcription error and Patina follows
+Godot, not the bead.
+
+**Reopen when** loading real native plugins enters milestone scope. That needs a
+platform-specific dynamic-loader path (`libloading` or hand-rolled `dlopen`
+/`LoadLibrary`), the GDExtension C ABI interface struct, and a decision on the
+wasm target — which has no `dlopen` at all and would need extensions linked at
+build time or run through a component model. Classify as bucket 2 then, put it
+behind an off-by-default feature, and pin it with a fixture that calls a real
+entry symbol.
+

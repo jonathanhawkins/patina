@@ -1,0 +1,357 @@
+//! Texture caching for the editor viewport.
+//!
+//! Provides [`TextureCache`] which lazily loads PNG textures from disk
+//! and caches them for fast repeated access during rendering.
+
+use std::collections::HashMap;
+
+use gdcore::file_access::FileAccess;
+use gdcore::math::Color;
+use gdrender2d::texture::{decode_png, load_png, resolve_res_path, Texture2D};
+use gdvariant::Variant;
+
+/// Cache of loaded textures keyed by their `res://` path.
+///
+/// Textures are loaded on first access and reused on subsequent lookups.
+/// A failed load is cached as `None` to avoid repeated disk access.
+#[derive(Debug, Clone)]
+pub struct TextureCache {
+    /// Loaded textures keyed by resource path (e.g. `"res://icon.png"`).
+    cache: HashMap<String, Option<Texture2D>>,
+    /// Project root directory for resolving `res://` paths.
+    project_root: String,
+    /// Set on a [`lend_placeholder`](Self::lend_placeholder): every
+    /// `invalidate`/`clear` it sees, so [`adopt_newer`](Self::adopt_newer) can
+    /// replay them onto the cache that was lent out. `None` on a normal cache,
+    /// which therefore records nothing.
+    lent_changes: Option<LentChanges>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LentChanges {
+    cleared: bool,
+    invalidated: Vec<String>,
+}
+
+impl TextureCache {
+    /// Creates a new empty texture cache.
+    pub fn new(project_root: impl Into<String>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            project_root: project_root.into(),
+            lent_changes: None,
+        }
+    }
+
+    /// The stand-in left in shared state while this cache is lent to a frame
+    /// that rasterizes off the editor lock: same project root, no entries, and
+    /// it records invalidations so none is lost when the real cache returns.
+    pub fn lend_placeholder(&self) -> Self {
+        let mut p = Self::new(self.project_root.clone());
+        p.lent_changes = Some(LentChanges::default());
+        p
+    }
+
+    /// Folds what `placeholder` (from [`lend_placeholder`](Self::lend_placeholder))
+    /// saw while this cache was lent out back into it: a new project root or a
+    /// `clear` empties this cache, each `invalidate` is replayed, and entries
+    /// loaded into the placeholder win over ours.
+    pub fn adopt_newer(&mut self, placeholder: TextureCache) {
+        let changes = placeholder.lent_changes.unwrap_or_default();
+        if changes.cleared || placeholder.project_root != self.project_root {
+            self.cache.clear();
+            self.project_root = placeholder.project_root;
+        }
+        for path in &changes.invalidated {
+            self.cache.remove(path);
+        }
+        self.cache.extend(placeholder.cache);
+    }
+
+    /// Returns the cached texture for the given resource path, loading it
+    /// from disk on first access.
+    ///
+    /// Returns `None` if the texture could not be loaded (file not found,
+    /// unsupported format, etc.). Failed loads are cached to avoid re-trying.
+    pub fn get(&mut self, res_path: &str) -> Option<&Texture2D> {
+        if !self.cache.contains_key(res_path) {
+            let fs_path = resolve_res_path(res_path, &self.project_root);
+            // PNG keeps its direct decode; everything else — webp, svg, jpg, ctex,
+            // and a png whose source was replaced by an imported artifact — goes
+            // through the engine's format loader, which nothing used to call
+            // (pat-0q2kx.45). That is why only PNG ever rendered here.
+            // Host path first, so every loose project keeps the exact code that
+            // already works. Only when that finds nothing do we look through
+            // `FileAccess`, which serves a mounted `.pck` (pat-mgixk.56).
+            //
+            // 🔑 Ordered this way deliberately rather than FileAccess-first:
+            // `self.project_root` is this cache's own root and need not be the
+            // globally registered `res://` root — the editor previews a project
+            // that is not the mounted one — so making FileAccess authoritative
+            // would silently redirect those reads.
+            let texture = load_png(&fs_path)
+                .or_else(|| load_via_format_loader(&fs_path))
+                .or_else(|| load_from_res_path(res_path));
+            if texture.is_some() {
+                tracing::debug!(
+                    "TextureCache: loaded {} ({} bytes)",
+                    res_path,
+                    fs_path.len()
+                );
+            } else {
+                tracing::debug!("TextureCache: failed to load {}", fs_path);
+            }
+            self.cache.insert(res_path.to_string(), texture);
+        }
+        self.cache.get(res_path).and_then(|opt| opt.as_ref())
+    }
+
+    /// Every texture that is actually RESIDENT, as `(res://path, texture)`.
+    ///
+    /// Skips the `None` entries, which are cached FAILED loads: a file the
+    /// editor could not read occupies no video memory, and reporting it as a
+    /// resource with a size would be inventing one (pat-mgixk.14).
+    ///
+    /// Exposed because `/api/debug/info` answered the Video RAM tab with a
+    /// hard-coded literal — `icon.svg` 262144, `font_default` 65536 — for every
+    /// project, whatever it had actually loaded.
+    pub fn loaded(&self) -> impl Iterator<Item = (&str, &Texture2D)> {
+        self.cache
+            .iter()
+            .filter_map(|(path, tex)| tex.as_ref().map(|t| (path.as_str(), t)))
+    }
+
+    /// Returns the number of cached entries (including failed loads).
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Returns true if the cache contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Clears the entire cache, forcing textures to be reloaded on next access.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+        if let Some(c) = self.lent_changes.as_mut() {
+            c.cleared = true;
+        }
+    }
+
+    /// Removes a specific entry from the cache.
+    pub fn invalidate(&mut self, res_path: &str) {
+        self.cache.remove(res_path);
+        if let Some(c) = self.lent_changes.as_mut() {
+            c.invalidated.push(res_path.to_string());
+        }
+    }
+
+    /// Returns the project root path.
+    pub fn project_root(&self) -> &str {
+        &self.project_root
+    }
+
+    /// Updates the project root used to resolve `res://` paths.
+    ///
+    /// Clears the cache so any textures loaded against the previous root are
+    /// reloaded relative to the new project (pat-v89tw: opening a real game
+    /// project re-roots the editor).
+    pub fn set_project_root(&mut self, project_root: impl Into<String>) {
+        self.project_root = project_root.into();
+        self.clear();
+    }
+
+    /// Inserts a texture directly into the cache (useful for testing).
+    pub fn insert(&mut self, res_path: &str, texture: Texture2D) {
+        self.cache.insert(res_path.to_string(), Some(texture));
+    }
+}
+
+impl Default for TextureCache {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+/// Loads a texture through the engine's registered resource format loaders
+/// (pat-0q2kx.45).
+///
+/// This is what makes `.webp`, `.svg`, `.ctex` and — since pat-s3rrv.51 —
+/// `.tga`, `.bmp` and `.hdr` render in the editor viewport, and what resolves a
+/// `.png` whose source was replaced by an imported artifact: each image importer
+/// checks for a `<source>.import` sidecar and loads the compiled
+/// `.godot/imported/*.ctex` instead. `None` when no loader claims the extension
+/// or the file cannot be decoded — the caller keeps its "failed load" cache
+/// entry rather than retrying every frame.
+///
+/// ⚠️ `.jpg`/`.jpeg` is NOT in that list and never was, though this comment
+/// claimed it until pat-s3rrv.51. The JPEG decoder lives in
+/// `gdresource/src/texture_import.rs`, an ORPHANED module — not declared in that
+/// crate's `lib.rs`, so it has never been compiled — and no loader is registered
+/// for the extension. A stale doc costs more than a missing one: this is the
+/// first thing the next person on this path reads.
+fn load_via_format_loader(fs_path: &str) -> Option<Texture2D> {
+    let resource = gdresource::importers::ResourceFormatLoader::with_defaults()
+        .load_resource(std::path::Path::new(fs_path))
+        .ok()?;
+    texture_from_resource(&resource)
+}
+
+/// Loads a texture through `res://` space, so a mounted `.pck` can serve it
+/// (pat-mgixk.56).
+///
+/// This is the path a shipped game takes. `resolve_res_path` above produces a
+/// host filesystem path, and a packed texture has none, so the reads here go
+/// through [`FileAccess`] — which serves mounted packs before disk.
+///
+/// Follows the `.import` sidecar first, because Godot resolves **every**
+/// imported resource through it (`ResourceFormatImporter`): in an exported game
+/// `res://icon.png` is usually a stub whose real pixels live in
+/// `res://.godot/imported/icon-<md5>.ctex`.
+fn load_from_res_path(res_path: &str) -> Option<Texture2D> {
+    let target = gdresource::importers::resolve_import_artifact_res(res_path)
+        .unwrap_or_else(|| res_path.to_string());
+    let bytes = FileAccess::read_file_bytes(&target).ok()?;
+    // Dispatch on the ARTIFACT's extension, not the source's: the sidecar
+    // redirects `icon.png` to a `.ctex`, so keying off `res_path` would hand
+    // container bytes to the PNG decoder.
+    if target.ends_with(".ctex") {
+        let resource =
+            gdresource::ctex::load_ctex_bytes(&bytes, std::path::Path::new(&target)).ok()?;
+        texture_from_resource(&resource)
+    } else {
+        decode_png(&bytes)
+    }
+}
+
+/// Pulls `width`/`height`/`pixels` off a loaded texture [`Resource`].
+///
+/// Shared by the host-path and `res://` loaders so the two cannot drift on what
+/// counts as a usable texture — in particular the length check below.
+fn texture_from_resource(resource: &gdresource::resource::Resource) -> Option<Texture2D> {
+    let int_prop = |key: &str| match resource.get_property(key) {
+        Some(Variant::Int(i)) if *i > 0 => Some(*i as u32),
+        _ => None,
+    };
+    let (width, height) = (int_prop("width")?, int_prop("height")?);
+    let pixels: Vec<Color> = match resource.get_property("pixels") {
+        Some(Variant::Array(items)) => items
+            .to_vec()
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => return None,
+    };
+    // A truncated pixel array would index out of bounds during rasterization, so
+    // require exactly the declared extent rather than padding it.
+    if pixels.len() != (width as usize) * (height as usize) {
+        return None;
+    }
+    Some(Texture2D {
+        width,
+        height,
+        pixels,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdcore::math::Color;
+
+    #[test]
+    fn new_cache_is_empty() {
+        let cache = TextureCache::new("/project");
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let mut cache = TextureCache::new("/project");
+        let tex = Texture2D::solid(4, 4, Color::rgb(1.0, 0.0, 0.0));
+        cache.insert("res://test.png", tex);
+        assert_eq!(cache.len(), 1);
+        let loaded = cache.get("res://test.png");
+        assert!(loaded.is_some());
+        let t = loaded.unwrap();
+        assert_eq!(t.width, 4);
+        assert_eq!(t.height, 4);
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none_and_caches() {
+        let mut cache = TextureCache::new("/nonexistent/path");
+        let result = cache.get("res://missing.png");
+        assert!(result.is_none());
+        // Should be cached as None so we don't re-attempt.
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn clear_empties_cache() {
+        let mut cache = TextureCache::new("/project");
+        cache.insert("res://a.png", Texture2D::solid(1, 1, Color::WHITE));
+        cache.insert("res://b.png", Texture2D::solid(1, 1, Color::BLACK));
+        assert_eq!(cache.len(), 2);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn invalidate_removes_single_entry() {
+        let mut cache = TextureCache::new("/project");
+        cache.insert("res://a.png", Texture2D::solid(1, 1, Color::WHITE));
+        cache.insert("res://b.png", Texture2D::solid(1, 1, Color::BLACK));
+        cache.invalidate("res://a.png");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("res://b.png").is_some());
+    }
+
+    #[test]
+    fn project_root_accessor() {
+        let cache = TextureCache::new("/my/project");
+        assert_eq!(cache.project_root(), "/my/project");
+    }
+
+    #[test]
+    fn set_project_root_updates_and_clears_cache() {
+        let mut cache = TextureCache::new("/old/project");
+        cache.insert(
+            "res://icon.png",
+            Texture2D::solid(1, 1, Color::rgb(1.0, 0.0, 0.0)),
+        );
+        assert_eq!(cache.len(), 1);
+        // Re-rooting at a new project (pat-v89tw) updates the root and clears
+        // textures resolved against the old root.
+        cache.set_project_root("/new/project");
+        assert_eq!(cache.project_root(), "/new/project");
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn default_has_empty_root() {
+        let cache = TextureCache::default();
+        assert_eq!(cache.project_root(), "");
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn get_caches_result_on_second_call() {
+        let mut cache = TextureCache::new("/project");
+        cache.insert(
+            "res://cached.png",
+            Texture2D::solid(2, 2, Color::rgb(0.0, 1.0, 0.0)),
+        );
+        // First access.
+        let t1 = cache.get("res://cached.png").unwrap();
+        assert_eq!(t1.width, 2);
+        // Second access (should come from cache).
+        let t2 = cache.get("res://cached.png").unwrap();
+        assert_eq!(t2.width, 2);
+    }
+}

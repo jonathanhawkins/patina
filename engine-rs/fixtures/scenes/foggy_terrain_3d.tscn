@@ -1,0 +1,34 @@
+[gd_scene format=3]
+
+[node name="FoggyTerrain3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 5, 12)
+
+[node name="Environment" type="WorldEnvironment" parent="."]
+
+[node name="Fog" type="FogVolume" parent="."]
+position = Vector3(0, 2, 0)
+scale = Vector3(20, 4, 20)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(5, 12, 5)
+
+[node name="Lantern" type="OmniLight3D" parent="."]
+position = Vector3(-2, 1, 3)
+
+[node name="Terrain" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0, 0)
+scale = Vector3(20, 1, 20)
+
+[node name="Ground" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="GroundShape" type="CollisionShape3D" parent="Ground"]
+
+[node name="FallingRock" type="RigidBody3D" parent="."]
+position = Vector3(3, 6, -1)
+
+[node name="RockShape" type="CollisionShape3D" parent="FallingRock"]
+
+[node name="RockMesh" type="MeshInstance3D" parent="FallingRock"]

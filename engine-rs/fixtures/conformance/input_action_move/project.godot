@@ -1,0 +1,26 @@
+; Conformance fixture (pat-mgixk.403).
+;
+; Seam under test: an action declared in `project.godot`'s `[input]` section
+; reaching `Input.is_action_pressed` inside a running script, driving a
+; CharacterBody2D through `velocity` + `move_and_slide()`, with a CanvasLayer
+; HUD Label reading the result back.
+
+config_version=5
+
+[application]
+
+config/name="input_action_move"
+run/main_scene="res://main.tscn"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=240
+
+[input]
+
+move_right={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":0,"physical_keycode":68,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
+]
+}

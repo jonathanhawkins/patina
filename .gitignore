@@ -8,6 +8,13 @@ dist/
 out/
 .turbo/
 target/
+target-verifier/
+target-redcheck/
+.shadertest-target/
+
+# Godot ClassDB dump (recreate: godot --headless --dump-extension-api).
+# TRACKED on purpose: classdb_instantiability_matches_godot reads it as its
+# oracle and CI cannot run Godot to regenerate it (~460 KB compressed in git).
 
 # Environment
 .env
@@ -33,6 +40,9 @@ release/
 # Godot
 .godot/
 *.import
+# Real-game fixtures keep Godot's import settings (loop modes, material
+# remaps, texture modes); Godot projects are meant to commit them.
+!games/**/*.import
 
 # Test/coverage
 coverage/
@@ -47,3 +57,42 @@ cline.mcp.json
 windsurf.mcp.json
 .claude/settings.local.json
 .codex/hooks/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# beads recovery backups (SQLite WAL/SHM snapshots)
+.beads/.br_recovery/
+
+# Claude Code worktrees (agent-spawned isolated checkouts)
+.claude/worktrees/
+
+# Orchestrator / swarm runtime state (logs, locks, assignments, local DBs).
+# Regenerated every run — never meant to be committed.
+storage.sqlite3
+storage.sqlite3-shm
+storage.sqlite3-wal
+.codex/orchestrator/
+.codex/orchestrator-notices.log
+.codex/bead.db
+.codex/bead.db-shm
+.codex/bead.db-wal
+.claude/*.lock
+
+# Local agent-mail credential — must never be committed (rotate if it ever was).
+.beads/coordinator_token
+
+# Editor runtime artifacts (audit logs / session state)
+.editor/
+**/.editor/
+# Orchestrator runtime build lock
+.orchestrator/rust-build.lock*
+# Create Node dialog per-project state (favorites/recent), like Godot's .godot/
+.patina/
+**/.patina/
+
+# Orchestrator red check (apps/orchestrator/crate/src/wiring.rs): isolated tree snapshot
+.orchestrator/redcheck/
+
+# playtest gate run reports (scripts/playtest-gate.mjs)
+.playtest-gate/

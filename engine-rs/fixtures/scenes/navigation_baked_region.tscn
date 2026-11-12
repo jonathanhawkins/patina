@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://test_navigation_baked_region"]
+
+[node name="Root" type="Node"]
+
+[node name="Baked" type="NavigationRegion2D" parent="."]
+position = Vector2(12, 8)
+__navmesh_vertices__ = PackedVector2Array(0, 0, 4, 0, 4, 4)
+
+[node name="Unbaked" type="NavigationRegion2D" parent="."]
+position = Vector2(50, 50)

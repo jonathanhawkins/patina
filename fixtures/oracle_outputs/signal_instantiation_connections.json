@@ -1,0 +1,55 @@
+{
+	"description": "Oracle-captured signal connections for signal_instantiation.tscn. Each entry represents a connection wired during scene instantiation, matching Godot's get_signal_connection_list() output.",
+	"upstream_version": "4.6.1-stable",
+	"connections": [
+		{
+			"signal_name": "health_changed",
+			"from_node": "Player",
+			"to_node": "HUD",
+			"method": "_on_health_changed",
+			"flags": 0
+		},
+		{
+			"signal_name": "health_changed",
+			"from_node": "Player",
+			"to_node": "HUD/ScoreLabel",
+			"method": "_on_player_health_for_score",
+			"flags": 0
+		},
+		{
+			"signal_name": "died",
+			"from_node": "Player",
+			"to_node": ".",
+			"method": "_on_player_died",
+			"flags": 0
+		},
+		{
+			"signal_name": "hit",
+			"from_node": "Player/Hitbox",
+			"to_node": "Enemy",
+			"method": "_on_hitbox_hit",
+			"flags": 0
+		},
+		{
+			"signal_name": "attack",
+			"from_node": "Enemy",
+			"to_node": "Player",
+			"method": "_on_enemy_attack",
+			"flags": 0
+		},
+		{
+			"signal_name": "defeated",
+			"from_node": "Enemy",
+			"to_node": "HUD",
+			"method": "_on_enemy_defeated",
+			"flags": 4
+		},
+		{
+			"signal_name": "score_updated",
+			"from_node": ".",
+			"to_node": "HUD/ScoreLabel",
+			"method": "_on_score_updated",
+			"flags": 0
+		}
+	]
+}

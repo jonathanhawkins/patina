@@ -1,0 +1,86 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/multi_light_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "PointLight",
+				"node_class": "OmniLight3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/PointLight",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Spot",
+				"node_class": "SpotLight3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Spot",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Pedestal",
+				"node_class": "MeshInstance3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Pedestal",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sphere",
+				"node_class": "MeshInstance3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Sphere",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Cube",
+				"node_class": "MeshInstance3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Cube",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "MultiLight3D",
+						"path": "/root/MultiLight3D/Floor/FloorShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "MultiLight3D",
+				"path": "/root/MultiLight3D/Floor",
+				"scene_file_path": ""
+			}
+		],
+		"name": "MultiLight3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/MultiLight3D",
+		"scene_file_path": "res://scenes/multi_light_3d.tscn"
+	}
+}

@@ -16,7 +16,8 @@
 					"groups": [],
 					"name": "Player",
 					"owner": "/root/SpaceShooter",
-					"path": "/root/SpaceShooter/Player"
+					"path": "/root/SpaceShooter/Player",
+					"script": "res://scripts/player.gd"
 				},
 				{
 					"children": [],
@@ -24,7 +25,8 @@
 					"groups": [],
 					"name": "EnemySpawner",
 					"owner": "/root/SpaceShooter",
-					"path": "/root/SpaceShooter/EnemySpawner"
+					"path": "/root/SpaceShooter/EnemySpawner",
+					"script": "res://scripts/enemy_spawner.gd"
 				},
 				{
 					"children": [],

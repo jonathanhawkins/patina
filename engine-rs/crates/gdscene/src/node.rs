@@ -6,11 +6,11 @@
 //! [`SceneTree`](crate::scene_tree::SceneTree)) and referenced by
 //! lightweight [`NodeId`] handles.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use gdcore::ObjectId;
-use gdobject::notification::Notification;
+use gdobject::notification::{Notification, NOTIFICATION_POSTINITIALIZE};
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
@@ -82,9 +82,62 @@ pub enum ProcessMode {
     Disabled,
 }
 
+impl ProcessMode {
+    /// The Godot `Node.ProcessMode` integer for this mode (pat-mgixk.58).
+    ///
+    /// The variant order above IS Godot's enum order — INHERIT 0, PAUSABLE 1,
+    /// WHEN_PAUSED 2, ALWAYS 3, DISABLED 4 (`scene/main/node.h`), matching the
+    /// `PROCESS_MODE_*` constants ClassDB registers for `Node`. Spelled out
+    /// rather than cast from the discriminant so a future variant inserted in
+    /// the middle breaks here instead of silently renumbering every saved scene.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            ProcessMode::Inherit => 0,
+            ProcessMode::Pausable => 1,
+            ProcessMode::WhenPaused => 2,
+            ProcessMode::Always => 3,
+            ProcessMode::Disabled => 4,
+        }
+    }
+
+    /// Parses a Godot `Node.ProcessMode` integer, or `None` when out of range.
+    ///
+    /// `None` rather than a default: an out-of-range value in a `.tscn` must not
+    /// silently become INHERIT, which would look exactly like a scene that never
+    /// authored the property.
+    pub fn from_godot_int(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(ProcessMode::Inherit),
+            1 => Some(ProcessMode::Pausable),
+            2 => Some(ProcessMode::WhenPaused),
+            3 => Some(ProcessMode::Always),
+            4 => Some(ProcessMode::Disabled),
+            _ => None,
+        }
+    }
+}
+
+/// Reads an integer out of a `.tscn` / script value for the process keys
+/// (pat-mgixk.58).
+///
+/// `Float` is accepted because a `.tscn` may spell an int-valued property as
+/// `1.0` and a GDScript expression yields a Float from any division; `Bool` is
+/// NOT, so a stray `process_mode = true` leaves the field alone rather than
+/// quietly meaning PAUSABLE.
+fn variant_as_i64(value: &Variant) -> Option<i64> {
+    match value {
+        Variant::Int(i) => Some(*i),
+        Variant::Float(f) => Some(*f as i64),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Node
 // ---------------------------------------------------------------------------
+
+/// Most notifications a node's log keeps (see [`Node::receive_notification`]).
+pub const NOTIFICATION_LOG_CAP: usize = 8192;
 
 /// A scene-tree node, analogous to Godot's `Node` class.
 ///
@@ -104,7 +157,11 @@ pub struct Node {
     /// Ordered list of child node IDs.
     children: Vec<NodeId>,
     /// Dynamic property storage (position, texture, etc.).
-    properties: HashMap<String, Variant>,
+    ///
+    /// FxHash rather than std's SipHash: keys are engine-chosen property
+    /// names (not attacker-controlled), and lookups here dominate per-frame
+    /// work. Iteration order was already unspecified (std seeds randomly).
+    properties: rustc_hash::FxHashMap<String, Variant>,
     /// Groups this node belongs to.
     groups: HashSet<String>,
     /// Log of notifications received (for testing / debugging).
@@ -122,20 +179,56 @@ pub struct Node {
     ready: bool,
     /// Process priority — lower values process first. Default 0.
     process_priority: i32,
+    /// Physics-process priority, ordering `_physics_process` **independently**
+    /// of [`process_priority`](Self::process_priority) (Godot's
+    /// `process_physics_priority`, pat-0q2kx.221).
+    ///
+    /// ⚠️ Godot has two separate orderings and the physics one reused
+    /// `process_priority` here, so a node could not run late in `_process` and
+    /// early in `_physics_process` — the exact reason the property exists.
+    process_physics_priority: i32,
     /// Controls whether this node processes when the tree is paused.
     process_mode: ProcessMode,
+    /// Whether `_process` runs on this node (Godot's `set_process`).
+    /// Toggled at runtime, independently of [`process_mode`](Self::process_mode).
+    process_enabled: bool,
+    /// Whether `_physics_process` runs on this node (Godot's
+    /// `set_physics_process`).
+    physics_process_enabled: bool,
+    /// Whether the input stages deliver to this node (Godot's
+    /// `set_process_input`) — pat-0q2kx.138.
+    process_input_enabled: bool,
+    /// Whether `_unhandled_input` reaches this node (Godot's
+    /// `set_process_unhandled_input`) — pat-mgixk.57.
+    ///
+    /// ⚠️ Godot keeps **one flag per input stage**: `set_process_input(false)`
+    /// silences `_input` and nothing else. This node had a single
+    /// `process_input_enabled` gating every stage, so opting out of `_input`
+    /// also killed `_unhandled_input`, `_unhandled_key_input` and
+    /// `_shortcut_input` — the usual idiom of handling only unhandled input was
+    /// unreachable.
+    process_unhandled_input_enabled: bool,
+    /// Whether `_unhandled_key_input` reaches this node (Godot's
+    /// `set_process_unhandled_key_input`) — pat-mgixk.57.
+    process_unhandled_key_input_enabled: bool,
+    /// Whether `_shortcut_input` reaches this node (Godot's
+    /// `set_process_shortcut_input`) — pat-mgixk.57.
+    process_shortcut_input_enabled: bool,
 }
 
 impl Node {
     /// Creates a new detached node with the given name and class.
+    ///
+    /// Fires `NOTIFICATION_POSTINITIALIZE` immediately, matching Godot's
+    /// behavior where the notification is sent right after construction.
     pub fn new(name: impl Into<String>, class_name: impl Into<String>) -> Self {
-        Self {
+        let mut node = Self {
             id: NodeId::next(),
             name: name.into(),
             class_name: class_name.into(),
             parent: None,
             children: Vec::new(),
-            properties: HashMap::new(),
+            properties: rustc_hash::FxHashMap::default(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
             meta: BTreeMap::new(),
@@ -144,19 +237,30 @@ impl Node {
             inside_tree: false,
             ready: false,
             process_priority: 0,
+            process_physics_priority: 0,
             process_mode: ProcessMode::default(),
-        }
+            process_enabled: true,
+            physics_process_enabled: true,
+            process_input_enabled: true,
+            process_unhandled_input_enabled: true,
+            process_unhandled_key_input_enabled: true,
+            process_shortcut_input_enabled: true,
+        };
+        node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
+        node
     }
 
     /// Creates a node with a specific [`NodeId`] (for deserialization / tests).
+    ///
+    /// Fires `NOTIFICATION_POSTINITIALIZE` immediately.
     pub fn with_id(id: NodeId, name: impl Into<String>, class_name: impl Into<String>) -> Self {
-        Self {
+        let mut node = Self {
             id,
             name: name.into(),
             class_name: class_name.into(),
             parent: None,
             children: Vec::new(),
-            properties: HashMap::new(),
+            properties: rustc_hash::FxHashMap::default(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
             meta: BTreeMap::new(),
@@ -165,8 +269,17 @@ impl Node {
             inside_tree: false,
             ready: false,
             process_priority: 0,
+            process_physics_priority: 0,
             process_mode: ProcessMode::default(),
-        }
+            process_enabled: true,
+            physics_process_enabled: true,
+            process_input_enabled: true,
+            process_unhandled_input_enabled: true,
+            process_unhandled_key_input_enabled: true,
+            process_shortcut_input_enabled: true,
+        };
+        node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
+        node
     }
 
     // -- identity -----------------------------------------------------------
@@ -189,6 +302,13 @@ impl Node {
     /// Returns the Godot class name.
     pub fn class_name(&self) -> &str {
         &self.class_name
+    }
+
+    /// Sets the node's Godot class name (used by the editor's "Change Type"
+    /// operation, which converts a node in place while keeping its identity,
+    /// name, children, and properties).
+    pub fn set_class_name(&mut self, class_name: impl Into<String>) {
+        self.class_name = class_name.into();
     }
 
     // -- hierarchy (low-level, used by SceneTree) ---------------------------
@@ -232,6 +352,55 @@ impl Node {
 
     /// Sets a property, returning the previous value (or `Nil`).
     pub fn set_property(&mut self, key: &str, value: Variant) -> Variant {
+        // `metadata/foo` IS the node's metadata — that is how a .tscn spells it
+        // and how the loader delivers it (pat-s3rrv.151). Meta lives in a
+        // separate map from properties, so without this mirror a scene could
+        // declare `metadata/foo = 42` and `get_meta("foo")` would still answer
+        // Nil. Done here rather than at the eleven call sites that apply
+        // template properties, so every construction path — plain instance,
+        // inherited scene, editor edit — is covered by one rule.
+        //
+        // The property row is kept as well: callers read it back through
+        // `get_property("metadata/foo")`, and the saver skips any meta key that
+        // already has a row, so this cannot double-write on the way out.
+        if let Some(name) = key.strip_prefix("metadata/") {
+            self.meta.insert(name.to_owned(), value.clone());
+        }
+        // The three process keys are real `Node` state, not bag entries
+        // (pat-mgixk.58). `should_process_node` / `effective_process_mode` read
+        // the typed `process_mode` field and `all_nodes_in_*_process_order`
+        // read the typed priorities, and NOTHING forwarded the property here —
+        // so a pause menu authored with `process_mode = 3` froze under pause,
+        // and `process_priority = -5` from a `.tscn` reordered nothing.
+        //
+        // Done in this one funnel for the same reason the metadata mirror above
+        // is: all 29 `.tscn` property applications in `packed_scene.rs`, the
+        // script assignment path in `scripting.rs::set_node_property`, and the
+        // editor's own edits all end here.
+        //
+        // The bag row is kept as well, so the saver still round-trips the value
+        // and `properties()` / `get_property_list()` are unchanged.
+        match key {
+            "process_mode" => {
+                // An unparseable value leaves the field alone rather than
+                // resetting it to INHERIT: a malformed scene must not silently
+                // un-pause a menu.
+                if let Some(mode) = variant_as_i64(&value).and_then(ProcessMode::from_godot_int) {
+                    self.process_mode = mode;
+                }
+            }
+            "process_priority" => {
+                if let Some(v) = variant_as_i64(&value) {
+                    self.process_priority = v as i32;
+                }
+            }
+            "process_physics_priority" => {
+                if let Some(v) = variant_as_i64(&value) {
+                    self.process_physics_priority = v as i32;
+                }
+            }
+            _ => {}
+        }
         self.properties
             .insert(key.to_owned(), value)
             .unwrap_or(Variant::Nil)
@@ -239,6 +408,24 @@ impl Node {
 
     /// Gets a property by name, returning `Nil` if absent.
     pub fn get_property(&self, key: &str) -> Variant {
+        // The typed field is the single source of truth for these three
+        // (pat-mgixk.58): `set_process_mode` is also called directly — by
+        // `VisibleOnScreenEnabler` (`visibility_3d.rs`) and the `RemoteTransform2D`
+        // path (`behavioral_2d.rs`) — with no bag row, so reading the row here
+        // would answer `Nil` for a node whose mode had genuinely changed.
+        //
+        // Answering `Int` unconditionally is also what makes a script's
+        // `process_mode = PROCESS_MODE_DISABLED` reach the node at all: the
+        // interpreter routes a bare assignment to the node only when
+        // `get_node_property` is non-Nil (`interpreter.rs` `is_node_prop`).
+        match key {
+            "process_mode" => return Variant::Int(self.process_mode.to_godot_int()),
+            "process_priority" => return Variant::Int(self.process_priority as i64),
+            "process_physics_priority" => {
+                return Variant::Int(self.process_physics_priority as i64)
+            }
+            _ => {}
+        }
         self.properties.get(key).cloned().unwrap_or(Variant::Nil)
     }
 
@@ -368,7 +555,11 @@ impl Node {
     }
 
     /// Marks whether this node is currently inside the active scene tree.
-    pub(crate) fn set_inside_tree(&mut self, inside_tree: bool) {
+    ///
+    /// Public for lifecycle drivers and app-level tests that stage tree
+    /// membership before firing ENTER_TREE (mirrors the inline LifecycleManager
+    /// tests); the paired reader [`Node::is_inside_tree`] is already public.
+    pub fn set_inside_tree(&mut self, inside_tree: bool) {
         self.inside_tree = inside_tree;
     }
 
@@ -382,6 +573,100 @@ impl Node {
         self.ready = ready;
     }
 
+    /// Re-arms `_ready` so it runs again the next time this node enters the
+    /// tree (Godot's `Node.request_ready`).
+    pub fn request_ready(&mut self) {
+        self.ready = false;
+    }
+
+    // -- process toggles (pat-nzgdu.137) -------------------------------------
+
+    /// Enables or disables `_process` on this node (Godot's
+    /// `Node.set_process`). Independent of
+    /// [`process_mode`](Self::process_mode), which governs pause behaviour.
+    pub fn set_process(&mut self, enabled: bool) {
+        self.process_enabled = enabled;
+    }
+
+    /// Whether `_process` runs on this node (Godot's `Node.is_processing`).
+    pub fn is_processing(&self) -> bool {
+        self.process_enabled
+    }
+
+    /// Enables or disables `_physics_process` on this node (Godot's
+    /// `Node.set_physics_process`).
+    pub fn set_physics_process(&mut self, enabled: bool) {
+        self.physics_process_enabled = enabled;
+    }
+
+    /// Whether `_physics_process` runs on this node (Godot's
+    /// `Node.is_physics_processing`).
+    pub fn is_physics_processing(&self) -> bool {
+        self.physics_process_enabled
+    }
+
+    /// Enables or disables input delivery to this node (Godot's
+    /// `Node.set_process_input`) — pat-0q2kx.138.
+    ///
+    /// Separate from [`process_mode`](Self::process_mode): `process_mode`
+    /// answers "may this node run while the tree is paused", this answers "does
+    /// this node want input at all". Godot's `_call_input_pause` checks both,
+    /// and a node that opted out of input must receive nothing even while the
+    /// tree is running normally.
+    pub fn set_process_input(&mut self, enabled: bool) {
+        self.process_input_enabled = enabled;
+    }
+
+    /// Whether the input stages deliver to this node (Godot's
+    /// `Node.is_processing_input`).
+    pub fn is_processing_input(&self) -> bool {
+        self.process_input_enabled
+    }
+
+    // -- per-stage input toggles (pat-mgixk.57) ------------------------------
+    //
+    // Godot exposes one setter and one getter per input stage
+    // (`scene/main/node.cpp`), and `SceneTree::_call_input_pause` consults the
+    // flag for the stage it is delivering. A node that wants only unhandled
+    // input calls `set_process_input(false)` and keeps the rest; with a single
+    // shared flag that call silenced every stage.
+
+    /// Enables or disables `_unhandled_input` on this node (Godot's
+    /// `Node.set_process_unhandled_input`).
+    pub fn set_process_unhandled_input(&mut self, enabled: bool) {
+        self.process_unhandled_input_enabled = enabled;
+    }
+
+    /// Whether `_unhandled_input` reaches this node (Godot's
+    /// `Node.is_processing_unhandled_input`).
+    pub fn is_processing_unhandled_input(&self) -> bool {
+        self.process_unhandled_input_enabled
+    }
+
+    /// Enables or disables `_unhandled_key_input` on this node (Godot's
+    /// `Node.set_process_unhandled_key_input`).
+    pub fn set_process_unhandled_key_input(&mut self, enabled: bool) {
+        self.process_unhandled_key_input_enabled = enabled;
+    }
+
+    /// Whether `_unhandled_key_input` reaches this node (Godot's
+    /// `Node.is_processing_unhandled_key_input`).
+    pub fn is_processing_unhandled_key_input(&self) -> bool {
+        self.process_unhandled_key_input_enabled
+    }
+
+    /// Enables or disables `_shortcut_input` on this node (Godot's
+    /// `Node.set_process_shortcut_input`).
+    pub fn set_process_shortcut_input(&mut self, enabled: bool) {
+        self.process_shortcut_input_enabled = enabled;
+    }
+
+    /// Whether `_shortcut_input` reaches this node (Godot's
+    /// `Node.is_processing_shortcut_input`).
+    pub fn is_processing_shortcut_input(&self) -> bool {
+        self.process_shortcut_input_enabled
+    }
+
     // -- process priority / mode --------------------------------------------
 
     /// Returns this node's process priority. Lower values process first.
@@ -392,6 +677,19 @@ impl Node {
     /// Sets this node's process priority. Lower values process first.
     pub fn set_process_priority(&mut self, priority: i32) {
         self.process_priority = priority;
+    }
+
+    /// Returns this node's **physics**-process priority (pat-0q2kx.221).
+    ///
+    /// Separate from [`process_priority`](Self::process_priority), as in Godot:
+    /// a node can run late in `_process` and early in `_physics_process`.
+    pub fn process_physics_priority(&self) -> i32 {
+        self.process_physics_priority
+    }
+
+    /// Sets this node's physics-process priority. Lower values process first.
+    pub fn set_process_physics_priority(&mut self, priority: i32) {
+        self.process_physics_priority = priority;
     }
 
     /// Returns this node's process mode.
@@ -407,13 +705,30 @@ impl Node {
     // -- notifications ------------------------------------------------------
 
     /// Records a notification (called by lifecycle manager).
+    ///
+    /// ⚠️ Bounded: once the log holds [`NOTIFICATION_LOG_CAP`] entries the
+    /// oldest half is dropped. Every frame delivers PROCESS/PHYSICS_PROCESS
+    /// (and their INTERNAL_ twins) to every node, and the log used to keep all
+    /// of them: the platformer demo's 491 nodes grew the editor by ~45 MB a
+    /// minute of Play, without end. Readers (tests, the runner's oracle dump,
+    /// `rewind_for_redispatch`) look at short runs or recent entries, which the
+    /// newest `CAP / 2`..`CAP` entries always cover.
     pub fn receive_notification(&mut self, what: Notification) {
+        if self.notification_log.len() >= NOTIFICATION_LOG_CAP {
+            self.notification_log.drain(..NOTIFICATION_LOG_CAP / 2);
+        }
         self.notification_log.push(what);
     }
 
     /// Returns the notification log for testing / introspection.
     pub fn notification_log(&self) -> &[Notification] {
         &self.notification_log
+    }
+
+    /// Clears the notification log. Useful in tests to isolate notifications
+    /// from a specific operation (e.g., reparent) without noise from setup.
+    pub fn clear_notification_log(&mut self) {
+        self.notification_log.clear();
     }
 }
 
@@ -521,14 +836,16 @@ mod tests {
     #[test]
     fn notification_log_records_in_order() {
         let mut node = Node::new("N", "Node");
+        // POSTINITIALIZE is automatically logged at construction.
         node.receive_notification(gdobject::NOTIFICATION_ENTER_TREE);
         node.receive_notification(gdobject::NOTIFICATION_READY);
         node.receive_notification(gdobject::NOTIFICATION_EXIT_TREE);
         let log = node.notification_log();
-        assert_eq!(log.len(), 3);
-        assert_eq!(log[0], gdobject::NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[1], gdobject::NOTIFICATION_READY);
-        assert_eq!(log[2], gdobject::NOTIFICATION_EXIT_TREE);
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[0], gdobject::NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(log[1], gdobject::NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[2], gdobject::NOTIFICATION_READY);
+        assert_eq!(log[3], gdobject::NOTIFICATION_EXIT_TREE);
     }
 
     #[test]

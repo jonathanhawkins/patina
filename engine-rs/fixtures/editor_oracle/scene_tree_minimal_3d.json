@@ -1,0 +1,54 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/minimal_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Minimal3D",
+				"path": "/root/Minimal3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Mesh",
+				"node_class": "MeshInstance3D",
+				"owner": "Minimal3D",
+				"path": "/root/Minimal3D/Mesh",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "Minimal3D",
+				"path": "/root/Minimal3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Minimal3D",
+						"path": "/root/Minimal3D/Floor/FloorShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "Minimal3D",
+				"path": "/root/Minimal3D/Floor",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Minimal3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Minimal3D",
+		"scene_file_path": "res://scenes/minimal_3d.tscn"
+	}
+}

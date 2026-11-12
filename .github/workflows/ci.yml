@@ -10,7 +10,39 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Steps are written in bash (`WS="--workspace"`, `$WS`); without this Windows
+# runs them under PowerShell and fails on the first assignment.
+defaults:
+  run:
+    shell: bash
+
+# Smaller, non-incremental CI builds: the incremental cache is never reused on
+# a fresh runner, and dropping line tables shrinks every test binary.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+
 jobs:
+  # ── Playtest tools: browser-playtest deadlines + the gate's verdicts ─────
+  # Node only (no engine build). The browser-playing gate itself needs a
+  # release editor and Chrome, and runs from the planner / nightly instead.
+  playtest-tools:
+    name: Playtest tools
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test the playtest tools
+        run: node --test scripts/tests/*.test.mjs
+
   # ── Rust: format check ────────────────────────────────────────────────────
   rust-fmt:
     name: Rust fmt
@@ -21,7 +53,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable (with rustfmt)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
 
@@ -29,25 +61,58 @@ jobs:
         working-directory: engine-rs
         run: cargo fmt --all -- --check
 
+  # ── Web: the wasm32 target must keep compiling ───────────────────────────
+  #
+  # Nothing built wasm32 before, and the codebase records what that cost:
+  # `crates/patina-web/Cargo.toml` documents a wasm-only E0433 that "the native
+  # build never sees … so nothing caught it until a wasm check was actually
+  # run". A wasm-hostile dependency or API can be introduced by a change that is
+  # perfectly green on every other job here, so this gate is the only thing that
+  # can catch it (pat-s3rrv.131).
+  wasm32:
+    name: Web (wasm32 check)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable (with the wasm32 target)
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check the web crate for wasm32
+        working-directory: engine-rs
+        run: cargo check -p patina-web --target wasm32-unknown-unknown
+
   # ── Rust: build, test, clippy (multi-platform) ───────────────────────────
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: rust-fmt
+    # Waits for the integration-test shards so this (required) check covers the
+    # whole suite; `always()` so a failed shard still reports here as a failure
+    # instead of a skip, which branch protection would treat as passing.
+    needs: [rust-fmt, rust-tests]
+    if: ${{ always() && needs.rust-fmt.result == 'success' }}
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       # Separate cache keys for registry, git deps, and target dir,
       # each keyed on Cargo.lock hash + OS so they invalidate correctly.
@@ -79,13 +144,106 @@ jobs:
         working-directory: engine-rs
         run: cargo build --workspace
 
-      - name: Test workspace
-        working-directory: engine-rs
-        run: cargo test --workspace
-
+      # Clippy first: it fails in seconds on a lint, before the long test run.
       - name: Clippy
         working-directory: engine-rs
         run: cargo clippy --workspace -- -D warnings
+
+      # nextest, not `cargo test`: the project's own gate (CLAUDE.md) is
+      # `cargo nextest run --workspace`, which runs each test in its own
+      # process. CI must measure the same thing developers and the verifier
+      # do, or tests that share process-global state pass locally and fail
+      # here. nextest does not run doctests, so they get their own step.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # Unit tests only; the ~1,250 integration-test binaries run in the
+      # `rust-tests` shards (they do not fit on one runner's disk).
+      - name: Unit tests (lib + bins)
+        working-directory: engine-rs
+        run: cargo nextest run --workspace --lib --bins --no-fail-fast
+
+      - name: Build examples
+        working-directory: engine-rs
+        run: cargo build --workspace --examples
+
+      - name: Doctests
+        working-directory: engine-rs
+        run: cargo test --workspace --doc
+
+      - name: Integration-test shards passed
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "rust-tests result: ${{ needs.rust-tests.result }}"
+          test "${{ needs.rust-tests.result }}" = "success"
+
+  # ── Rust: integration tests, sharded ─────────────────────────────────────
+  # Every file in a crate's tests/ folder is its own executable linking the
+  # whole engine (~100 MB debug); ~1,250 of them overflow one runner's disk.
+  # scripts/ci/nextest-shard.py deals the targets out round-robin so each
+  # shard builds and runs only its slice. Raise `count` if a shard runs out
+  # of space again.
+  rust-tests:
+    name: Rust tests (shard ${{ matrix.shard }}/12)
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+    steps:
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # Trace/oracle/headless tests run the runner binary from
+      # target/debug/patina-runner; a shard only builds its test targets.
+      - name: Build patina-runner
+        working-directory: engine-rs
+        run: cargo build -p patina-runner
+
+      - name: Integration tests (this shard)
+        working-directory: engine-rs
+        run: python3 ../scripts/ci/nextest-shard.py $(( ${{ matrix.shard }} - 1 )) 12
+
+      - name: Disk usage
+        if: always()
+        run: df -h / && du -sh engine-rs/target 2>/dev/null || true
 
   # ── Rust: render golden tests (dedicated CI gate) ────────────────────────
   # Runs all CPU-based render pixel and golden-image tests as a separate
@@ -99,14 +257,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # golden_staleness_test compares goldens against the pinned
+          # upstream/godot UPSTREAM_VERSION, which lives in the submodule.
+          submodules: true
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -134,7 +300,77 @@ jobs:
 
       - name: Run render golden tests
         working-directory: engine-rs
-        run: make test-render
+        env:
+          PATINA_CI: "1"
+        run: make test-render-ci
+
+      # A golden mismatch is undiagnosable from a log line — the whole point of
+      # the failure is the pixels. Uploaded only on failure so a green run costs
+      # nothing, and keyed by matrix OS because the three legs would otherwise
+      # collide on a single artifact name (pat-21oab).
+      - name: Upload golden render output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-render-${{ matrix.os }}
+          path: |
+            engine-rs/output/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Rust: Platform layer compat (multi-OS) ───────────────────────────────
+  rust-compat-platform:
+    name: Platform layer compat (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-fmt
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      # The OS-specific code lives in these two crates, so run ALL their tests
+      # on every OS. (A name filter over `--workspace` built all ~1,250 test
+      # binaries, which overflows the runner's disk; the full workspace runs on
+      # Linux in the `rust-tests` shards.)
+      - name: Run platform layer tests
+        working-directory: engine-rs
+        run: cargo test -p gdplatform -p gdaudio
 
   # ── Rust: release build check ─────────────────────────────────────────────
   rust-release:
@@ -147,7 +383,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -188,7 +428,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -196,6 +440,26 @@ jobs:
       - name: Audit dependencies
         working-directory: engine-rs
         run: cargo audit
+
+  rust-oracle-parity:
+    name: Oracle parity check
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    # The oracle_parity / golden_staleness / oracle_regression tests run in
+    # the `rust-tests` shards with everything else; this job only reports the
+    # upstream Godot pin those outputs were generated from.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Verify upstream Godot pin
+        run: |
+          cd upstream/godot
+          echo "Pinned Godot commit: $(git rev-parse HEAD)"
+          echo "Pinned Godot tag: $(git describe --tags --exact-match 2>/dev/null || echo 'no exact tag')"
 
   # ── Web: build and lint ───────────────────────────────────────────────────
   web:

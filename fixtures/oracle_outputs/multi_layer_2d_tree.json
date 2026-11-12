@@ -1,0 +1,99 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Sprite2D",
+					"groups": [],
+					"name": "Background",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/Background"
+				},
+				{
+					"children": [],
+					"class": "TileMapLayer",
+					"groups": [],
+					"name": "TileLayer",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/TileLayer"
+				},
+				{
+					"children": [],
+					"class": "Sprite2D",
+					"groups": [],
+					"name": "PlayerSprite",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/PlayerSprite"
+				},
+				{
+					"children": [],
+					"class": "AnimatedSprite2D",
+					"groups": [],
+					"name": "AnimSprite",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/AnimSprite"
+				},
+				{
+					"children": [],
+					"class": "Line2D",
+					"groups": [],
+					"name": "Trail",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/Trail"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "PathFollow2D",
+							"groups": [],
+							"name": "Follower",
+							"owner": "/root/World2D",
+							"path": "/root/World2D/MovePath/Follower"
+						}
+					],
+					"class": "Path2D",
+					"groups": [],
+					"name": "MovePath",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/MovePath"
+				},
+				{
+					"children": [],
+					"class": "NavigationRegion2D",
+					"groups": [],
+					"name": "NavRegion",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/NavRegion"
+				},
+				{
+					"children": [],
+					"class": "Camera2D",
+					"groups": [
+						"__cameras_81604378624",
+						"__cameras_c77309411328"
+					],
+					"name": "Camera",
+					"owner": "/root/World2D",
+					"path": "/root/World2D/Camera"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "World2D",
+			"owner": "/root",
+			"path": "/root/World2D"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

@@ -42,6 +42,55 @@ These bootstrap payloads are intentionally small. The next step is to replace
 their checked-in inputs with direct outputs from `apps/godot/` probes running
 inside the pinned `upstream/godot/` oracle.
 
+## Conformance Gate (pat-mgixk.403)
+
+`conformance_capture.py` + `conformance_probe.gd` are a different kind of
+capture from everything above: they record whole **projects**, not single
+scenes or resources, and the result is a gate rather than a reference dump.
+
+The 2026-10-30 port audit found 93 unwired and 19 stub features behind beads
+that had closed green, because every `*_parity_test.rs` suite compares Patina
+with a golden Patina itself produced. The conformance gate closes that hole by
+putting real Godot on the other side of the diff.
+
+```sh
+# Bless (or re-bless) every golden. Needs Godot 4.6.1; override the binary
+# with GODOT_BIN=/path/to/Godot.
+python3 tools/oracle/conformance_capture.py
+
+# One project only.
+python3 tools/oracle/conformance_capture.py timer_queue_free
+
+# Re-capture and report drift without writing anything. Exit 1 on drift.
+python3 tools/oracle/conformance_capture.py --check
+```
+
+Each run copies `engine-rs/fixtures/conformance/<name>/` to a temporary
+directory, drops `conformance_probe.gd` in beside it and generates an
+`override.cfg` registering the probe as an autoload. The fixture project on
+disk is never modified, so the project Godot measures is byte-identical to the
+one Patina boots.
+
+The Patina side is `patina_runner::conformance::capture_project`, which the
+runner's own `--trace-out` flag also calls:
+
+```sh
+patina-runner engine-rs/fixtures/conformance/timer_queue_free/project.godot \
+    --trace-out /tmp/envelope.json
+```
+
+The diff itself runs as `engine-rs/tests/conformance_suite`, whose
+`conformance_gate_ratchet` test holds the ratchet in
+`engine-rs/fixtures/golden/conformance/baseline.json`. See that file's `_note`
+for how to raise it.
+
+**`print()` ordering is deliberately not compared.** Godot gives a script no
+hook on `print`, so the Godot side is read off process stdout while the Patina
+side is drained per node from each script's own buffer; the two orders differ
+by the measurement, not by the port. Both sides filter on the `[T] ` marker
+every fixture prefixes its observable lines with, which is why a fixture that
+forgets the prefix silently contributes no print coverage.
+
 ## API Extraction Approach
 
 Patina uses **behavioral oracle capture** rather than C++ source parsing to

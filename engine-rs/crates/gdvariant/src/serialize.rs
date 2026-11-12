@@ -8,10 +8,21 @@
 //! { "type": "Int", "value": 42 }
 //! ```
 
+use crate::dictionary::Dictionary;
 use crate::variant::Variant;
-use gdcore::math::{Color, Rect2, Vector2, Vector3};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::id::Rid;
+use gdcore::math::{Color, Rect2, Rect2i, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use serde_json::{json, Value};
+
+/// Renders a dictionary key to the string used for a JSON object key. String
+/// keys pass through verbatim; other Variant kinds use their lossy string form.
+fn dict_key_json_string(k: &Variant) -> String {
+    match k {
+        Variant::String(s) => s.clone(),
+        other => other.to_string_lossy(),
+    }
+}
 
 /// Serializes a `Variant` to a `serde_json::Value`.
 pub fn to_json(v: &Variant) -> Value {
@@ -24,7 +35,9 @@ pub fn to_json(v: &Variant) -> Value {
         Variant::StringName(sn) => json!({ "type": "StringName", "value": sn.as_str() }),
         Variant::NodePath(np) => json!({ "type": "NodePath", "value": np.to_string() }),
         Variant::Vector2(v) => json!({ "type": "Vector2", "value": [v.x, v.y] }),
+        Variant::Vector2i(v) => json!({ "type": "Vector2i", "value": [v.x, v.y] }),
         Variant::Vector3(v) => json!({ "type": "Vector3", "value": [v.x, v.y, v.z] }),
+        Variant::Vector3i(v) => json!({ "type": "Vector3i", "value": [v.x, v.y, v.z] }),
         Variant::Rect2(r) => json!({
             "type": "Rect2",
             "value": {
@@ -32,6 +45,25 @@ pub fn to_json(v: &Variant) -> Value {
                 "size": [r.size.x, r.size.y]
             }
         }),
+        Variant::Vector4(v) => json!({ "type": "Vector4", "value": [v.x, v.y, v.z, v.w] }),
+        Variant::Vector4i(v) => json!({ "type": "Vector4i", "value": [v.x, v.y, v.z, v.w] }),
+        Variant::Rect2i(r) => json!({
+            "type": "Rect2i",
+            "value": {
+                "position": [r.position.x, r.position.y],
+                "size": [r.size.x, r.size.y]
+            }
+        }),
+        // A Projection serialises as its sixteen cells in the storage order —
+        // column-major, `m[column][row]` — so the JSON is a flat list read back
+        // by the same walk. Naming the columns would invite a reader to treat
+        // them as rows.
+        Variant::Projection(p) => json!({
+            "type": "Projection",
+            "value": p.m.iter().flatten().copied().collect::<Vec<f32>>()
+        }),
+        // An RID is an opaque handle, so the id is all there is to carry.
+        Variant::Rid(rid) => json!({ "type": "RID", "value": rid.id() }),
         Variant::Transform2D(t) => json!({
             "type": "Transform2D",
             "value": {
@@ -44,20 +76,20 @@ pub fn to_json(v: &Variant) -> Value {
         Variant::Basis(b) => json!({
             "type": "Basis",
             "value": {
-                "x": [b.x.x, b.x.y, b.x.z],
-                "y": [b.y.x, b.y.y, b.y.z],
-                "z": [b.z.x, b.z.y, b.z.z]
+                "x": {"x": b.x.x, "y": b.x.y, "z": b.x.z},
+                "y": {"x": b.y.x, "y": b.y.y, "z": b.y.z},
+                "z": {"x": b.z.x, "y": b.z.y, "z": b.z.z}
             }
         }),
         Variant::Transform3D(t) => json!({
             "type": "Transform3D",
             "value": {
                 "basis": {
-                    "x": [t.basis.x.x, t.basis.x.y, t.basis.x.z],
-                    "y": [t.basis.y.x, t.basis.y.y, t.basis.y.z],
-                    "z": [t.basis.z.x, t.basis.z.y, t.basis.z.z]
+                    "x": {"x": t.basis.x.x, "y": t.basis.x.y, "z": t.basis.x.z},
+                    "y": {"x": t.basis.y.x, "y": t.basis.y.y, "z": t.basis.y.z},
+                    "z": {"x": t.basis.z.x, "y": t.basis.z.y, "z": t.basis.z.z}
                 },
-                "origin": [t.origin.x, t.origin.y, t.origin.z]
+                "origin": {"x": t.origin.x, "y": t.origin.y, "z": t.origin.z}
             }
         }),
         Variant::Quaternion(q) => json!({ "type": "Quaternion", "value": [q.x, q.y, q.z, q.w] }),
@@ -77,25 +109,109 @@ pub fn to_json(v: &Variant) -> Value {
         }),
         Variant::ObjectId(id) => json!({ "type": "ObjectId", "value": id.raw() }),
         Variant::Array(arr) => {
-            let items: Vec<Value> = arr.iter().map(to_json).collect();
+            let items: Vec<Value> = arr.to_vec().iter().map(to_json).collect();
             json!({ "type": "Array", "value": items })
         }
         Variant::Dictionary(dict) => {
-            let entries: serde_json::Map<String, Value> =
-                dict.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
+            // JSON object keys must be strings, so non-string Variant keys are
+            // rendered to their string form (matching Godot's JSON output).
+            let entries: serde_json::Map<String, Value> = dict
+                .to_dict()
+                .iter()
+                .map(|(k, v)| (dict_key_json_string(k), to_json(v)))
+                .collect();
             json!({ "type": "Dictionary", "value": entries })
         }
-        Variant::Callable(c) => json!({ "type": "Callable", "value": format!("{c:?}") }),
-        Variant::Resource(r) => json!({
-            "type": "Resource",
-            "value": { "class_name": r.class_name, "path": r.path }
+        Variant::Callable(c) => match c.as_ref() {
+            crate::variant::CallableRef::Method { target_id, method } => json!({
+                "type": "Callable",
+                "value": { "target_id": target_id, "method": method }
+            }),
+            _ => json!({ "type": "Callable", "value": format!("{c:?}") }),
+        },
+        // A Signal carries the object it is bound to, so it serialises like a
+        // Callable's method form (pat-0q2kx.9).
+        Variant::Signal { object_id, name } => json!({
+            "type": "Signal",
+            "value": { "object_id": object_id, "name": name }
         }),
+        Variant::Resource(r) => {
+            let props: serde_json::Map<String, Value> = r
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json(v)))
+                .collect();
+            json!({
+                "type": "Resource",
+                "value": {
+                    "class_name": r.class_name,
+                    "path": r.path,
+                    "properties": props,
+                }
+            })
+        }
+        // Packed arrays serialize their elements as a flat JSON array. Vector
+        // and color arrays flatten to consecutive components.
+        Variant::PackedByteArray(v) => json!({ "type": "PackedByteArray", "value": v }),
+        Variant::PackedInt32Array(v) => json!({ "type": "PackedInt32Array", "value": v }),
+        Variant::PackedInt64Array(v) => json!({ "type": "PackedInt64Array", "value": v }),
+        Variant::PackedFloat32Array(v) => json!({ "type": "PackedFloat32Array", "value": v }),
+        Variant::PackedFloat64Array(v) => json!({ "type": "PackedFloat64Array", "value": v }),
+        Variant::PackedStringArray(v) => json!({ "type": "PackedStringArray", "value": v }),
+        Variant::PackedVector2Array(v) => {
+            let flat: Vec<f64> = v.iter().flat_map(|p| [p.x as f64, p.y as f64]).collect();
+            json!({ "type": "PackedVector2Array", "value": flat })
+        }
+        Variant::PackedVector3Array(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|p| [p.x as f64, p.y as f64, p.z as f64])
+                .collect();
+            json!({ "type": "PackedVector3Array", "value": flat })
+        }
+        Variant::PackedColorArray(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|c| [c.r as f64, c.g as f64, c.b as f64, c.a as f64])
+                .collect();
+            json!({ "type": "PackedColorArray", "value": flat })
+        }
+        Variant::PackedVector4Array(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|p| [p.x as f64, p.y as f64, p.z as f64, p.w as f64])
+                .collect();
+            json!({ "type": "PackedVector4Array", "value": flat })
+        }
+    }
+}
+
+/// Parse a Vector3 from either named-component format `{"x":1,"y":2,"z":3}`
+/// or legacy array format `[1,2,3]`.
+fn parse_vec3(val: &Value) -> Option<Vector3> {
+    if let Some(obj) = val.as_object() {
+        let x = obj.get("x")?.as_f64()? as f32;
+        let y = obj.get("y")?.as_f64()? as f32;
+        let z = obj.get("z")?.as_f64()? as f32;
+        Some(Vector3::new(x, y, z))
+    } else if let Some(arr) = val.as_array() {
+        if arr.len() != 3 {
+            return None;
+        }
+        Some(Vector3::new(
+            arr[0].as_f64()? as f32,
+            arr[1].as_f64()? as f32,
+            arr[2].as_f64()? as f32,
+        ))
+    } else {
+        None
     }
 }
 
 /// Deserializes a `Variant` from a `serde_json::Value` produced by [`to_json`].
 ///
 /// Returns `None` if the JSON does not match the expected tagged format.
+/// Accepts both named-component format (oracle) and legacy array format.
 pub fn from_json(val: &Value) -> Option<Variant> {
     let obj = val.as_object()?;
     let ty = obj.get("type")?.as_str()?;
@@ -124,6 +240,29 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 arr[1].as_f64()? as f32,
             )))
         }
+        // Int vectors decode through `as_i64`, so a value that is not integral
+        // fails the round-trip rather than silently truncating (pat-nzgdu.78).
+        "Vector2i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 2 {
+                return None;
+            }
+            Some(Variant::Vector2i(Vector2i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+            )))
+        }
+        "Vector3i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 3 {
+                return None;
+            }
+            Some(Variant::Vector3i(Vector3i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+                arr[2].as_i64()? as i32,
+            )))
+        }
         "Vector3" => {
             let arr = obj.get("value")?.as_array()?;
             if arr.len() != 3 {
@@ -135,6 +274,54 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 arr[2].as_f64()? as f32,
             )))
         }
+        "Vector4" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 4 {
+                return None;
+            }
+            Some(Variant::Vector4(Vector4::new(
+                arr[0].as_f64()? as f32,
+                arr[1].as_f64()? as f32,
+                arr[2].as_f64()? as f32,
+                arr[3].as_f64()? as f32,
+            )))
+        }
+        "Vector4i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 4 {
+                return None;
+            }
+            Some(Variant::Vector4i(Vector4i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+                arr[2].as_i64()? as i32,
+                arr[3].as_i64()? as i32,
+            )))
+        }
+        "Rect2i" => {
+            let v = obj.get("value")?.as_object()?;
+            let pos = v.get("position")?.as_array()?;
+            let sz = v.get("size")?.as_array()?;
+            if pos.len() != 2 || sz.len() != 2 {
+                return None;
+            }
+            Some(Variant::Rect2i(Rect2i::new(
+                Vector2i::new(pos[0].as_i64()? as i32, pos[1].as_i64()? as i32),
+                Vector2i::new(sz[0].as_i64()? as i32, sz[1].as_i64()? as i32),
+            )))
+        }
+        "Projection" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 16 {
+                return None;
+            }
+            let mut m = [[0.0f32; 4]; 4];
+            for (i, cell) in arr.iter().enumerate() {
+                m[i / 4][i % 4] = cell.as_f64()? as f32;
+            }
+            Some(Variant::Projection(Projection { m }))
+        }
+        "RID" => Some(Variant::Rid(Rid::from_raw(obj.get("value")?.as_u64()?))),
         "Rect2" => {
             let v = obj.get("value")?.as_object()?;
             let pos = v.get("position")?.as_array()?;
@@ -146,6 +333,39 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 Vector2::new(pos[0].as_f64()? as f32, pos[1].as_f64()? as f32),
                 Vector2::new(sz[0].as_f64()? as f32, sz[1].as_f64()? as f32),
             )))
+        }
+        "Transform2D" => {
+            let v = obj.get("value")?.as_object()?;
+            let x_arr = v.get("x")?.as_array()?;
+            let y_arr = v.get("y")?.as_array()?;
+            let o_arr = v.get("origin")?.as_array()?;
+            if x_arr.len() != 2 || y_arr.len() != 2 || o_arr.len() != 2 {
+                return None;
+            }
+            Some(Variant::Transform2D(gdcore::math::Transform2D {
+                x: Vector2::new(x_arr[0].as_f64()? as f32, x_arr[1].as_f64()? as f32),
+                y: Vector2::new(y_arr[0].as_f64()? as f32, y_arr[1].as_f64()? as f32),
+                origin: Vector2::new(o_arr[0].as_f64()? as f32, o_arr[1].as_f64()? as f32),
+            }))
+        }
+        "Callable" => {
+            let v = obj.get("value")?;
+            if let Some(cb_obj) = v.as_object() {
+                let target_id = cb_obj.get("target_id")?.as_u64()?;
+                let method = cb_obj.get("method")?.as_str()?.to_owned();
+                Some(Variant::Callable(Box::new(
+                    crate::variant::CallableRef::Method { target_id, method },
+                )))
+            } else {
+                // Legacy debug-string format — can't reconstruct, return None
+                None
+            }
+        }
+        "Signal" => {
+            let sig_obj = obj.get("value")?.as_object()?;
+            let object_id = sig_obj.get("object_id")?.as_u64()?;
+            let name = sig_obj.get("name")?.as_str()?.to_owned();
+            Some(Variant::Signal { object_id, name })
         }
         "Color" => {
             let arr = obj.get("value")?.as_array()?;
@@ -161,63 +381,25 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Basis" => {
             let v = obj.get("value")?.as_object()?;
-            let x = v.get("x")?.as_array()?;
-            let y = v.get("y")?.as_array()?;
-            let z = v.get("z")?.as_array()?;
-            if x.len() != 3 || y.len() != 3 || z.len() != 3 {
-                return None;
-            }
-            Some(Variant::Basis(Basis {
-                x: Vector3::new(
-                    x[0].as_f64()? as f32,
-                    x[1].as_f64()? as f32,
-                    x[2].as_f64()? as f32,
-                ),
-                y: Vector3::new(
-                    y[0].as_f64()? as f32,
-                    y[1].as_f64()? as f32,
-                    y[2].as_f64()? as f32,
-                ),
-                z: Vector3::new(
-                    z[0].as_f64()? as f32,
-                    z[1].as_f64()? as f32,
-                    z[2].as_f64()? as f32,
-                ),
-            }))
+            let x = parse_vec3(v.get("x")?)?;
+            let y = parse_vec3(v.get("y")?)?;
+            let z = parse_vec3(v.get("z")?)?;
+            Some(Variant::Basis(Basis { x, y, z }))
         }
         "Transform3D" => {
             let v = obj.get("value")?.as_object()?;
             let b = v.get("basis")?.as_object()?;
-            let bx = b.get("x")?.as_array()?;
-            let by = b.get("y")?.as_array()?;
-            let bz = b.get("z")?.as_array()?;
-            let o = v.get("origin")?.as_array()?;
-            if bx.len() != 3 || by.len() != 3 || bz.len() != 3 || o.len() != 3 {
-                return None;
-            }
+            let bx = parse_vec3(b.get("x")?)?;
+            let by = parse_vec3(b.get("y")?)?;
+            let bz = parse_vec3(b.get("z")?)?;
+            let origin = parse_vec3(v.get("origin")?)?;
             Some(Variant::Transform3D(Transform3D {
                 basis: Basis {
-                    x: Vector3::new(
-                        bx[0].as_f64()? as f32,
-                        bx[1].as_f64()? as f32,
-                        bx[2].as_f64()? as f32,
-                    ),
-                    y: Vector3::new(
-                        by[0].as_f64()? as f32,
-                        by[1].as_f64()? as f32,
-                        by[2].as_f64()? as f32,
-                    ),
-                    z: Vector3::new(
-                        bz[0].as_f64()? as f32,
-                        bz[1].as_f64()? as f32,
-                        bz[2].as_f64()? as f32,
-                    ),
+                    x: bx,
+                    y: by,
+                    z: bz,
                 },
-                origin: Vector3::new(
-                    o[0].as_f64()? as f32,
-                    o[1].as_f64()? as f32,
-                    o[2].as_f64()? as f32,
-                ),
+                origin,
             }))
         }
         "Quaternion" => {
@@ -275,15 +457,142 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         "Array" => {
             let items = obj.get("value")?.as_array()?;
             let variants: Option<Vec<Variant>> = items.iter().map(from_json).collect();
-            Some(Variant::Array(variants?))
+            Some(Variant::Array(variants?.into()))
         }
         "Dictionary" => {
             let entries = obj.get("value")?.as_object()?;
-            let mut map = std::collections::HashMap::new();
+            let mut map = Dictionary::new();
             for (k, v) in entries {
                 map.insert(k.clone(), from_json(v)?);
             }
-            Some(Variant::Dictionary(map))
+            Some(Variant::Dictionary(map.into()))
+        }
+        "Resource" => {
+            let v = obj.get("value")?.as_object()?;
+            let class_name = v.get("class_name")?.as_str()?.to_owned();
+            let path = v.get("path")?.as_str()?.to_owned();
+            let mut properties = std::collections::HashMap::new();
+            if let Some(props) = v.get("properties").and_then(|p| p.as_object()) {
+                for (k, pv) in props {
+                    if let Some(variant) = from_json(pv) {
+                        properties.insert(k.clone(), variant);
+                    }
+                }
+            }
+            Some(Variant::Resource(Box::new(crate::variant::ResourceRef {
+                path,
+                class_name,
+                properties,
+            })))
+        }
+        "PackedByteArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(u8::try_from(x.as_u64()?).ok()?);
+            }
+            Some(Variant::PackedByteArray(v))
+        }
+        "PackedInt32Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_i64()? as i32);
+            }
+            Some(Variant::PackedInt32Array(v))
+        }
+        "PackedInt64Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_i64()?);
+            }
+            Some(Variant::PackedInt64Array(v))
+        }
+        "PackedFloat32Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_f64()? as f32);
+            }
+            Some(Variant::PackedFloat32Array(v))
+        }
+        "PackedFloat64Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_f64()?);
+            }
+            Some(Variant::PackedFloat64Array(v))
+        }
+        "PackedStringArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_str()?.to_owned());
+            }
+            Some(Variant::PackedStringArray(v))
+        }
+        "PackedVector2Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 2 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 2);
+            for chunk in arr.chunks(2) {
+                v.push(Vector2::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedVector2Array(v))
+        }
+        "PackedVector3Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 3 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 3);
+            for chunk in arr.chunks(3) {
+                v.push(Vector3::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedVector3Array(v))
+        }
+        "PackedColorArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 4 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 4);
+            for chunk in arr.chunks(4) {
+                v.push(Color::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                    chunk[3].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedColorArray(v))
+        }
+        "PackedVector4Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 4 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 4);
+            for chunk in arr.chunks(4) {
+                v.push(Vector4::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                    chunk[3].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedVector4Array(v))
         }
         _ => None,
     }
@@ -341,20 +650,23 @@ mod tests {
 
     #[test]
     fn roundtrip_array() {
-        let v = Variant::Array(vec![
-            Variant::Int(1),
-            Variant::String("two".into()),
-            Variant::Bool(false),
-        ]);
+        let v = Variant::Array(
+            vec![
+                Variant::Int(1),
+                Variant::String("two".into()),
+                Variant::Bool(false),
+            ]
+            .into(),
+        );
         assert_eq!(roundtrip(v.clone()), v);
     }
 
     #[test]
     fn roundtrip_dictionary() {
-        let mut dict = std::collections::HashMap::new();
-        dict.insert("name".into(), Variant::String("Patina".into()));
-        dict.insert("version".into(), Variant::Int(1));
-        let v = Variant::Dictionary(dict);
+        let mut dict = Dictionary::new();
+        dict.insert("name", Variant::String("Patina".into()));
+        dict.insert("version", Variant::Int(1));
+        let v = Variant::Dictionary(dict.into());
         assert_eq!(roundtrip(v.clone()), v);
     }
 
@@ -399,16 +711,62 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_signal() {
+        // A Signal keeps both halves — the bound object and the name — so a
+        // serialised signal still identifies which object it came from
+        // (pat-0q2kx.9).
+        let v = Variant::Signal {
+            object_id: 4242,
+            name: "pressed".to_string(),
+        };
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
     fn roundtrip_transform2d() {
-        let t = gdcore::math::Transform2D {
+        let v = Variant::Transform2D(gdcore::math::Transform2D {
             x: Vector2::new(1.0, 0.0),
             y: Vector2::new(0.0, 1.0),
             origin: Vector2::new(50.0, 100.0),
-        };
-        // Transform2D doesn't have from_json support yet, test to_json is valid
-        let json = to_json(&Variant::Transform2D(t));
-        let obj = json.as_object().unwrap();
-        assert_eq!(obj.get("type").unwrap().as_str().unwrap(), "Transform2D");
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_callable_method() {
+        let v = Variant::Callable(Box::new(crate::variant::CallableRef::Method {
+            target_id: 42,
+            method: "on_hit".to_string(),
+        }));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn callable_legacy_debug_string_returns_none() {
+        // Legacy format (debug string) can't be deserialized
+        let j = serde_json::json!({ "type": "Callable", "value": "Callable(Object#42, \"foo\")" });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn roundtrip_quaternion() {
+        let v = Variant::Quaternion(Quaternion::new(0.0, 0.707, 0.0, 0.707));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_aabb() {
+        let v = Variant::Aabb(Aabb::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(10.0, 20.0, 30.0),
+        ));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_plane() {
+        let v = Variant::Plane(Plane::new(Vector3::new(0.0, 1.0, 0.0), 5.0));
+        assert_eq!(roundtrip(v.clone()), v);
     }
 
     #[test]
@@ -419,18 +777,18 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_array() {
-        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
-        let outer = Variant::Array(vec![inner, Variant::String("x".into())]);
+        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into());
+        let outer = Variant::Array(vec![inner, Variant::String("x".into())].into());
         assert_eq!(roundtrip(outer.clone()), outer);
     }
 
     #[test]
     fn roundtrip_nested_dictionary() {
-        let mut inner = std::collections::HashMap::new();
-        inner.insert("nested".into(), Variant::Bool(true));
-        let mut outer = std::collections::HashMap::new();
-        outer.insert("child".into(), Variant::Dictionary(inner));
-        let v = Variant::Dictionary(outer);
+        let mut inner = Dictionary::new();
+        inner.insert("nested", Variant::Bool(true));
+        let mut outer = Dictionary::new();
+        outer.insert("child", Variant::Dictionary(inner.into()));
+        let v = Variant::Dictionary(outer.into());
         assert_eq!(roundtrip(v.clone()), v);
     }
 
@@ -515,6 +873,201 @@ mod tests {
             "type": "Rect2",
             "value": { "position": [0.0, 0.0] }
         });
+        assert!(from_json(&j).is_none());
+    }
+
+    // -- Basis / Transform3D roundtrip and format tests -----------------------
+
+    #[test]
+    fn roundtrip_basis() {
+        let v = Variant::Basis(Basis {
+            x: Vector3::new(1.0, 0.0, 0.0),
+            y: Vector3::new(0.0, 1.0, 0.0),
+            z: Vector3::new(0.0, 0.0, 1.0),
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_transform3d() {
+        let v = Variant::Transform3D(Transform3D {
+            basis: Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            },
+            origin: Vector3::new(10.0, 20.0, 30.0),
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn basis_serializes_named_component_format() {
+        let v = Variant::Basis(Basis {
+            x: Vector3::new(1.0, 2.0, 3.0),
+            y: Vector3::new(4.0, 5.0, 6.0),
+            z: Vector3::new(7.0, 8.0, 9.0),
+        });
+        let json = to_json(&v);
+        let val = json.get("value").unwrap();
+        // Must use named-component format {"x": ..., "y": ..., "z": ...}
+        let x = val.get("x").unwrap().as_object().unwrap();
+        assert_eq!(x.get("x").unwrap().as_f64().unwrap() as f32, 1.0);
+        assert_eq!(x.get("y").unwrap().as_f64().unwrap() as f32, 2.0);
+        assert_eq!(x.get("z").unwrap().as_f64().unwrap() as f32, 3.0);
+    }
+
+    #[test]
+    fn transform3d_serializes_named_component_format() {
+        let v = Variant::Transform3D(Transform3D {
+            basis: Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            },
+            origin: Vector3::new(5.0, 10.0, 15.0),
+        });
+        let json = to_json(&v);
+        let val = json.get("value").unwrap();
+        // Origin must be named-component
+        let origin = val.get("origin").unwrap().as_object().unwrap();
+        assert_eq!(origin.get("x").unwrap().as_f64().unwrap() as f32, 5.0);
+        assert_eq!(origin.get("y").unwrap().as_f64().unwrap() as f32, 10.0);
+        assert_eq!(origin.get("z").unwrap().as_f64().unwrap() as f32, 15.0);
+        // Basis rows must be named-component
+        let bx = val
+            .get("basis")
+            .unwrap()
+            .get("x")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(bx.get("x").unwrap().as_f64().unwrap() as f32, 1.0);
+    }
+
+    #[test]
+    fn basis_deserializes_legacy_array_format() {
+        // Legacy format: rows as arrays [x, y, z]
+        let j = serde_json::json!({
+            "type": "Basis",
+            "value": {
+                "x": [1.0, 0.0, 0.0],
+                "y": [0.0, 1.0, 0.0],
+                "z": [0.0, 0.0, 1.0]
+            }
+        });
+        let v = from_json(&j).unwrap();
+        assert_eq!(
+            v,
+            Variant::Basis(Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            })
+        );
+    }
+
+    #[test]
+    fn transform3d_deserializes_legacy_array_format() {
+        // Legacy format: arrays instead of named-component objects
+        let j = serde_json::json!({
+            "type": "Transform3D",
+            "value": {
+                "basis": {
+                    "x": [1.0, 0.0, 0.0],
+                    "y": [0.0, 1.0, 0.0],
+                    "z": [0.0, 0.0, 1.0]
+                },
+                "origin": [10.0, 20.0, 30.0]
+            }
+        });
+        let v = from_json(&j).unwrap();
+        assert_eq!(
+            v,
+            Variant::Transform3D(Transform3D {
+                basis: Basis {
+                    x: Vector3::new(1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(0.0, 0.0, 1.0),
+                },
+                origin: Vector3::new(10.0, 20.0, 30.0),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_vec3_named_format() {
+        let j = serde_json::json!({"x": 1.0, "y": 2.0, "z": 3.0});
+        let v = parse_vec3(&j).unwrap();
+        assert_eq!(v, Vector3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn parse_vec3_array_format() {
+        let j = serde_json::json!([4.0, 5.0, 6.0]);
+        let v = parse_vec3(&j).unwrap();
+        assert_eq!(v, Vector3::new(4.0, 5.0, 6.0));
+    }
+
+    #[test]
+    fn parse_vec3_rejects_bad_array_length() {
+        assert!(parse_vec3(&serde_json::json!([1.0, 2.0])).is_none());
+        assert!(parse_vec3(&serde_json::json!([1.0, 2.0, 3.0, 4.0])).is_none());
+    }
+
+    #[test]
+    fn parse_vec3_rejects_non_numeric() {
+        assert!(parse_vec3(&serde_json::json!("not a vec")).is_none());
+        assert!(parse_vec3(&serde_json::json!(42)).is_none());
+    }
+
+    // -- Packed array JSON round-trips --------------------------------------
+
+    #[test]
+    fn roundtrip_packed_byte_array() {
+        let v = Variant::PackedByteArray(vec![0, 1, 255, 128]);
+        assert_eq!(roundtrip(v.clone()), v);
+        assert_eq!(
+            roundtrip(Variant::PackedByteArray(vec![])),
+            Variant::PackedByteArray(vec![])
+        );
+    }
+
+    #[test]
+    fn roundtrip_packed_int_arrays() {
+        let v32 = Variant::PackedInt32Array(vec![0, -1, i32::MAX, i32::MIN]);
+        assert_eq!(roundtrip(v32.clone()), v32);
+        let v64 = Variant::PackedInt64Array(vec![0, i64::MAX, i64::MIN]);
+        assert_eq!(roundtrip(v64.clone()), v64);
+    }
+
+    #[test]
+    fn roundtrip_packed_float_arrays() {
+        let v32 = Variant::PackedFloat32Array(vec![0.0, 0.5, -3.25]);
+        assert_eq!(roundtrip(v32.clone()), v32);
+        let v64 = Variant::PackedFloat64Array(vec![0.1, -2.5, 1e300]);
+        assert_eq!(roundtrip(v64.clone()), v64);
+    }
+
+    #[test]
+    fn roundtrip_packed_string_array() {
+        let v = Variant::PackedStringArray(vec!["".into(), "abc".into(), "héllo".into()]);
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_packed_vector_and_color_arrays() {
+        let v2 = Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0), Vector2::new(-3.0, 4.5)]);
+        assert_eq!(roundtrip(v2.clone()), v2);
+        let v3 = Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]);
+        assert_eq!(roundtrip(v3.clone()), v3);
+        let vc = Variant::PackedColorArray(vec![Color::new(0.1, 0.2, 0.3, 1.0)]);
+        assert_eq!(roundtrip(vc.clone()), vc);
+    }
+
+    #[test]
+    fn packed_vector2_odd_length_rejected() {
+        let j = serde_json::json!({ "type": "PackedVector2Array", "value": [1.0, 2.0, 3.0] });
         assert!(from_json(&j).is_none());
     }
 }

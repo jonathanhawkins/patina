@@ -1,0 +1,95 @@
+{
+  "fixture_id": "scene_physics_3d_playground",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "Physics3DPlayground",
+        "class": "Node3D",
+        "path": "/root/Physics3DPlayground",
+        "children": ["Camera", "Sun", "Floor", "Ball", "Crate", "Ramp"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Physics3DPlayground/Camera",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/Physics3DPlayground/Sun",
+        "children": []
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Physics3DPlayground/Floor",
+        "children": ["FloorShape", "FloorMesh"]
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Physics3DPlayground/Floor/FloorShape",
+        "children": []
+      },
+      {
+        "name": "FloorMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Physics3DPlayground/Floor/FloorMesh",
+        "children": []
+      },
+      {
+        "name": "Ball",
+        "class": "RigidBody3D",
+        "path": "/root/Physics3DPlayground/Ball",
+        "children": ["BallShape", "BallMesh"]
+      },
+      {
+        "name": "BallShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Physics3DPlayground/Ball/BallShape",
+        "children": []
+      },
+      {
+        "name": "BallMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Physics3DPlayground/Ball/BallMesh",
+        "children": []
+      },
+      {
+        "name": "Crate",
+        "class": "RigidBody3D",
+        "path": "/root/Physics3DPlayground/Crate",
+        "children": ["CrateShape", "CrateMesh"]
+      },
+      {
+        "name": "CrateShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Physics3DPlayground/Crate/CrateShape",
+        "children": []
+      },
+      {
+        "name": "CrateMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Physics3DPlayground/Crate/CrateMesh",
+        "children": []
+      },
+      {
+        "name": "Ramp",
+        "class": "StaticBody3D",
+        "path": "/root/Physics3DPlayground/Ramp",
+        "children": ["RampShape"]
+      },
+      {
+        "name": "RampShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Physics3DPlayground/Ramp/RampShape",
+        "children": []
+      }
+    ]
+  }
+}

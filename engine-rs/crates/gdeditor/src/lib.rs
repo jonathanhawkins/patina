@@ -1,7 +1,5 @@
-// NOTE: Editor work is maintenance-only until runtime parity exits are met.
-// No new editor features should be added until oracle parity reaches 98%+ across
-// all supported scenes. Maintenance work (bug fixes, server stability, smoke tests)
-// is permitted. See AGENTS.md § Project-Specific Rules for the full policy.
+// NOTE: Editor feature gate was LIFTED on 2026-03-19 — runtime parity exits are green.
+// Editor feature work is now the primary focus. See CLAUDE.md.
 
 //! # gdeditor
 //!
@@ -19,29 +17,233 @@
 
 #![warn(clippy::all)]
 
+pub mod agent_mcp;
+pub mod anim_interpolation;
+pub mod anim_keyframes;
+pub mod anim_playback;
+pub mod anim_player_panel;
+pub mod anim_track_types;
+pub mod anim_tree_graph;
+pub mod animation_editor;
+pub mod asset_drag_drop;
+pub mod audio_bus_layout;
+pub mod auto_indent;
+pub mod autoload_manager;
+pub mod batch_rename;
+pub mod bezier_curve;
+pub mod bottom_panel_bar;
+pub mod bracket_match;
+pub mod code_folding;
+pub mod command_palette;
+pub mod comment_toggle;
+pub mod control_binding;
+pub mod create_dialog;
+pub mod create_dialog_confirm;
+pub mod create_node_catalog;
+pub mod create_node_description;
+pub mod create_node_insertion;
+pub mod create_node_recent;
+pub mod curve_editor;
+pub mod debug_menu_toggles;
+pub mod debugger_errors;
+pub mod debugger_profiler;
+pub mod debugger_stack;
 pub mod dock;
+pub mod document_history;
+pub mod editor_compat;
+pub mod editor_interface;
+pub mod editor_menu;
+pub mod editor_menu_commands;
+pub mod editor_plugin;
 pub mod editor_server;
+pub mod editor_settings_dialog;
+pub mod editor_settings_store;
 pub mod editor_ui;
+pub mod environment_preview;
+pub mod export_dialog;
+pub mod export_groups;
+pub mod export_layout;
+pub mod export_presets;
+pub mod feature_profile;
 pub mod filesystem;
+pub mod find_in_files;
+pub mod find_replace;
+pub mod fs_file_ops;
+pub mod fs_import_pipeline;
+pub mod fs_thumbnails;
+pub mod gdscript_highlight;
+pub mod gi_bake;
+pub mod gizmo_multi;
+pub mod gizmo_snap;
+pub mod goto_definition;
+pub mod goto_line;
+pub mod grid_display;
+pub mod grid_snapping;
+pub mod group_dialog;
+pub mod guides;
+pub mod help_menu_commands;
+pub mod idle_render;
 pub mod import;
+pub mod import_settings;
+pub mod indent_block;
+pub mod input_map;
 pub mod inspector;
+pub mod inspector_schema;
+pub mod inspector_schema_generated;
+pub mod line_ops;
+pub mod linked_proportional;
+pub mod main_screen;
+pub mod menu_enablement;
+pub mod menu_shortcuts;
+pub mod mode_placeholder;
+pub mod monitors_panel;
+pub mod multi_caret;
+pub mod multi_document;
+pub mod multi_node_edit;
+/// Navigation debug overlay draw items for the 2D viewport (pat-s3rrv.82).
+pub mod navigation_overlay;
+pub mod new_scene;
+pub mod numeric_expression;
+pub mod open_recent;
+pub mod open_scene;
+pub mod open_scripts_panel;
+pub mod output_console;
+pub mod output_panel;
+pub mod pivot_marker;
+pub mod play_3d;
+pub mod play_custom_scene;
+pub mod plugin_manager;
+pub mod profiler_panel;
+pub mod project_menu_commands;
+pub mod project_settings_dialog;
+pub mod project_settings_store;
+pub mod property_undo;
+pub mod save_normalize;
 pub mod scene_editor;
+pub mod scene_menu_commands;
 pub mod scene_renderer;
+pub mod scene_tab_bar;
+pub mod scene_tabs;
+pub mod script_bookmarks;
+pub mod script_breakpoints;
+pub mod script_completion;
+pub mod script_editor;
+pub mod script_find_replace;
+pub mod script_gutter;
+pub mod script_main_view;
+pub mod script_outline;
+pub mod script_post_import;
+pub mod script_templates;
 pub mod settings;
+pub mod shader_editor;
+pub mod signal_connect_advanced;
+pub mod signal_connect_dialog;
+pub mod signal_connection_edit;
+pub mod signal_dialog;
+pub mod signal_docs;
+pub mod signal_goto_method;
+pub mod signal_receiver_stub;
+pub mod signals_tree;
+pub mod snap_config;
+pub mod sprite3d_render;
+pub mod subresource_inline;
 pub mod texture_cache;
+pub mod theme_editor;
+pub mod tilemap_editor;
+pub mod tilemap_render;
+pub mod undo_redo;
+pub mod variant_value;
+pub mod vcs;
+pub mod vcs_integration;
+pub mod viewport_2d;
+pub mod viewport_2d_render;
+pub mod viewport_3d;
+pub mod viewport_3d_gizmo;
+pub mod viewport_3d_handles;
+pub mod viewport_3d_overlay;
+pub mod viewport_3d_render;
+pub mod viewport_3d_select;
+pub mod viewport_select;
+pub mod viewport_toolbar;
 
 use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
 use gdvariant::Variant;
 use thiserror::Error;
 
+/// pat-ism62: Identifier for the active viewport rasterizer backend.
+///
+/// The default editor build links wgpu and returns `"wgpu"`. Compiling with
+/// `--no-default-features --features software-render` selects the legacy
+/// CPU rasterizer (and drops wgpu from the dependency graph) and returns
+/// `"software"`. Tests assert this constant to prove that the default
+/// editor build is GPU-backed.
+pub fn viewport_backend() -> &'static str {
+    if cfg!(feature = "gpu-render") {
+        "wgpu"
+    } else if cfg!(feature = "software-render") {
+        "software"
+    } else {
+        // Defensive: both features off should be unreachable because the
+        // crate has `default = ["gpu-render"]`. Returning "software" keeps
+        // the editor functional rather than panicking in a build that
+        // managed to disable every backend.
+        "software"
+    }
+}
+
 // Re-exports for convenience.
-pub use dock::{DockPanel, PropertyDock, SceneTreeDock};
+pub use create_dialog::{
+    CatalogEntry, ClassEntry, ClassFilter, CreateDialogResult, CreateNodeDialog, HelperPreset,
+    NodeCatalog2D, NodeCategory,
+};
+pub use dock::{
+    DockPanel, NodeIndicators, NodeTypeIcon, NodeWarning, PluginDockManager, PluginDockPanel,
+    PropertyDock, SceneTreeDock, SelectionState,
+};
+pub use editor_interface::EditorInterface;
+pub use editor_settings_dialog::{EditorSettingsDialog, KeyBinding, PluginInfo, SettingsTab};
+pub use export_dialog::{ExportBuildProfile, ExportDialog, ExportPlatform, ExportPreset};
 pub use filesystem::EditorFileSystem;
-pub use import::{ImportPipeline, ImportedResource, ResourceImporter, TresImporter, TscnImporter};
-pub use inspector::InspectorPanel;
+pub use find_replace::{
+    FindReplace as FindReplaceEngine, FindReplaceConfig, FindReplaceError, ReplaceResult,
+    SearchMatch, SearchMode,
+};
+pub use import::{
+    default_scene_importer_registry, import_scene_to_packed_scene, imported_scene_to_tscn,
+    split_name_suffix, AnimationLoopMode, EditorSceneFormatImporter, EditorScenePostImport,
+    FbxSceneImporter, GltfSceneImporter, ImportPipeline, ImportedAnimation, ImportedAnimationTrack,
+    ImportedResource, ImportedScene, ImportedSceneNode, NodeNameSuffix, ObjSceneImporter,
+    ResourceImporter, SceneFormatImporterRegistry, SceneImportOptions, TresImporter, TscnImporter,
+};
+pub use inspector::{
+    coerce_variant, validate_variant, CustomPropertyEditor, EditorHint, EditorInspectorPlugin,
+    InspectorPanel, InspectorPluginRegistry, InspectorSection, PropertyEditor, PropertyHint,
+    ResourceSubEditor, SectionedInspector,
+};
+pub use profiler_panel::{
+    FrameProfile, FunctionStats, ProfilerEntry, ProfilerPanel, ProfilerStats,
+};
+pub use project_settings_dialog::{
+    ProjectSettingsDialog, SettingsCategory, SettingsEditor, SettingsProperty, SettingsValue,
+};
 pub use scene_editor::SceneEditor;
+pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
 pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
+pub use shader_editor::{
+    validate_shader_source, MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderCompileStatus,
+    ShaderDiagnostic, ShaderEditor, ShaderHighlightKind, ShaderHighlightSpan, ShaderHighlighter,
+    ShaderTab, ShaderValidation, UniformValue,
+};
+pub use theme_editor::{
+    OverrideEntry, OverrideKind, PreviewControl, StyleBoxFlat, ThemeColorPalette, ThemeEditor,
+    ThemeFont, ThemeItem, ThemeResource,
+};
+pub use vcs::{BranchInfo, ChangeArea, CommitEntry, FileChangeStatus, VcsFileStatus, VcsStatus};
+pub use viewport_3d::{
+    CameraMode, EnvironmentPreview3D, GizmoAxis, GizmoMode3D, Grid3D, GridLine, PickResult,
+    Projection, Ray3D, Selection3D, Viewport3D, ViewportCamera3D,
+};
 
 /// Errors specific to editor operations.
 #[derive(Debug, Error)]
@@ -61,10 +263,298 @@ pub enum EditorError {
     /// The redo stack is empty.
     #[error("nothing to redo")]
     NothingToRedo,
+
+    /// The target node has no attached script to open.
+    #[error("node has no attached script")]
+    NoScript,
+
+    /// The target node is not an instanced scene with an openable source.
+    #[error("node is not an instanced scene with an openable source")]
+    NotSceneInstance,
 }
 
 /// Convenience alias for editor results.
 pub type EditorResult<T> = Result<T, EditorError>;
+
+// ---------------------------------------------------------------------------
+// Editor mode (top bar mode switching)
+// ---------------------------------------------------------------------------
+
+/// The active editor workspace mode. Mirrors Godot's top-bar mode buttons:
+/// 2D, 3D, Script, Game, AssetLib.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EditorMode {
+    /// 2D canvas editor.
+    #[default]
+    Canvas2D,
+    /// 3D spatial editor.
+    Spatial3D,
+    /// Script/code editor.
+    Script,
+    /// Game preview (running scene).
+    Game,
+    /// Asset library browser.
+    AssetLib,
+}
+
+impl EditorMode {
+    /// Returns the display label for the toolbar button.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Canvas2D => "2D",
+            Self::Spatial3D => "3D",
+            Self::Script => "Script",
+            Self::Game => "Game",
+            Self::AssetLib => "AssetLib",
+        }
+    }
+
+    /// All modes in toolbar display order.
+    pub fn all() -> [EditorMode; 5] {
+        [
+            Self::Canvas2D,
+            Self::Spatial3D,
+            Self::Script,
+            Self::Game,
+            Self::AssetLib,
+        ]
+    }
+
+    /// Parse a mode from its string key (as used in the REST API).
+    pub fn from_str_key(s: &str) -> Option<Self> {
+        match s {
+            "2d" => Some(Self::Canvas2D),
+            "3d" => Some(Self::Spatial3D),
+            "script" => Some(Self::Script),
+            "game" => Some(Self::Game),
+            "assetlib" => Some(Self::AssetLib),
+            _ => None,
+        }
+    }
+
+    /// Returns the string key for the REST API.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Canvas2D => "2d",
+            Self::Spatial3D => "3d",
+            Self::Script => "script",
+            Self::Game => "game",
+            Self::AssetLib => "assetlib",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run controls (play/pause/stop)
+// ---------------------------------------------------------------------------
+
+/// The current play state of the editor's run controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlayState {
+    /// No scene is running.
+    #[default]
+    Stopped,
+    /// A scene is running.
+    Playing,
+    /// A scene is running but paused.
+    Paused,
+}
+
+/// Which scene to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTarget {
+    /// Run the project's main scene.
+    MainScene,
+    /// Run the currently edited scene.
+    CurrentScene,
+    /// Run a specific scene by path.
+    CustomScene(String),
+}
+
+/// Editor run controls state — play, pause, stop, and run target.
+///
+/// Mirrors Godot's top-bar run buttons (F5 = Run Project, F6 = Run Current Scene,
+/// F7 = Pause, F8 = Stop).
+#[derive(Debug, Clone)]
+pub struct RunControls {
+    /// Current play state.
+    pub state: PlayState,
+    /// What to run next.
+    pub target: RunTarget,
+    /// Whether "Run Current Scene" was the last run action.
+    pub last_ran_current: bool,
+}
+
+impl Default for RunControls {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunControls {
+    /// Creates new run controls in the stopped state.
+    pub fn new() -> Self {
+        Self {
+            state: PlayState::Stopped,
+            target: RunTarget::MainScene,
+            last_ran_current: false,
+        }
+    }
+
+    /// Starts playing the target scene.
+    pub fn play(&mut self, target: RunTarget) {
+        self.last_ran_current = matches!(target, RunTarget::CurrentScene);
+        self.target = target;
+        self.state = PlayState::Playing;
+    }
+
+    /// Pauses the running scene. No-op if not playing.
+    pub fn pause(&mut self) {
+        if self.state == PlayState::Playing {
+            self.state = PlayState::Paused;
+        }
+    }
+
+    /// Resumes a paused scene. No-op if not paused.
+    pub fn resume(&mut self) {
+        if self.state == PlayState::Paused {
+            self.state = PlayState::Playing;
+        }
+    }
+
+    /// Toggles between playing and paused.
+    pub fn toggle_pause(&mut self) {
+        match self.state {
+            PlayState::Playing => self.state = PlayState::Paused,
+            PlayState::Paused => self.state = PlayState::Playing,
+            PlayState::Stopped => {}
+        }
+    }
+
+    /// Stops the running scene.
+    pub fn stop(&mut self) {
+        self.state = PlayState::Stopped;
+    }
+
+    /// Whether a scene is currently running (playing or paused).
+    pub fn is_running(&self) -> bool {
+        self.state != PlayState::Stopped
+    }
+
+    /// Whether the scene is playing (not paused, not stopped).
+    pub fn is_playing(&self) -> bool {
+        self.state == PlayState::Playing
+    }
+
+    /// Whether the scene is paused.
+    pub fn is_paused(&self) -> bool {
+        self.state == PlayState::Paused
+    }
+
+    /// Plays the project's main scene (Godot's Run Project / F5).
+    pub fn play_project(&mut self) {
+        self.play(RunTarget::MainScene);
+    }
+
+    /// Plays the currently edited scene (Godot's Run Current Scene / F6).
+    pub fn play_current_scene(&mut self) {
+        self.play(RunTarget::CurrentScene);
+    }
+
+    /// Resolves the concrete scene path of the running instance, given the
+    /// project's `main_scene` and the editor's `current_scene`. Returns the
+    /// path that is (or, when paused, still) running, or `None` when stopped —
+    /// so callers know exactly which scene to launch or terminate.
+    pub fn running_scene(&self, main_scene: &str, current_scene: &str) -> Option<String> {
+        if self.state == PlayState::Stopped {
+            return None;
+        }
+        Some(match &self.target {
+            RunTarget::MainScene => main_scene.to_string(),
+            RunTarget::CurrentScene => current_scene.to_string(),
+            RunTarget::CustomScene(path) => path.clone(),
+        })
+    }
+}
+
+/// The `CONNECT_*` flags and bound arguments a signal connection was made with
+/// (pat-mgixk.13).
+///
+/// Godot's `ConnectDialog` lets the user tick **Deferred** and **One Shot** and
+/// add bound arguments, and `Object::connect` carries them as `CONNECT_DEFERRED`
+/// / `CONNECT_ONE_SHOT` plus `binds`. `PackedScene` then persists them as the
+/// `flags=` field of a `[connection]` line, so they are part of what the editor
+/// has to round-trip — not a runtime-only detail.
+///
+/// Carried as one struct rather than three fields on the command so adding a
+/// future flag does not touch every construction site again.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnectOptions {
+    /// Godot `CONNECT_DEFERRED`: fire from the deferred queue, not inline.
+    pub deferred: bool,
+    /// Godot `CONNECT_ONE_SHOT`: auto-disconnect after the first emission.
+    pub one_shot: bool,
+    /// Extra arguments appended after the signal's own (Godot `binds`).
+    pub binds: Vec<Variant>,
+}
+
+impl ConnectOptions {
+    /// Reads the options back off a live connection.
+    ///
+    /// Needed so undoing a *disconnect* restores the connection it removed with
+    /// the flags it actually had. Reconnecting with defaults would silently
+    /// drop a user's Deferred tick, which looks like the undo worked.
+    pub fn from_connection(conn: &gdobject::signal::Connection) -> Self {
+        Self {
+            deferred: conn.deferred,
+            one_shot: conn.one_shot,
+            binds: conn.binds.clone(),
+        }
+    }
+
+    /// Builds the `Connection` these options describe.
+    pub fn to_connection(&self, target_id: u64, method: &str) -> gdobject::signal::Connection {
+        let mut conn =
+            gdobject::signal::Connection::new(gdcore::id::ObjectId::from_raw(target_id), method);
+        conn.deferred = self.deferred;
+        conn.one_shot = self.one_shot;
+        conn.binds = self.binds.clone();
+        conn
+    }
+
+    /// The `flags=` value Godot writes into a `[connection]` line.
+    ///
+    /// ⚠️ Takes the values from `gdscene::packed_scene` rather than spelling
+    /// them here. Godot's `ConnectFlags` are NOT consecutive —
+    /// `CONNECT_DEFERRED = 1`, `CONNECT_PERSIST = 2`, `CONNECT_ONE_SHOT = 4`
+    /// (`core/object/object.h`) — so deriving "the second flag is 2" writes
+    /// `flags=2` for a one-shot, which is CONNECT_PERSIST. That reloads as a
+    /// different connection with no error anywhere. The loader and the saver
+    /// already read these constants; this is the third reader, not a second
+    /// definition.
+    ///
+    /// Godot omits the field entirely when the value is 0, which is why this
+    /// returns the number and leaves the decision to the saver.
+    pub fn godot_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.deferred {
+            flags |= gdscene::packed_scene::CONNECT_DEFERRED;
+        }
+        if self.one_shot {
+            flags |= gdscene::packed_scene::CONNECT_ONE_SHOT;
+        }
+        flags
+    }
+
+    /// Rebuilds the options a `flags=` value encodes, for scene loading.
+    pub fn from_godot_flags(flags: u32) -> Self {
+        Self {
+            deferred: flags & gdscene::packed_scene::CONNECT_DEFERRED != 0,
+            one_shot: flags & gdscene::packed_scene::CONNECT_ONE_SHOT != 0,
+            binds: Vec::new(),
+        }
+    }
+}
 
 /// An undoable editor command.
 ///
@@ -100,10 +590,20 @@ pub enum EditorCommand {
         node_id: NodeId,
         /// The parent it was attached to (populated on execute).
         parent_id: Option<NodeId>,
-        /// The node's name (saved for undo).
+        /// The node's name (saved for undo / labels).
         name: String,
         /// The node's class name (saved for undo).
         class_name: String,
+        /// The full removed subtree — name, class, properties, and children —
+        /// captured on the first execute so undo restores the node exactly
+        /// (properties + descendants), not a bare empty node (pat-undoredo).
+        captured: Option<CapturedNode>,
+        /// The removed node's index among its siblings, for order-preserving undo.
+        index: Option<usize>,
+        /// The id the node was restored under by the last undo. The arena assigns
+        /// a fresh id on re-add, so redo must remove THIS id, not the stale
+        /// original `node_id`.
+        restored_id: Option<NodeId>,
     },
     /// Reparent a node to a new parent.
     ReparentNode {
@@ -113,6 +613,12 @@ pub enum EditorCommand {
         new_parent_id: NodeId,
         /// The old parent (populated on execute).
         old_parent_id: Option<NodeId>,
+        /// When true, the node's local transform is adjusted after reparenting
+        /// so its global (on-screen) transform is preserved.
+        keep_transform: bool,
+        /// The node's local (position, rotation, scale) captured before a
+        /// keep-transform reparent, so undo can restore it.
+        saved_transform: Option<(gdcore::math::Vector2, f32, gdcore::math::Vector2)>,
     },
     /// Rename a node.
     RenameNode {
@@ -140,6 +646,10 @@ pub enum EditorCommand {
         created_ids: Vec<NodeId>,
         /// The root node of the instanced scene (populated on execute).
         root_id: Option<NodeId>,
+        /// The originating `.tscn` path recorded on the instanced root for the
+        /// scene-tree instance indicator. `None` for in-memory sources (which
+        /// fall back to a generic "instanced" marker).
+        source_path: Option<String>,
     },
     TileMapPaint {
         node_id: NodeId,
@@ -165,6 +675,169 @@ pub enum EditorCommand {
         old_height: usize,
         old_cells: Vec<i32>,
     },
+    /// A whole-animation snapshot edit (pat-0q2kx.12).
+    ///
+    /// Animation edits live in `EditorState::animations`, not the scene tree, so
+    /// the [`execute`](Self::execute)/[`undo`](Self::undo) pair — which only
+    /// takes a `SceneTree` — cannot reverse them. This follows the existing
+    /// `execute_tilemap`/`undo_tilemap` precedent for a second store, but stores
+    /// before/after snapshots so ONE variant covers every animation edit
+    /// (keyframe add/remove, track add/delete/reorder) instead of needing a
+    /// command per edit kind. Animations are small, so the copy is cheap.
+    AnimationEdit {
+        /// The animation's name — the key into the animation map.
+        animation: String,
+        /// The animation exactly as it was before the edit. `None` when the
+        /// animation did not exist yet, so undo removes it entirely.
+        before: Option<Box<gdscene::animation::Animation>>,
+        /// The animation as it is after the edit. `None` when the edit DELETED
+        /// it, so redo removes it again (pat-mgixk.15).
+        ///
+        /// Symmetric with `before` on purpose: with both sides optional this one
+        /// variant covers create (`before: None`), delete (`after: None`) and
+        /// every in-place mutation, which is what lets `api_delete_animation`
+        /// be undoable without a second command kind.
+        after: Option<Box<gdscene::animation::Animation>>,
+        /// Human-readable label for the History dock.
+        label: String,
+    },
+    /// Paste clipboard entries under a parent (pat-0q2kx.12).
+    ///
+    /// Pushed already-executed by `POST /api/node/paste` (the nodes are in the
+    /// tree by then), so `created_ids` is authoritative for undo. Redo re-pastes
+    /// from `entries` and refreshes `created_ids` with the new node ids.
+    PasteNodes {
+        /// The parent the entries were pasted under.
+        parent_id: NodeId,
+        /// The clipboard contents, kept so redo can re-create the nodes.
+        entries: Vec<crate::editor_server::ClipboardEntry>,
+        /// The nodes created by the paste — what undo removes.
+        created_ids: Vec<NodeId>,
+        /// Every node id of each pasted subtree, pre-order, one list per entry.
+        ///
+        /// Redo re-creates the nodes under THESE ids, so a redone paste is the
+        /// same objects again — as in Godot, where the paste's UndoRedo action
+        /// keeps the duplicated nodes alive (`add_do_reference`) and redo
+        /// re-adds those very instances (editor/docks/scene_tree_dock.cpp
+        /// `_paste_nodes`). Re-pasting under fresh ids made a redone paste a
+        /// different node than the one the user (or a later history step, or a
+        /// script holding its instance id) had seen.
+        subtree_ids: Vec<Vec<NodeId>>,
+    },
+    /// Move a child node to a new index within its parent's child list.
+    MoveNode {
+        /// The parent node.
+        parent_id: NodeId,
+        /// The child node to move.
+        child_id: NodeId,
+        /// The target index.
+        new_index: usize,
+        /// The original index (populated on execute).
+        old_index: usize,
+    },
+    /// Connect a signal on a source node.
+    ConnectSignal {
+        /// Source node emitting the signal.
+        source_id: NodeId,
+        /// Signal name.
+        signal_name: String,
+        /// Target object ID (as raw u64).
+        target_object_id: u64,
+        /// Method name on the target.
+        method: String,
+        /// The `CONNECT_*` flags and binds the connection was made with.
+        options: ConnectOptions,
+    },
+    /// Disconnect a signal on a source node.
+    DisconnectSignal {
+        /// Source node.
+        source_id: NodeId,
+        /// Signal name.
+        signal_name: String,
+        /// Target object ID (as raw u64).
+        target_object_id: u64,
+        /// Method name on the target.
+        method: String,
+        /// The options the removed connection carried (populated on execute).
+        ///
+        /// ⚠️ Load-bearing for undo: reconnecting with `ConnectOptions::default()`
+        /// would drop whatever Deferred/One Shot/binds the user had chosen, and
+        /// the undo would *look* like it worked.
+        removed: Option<ConnectOptions>,
+    },
+    /// Add a node to a named group.
+    AddToGroup {
+        /// The node.
+        node_id: NodeId,
+        /// The group name.
+        group: String,
+    },
+    /// Remove a node from a named group.
+    RemoveFromGroup {
+        /// The node.
+        node_id: NodeId,
+        /// The group name.
+        group: String,
+    },
+    /// A compound command that groups multiple sub-commands as a single
+    /// undo/redo step.
+    Group {
+        /// Human-readable label for the compound operation.
+        label: String,
+        /// The sub-commands in execution order.
+        commands: Vec<EditorCommand>,
+    },
+}
+
+/// A captured node subtree (name, class, properties, and children), used to make
+/// node removal fully reversible: [`EditorCommand::RemoveNode`] captures it on
+/// execute so undo can restore the node exactly (pat-undoredo).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedNode {
+    name: String,
+    class_name: String,
+    props: Vec<(String, Variant)>,
+    children: Vec<CapturedNode>,
+}
+
+/// Recursively snapshots the subtree rooted at `id` (or `None` if it doesn't exist).
+fn capture_subtree(tree: &SceneTree, id: NodeId) -> Option<CapturedNode> {
+    let node = tree.get_node(id)?;
+    let name = node.name().to_string();
+    let class_name = node.class_name().to_string();
+    let props: Vec<(String, Variant)> = node
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let child_ids = node.children().to_vec();
+    let children = child_ids
+        .iter()
+        .filter_map(|c| capture_subtree(tree, *c))
+        .collect();
+    Some(CapturedNode {
+        name,
+        class_name,
+        props,
+        children,
+    })
+}
+
+/// Recursively re-creates a captured subtree under `parent`, returning the new
+/// root id. Properties and descendants are restored; ids are freshly assigned.
+fn restore_subtree(
+    tree: &mut SceneTree,
+    parent: NodeId,
+    cap: &CapturedNode,
+) -> EditorResult<NodeId> {
+    let mut node = Node::new(cap.name.as_str(), cap.class_name.as_str());
+    for (k, v) in &cap.props {
+        node.set_property(k, v.clone());
+    }
+    let new_id = tree.add_child(parent, node)?;
+    for child in &cap.children {
+        restore_subtree(tree, new_id, child)?;
+    }
+    Ok(new_id)
 }
 
 impl EditorCommand {
@@ -203,21 +876,66 @@ impl EditorCommand {
                 Ok(())
             }
             EditorCommand::RemoveNode {
-                node_id, parent_id, ..
+                node_id,
+                parent_id,
+                captured,
+                index,
+                restored_id,
+                ..
             } => {
-                // Save parent for undo.
-                *parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
-                tree.remove_node(*node_id)?;
-                tracing::debug!("RemoveNode {:?}", node_id);
+                // After an undo the node was re-created under a fresh id, so
+                // redo must remove THAT node, not the stale original id.
+                let target = (*restored_id).unwrap_or(*node_id);
+                // Save parent + sibling index for an order-preserving undo.
+                *parent_id = tree.get_node(target).and_then(|n| n.parent());
+                if let Some(pid) = *parent_id {
+                    *index = tree
+                        .get_node(pid)
+                        .and_then(|p| p.children().iter().position(|c| *c == target));
+                }
+                // Capture the full subtree once (first execute) so undo can
+                // restore properties + children, not just an empty node.
+                if captured.is_none() {
+                    *captured = capture_subtree(tree, target);
+                }
+                tree.remove_node(target)?;
+                *restored_id = None;
+                tracing::debug!("RemoveNode {:?}", target);
                 Ok(())
             }
             EditorCommand::ReparentNode {
                 node_id,
                 new_parent_id,
                 old_parent_id,
+                keep_transform,
+                saved_transform,
             } => {
+                use gdscene::node2d;
                 *old_parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
-                tree.reparent(*node_id, *new_parent_id)?;
+                if *keep_transform {
+                    // Capture the local transform for undo, and the global
+                    // transform to re-establish under the new parent.
+                    *saved_transform = Some((
+                        node2d::get_position(tree, *node_id),
+                        node2d::get_rotation(tree, *node_id),
+                        node2d::get_scale(tree, *node_id),
+                    ));
+                    let old_global = node2d::get_global_transform(tree, *node_id);
+                    tree.reparent(*node_id, *new_parent_id)?;
+                    // new_local = inverse(new_parent_global) * old_global keeps
+                    // the node's global transform unchanged.
+                    let parent_global = node2d::get_global_transform(tree, *new_parent_id);
+                    let new_local = parent_global.affine_inverse() * old_global;
+                    node2d::set_position(tree, *node_id, new_local.origin);
+                    node2d::set_rotation(tree, *node_id, new_local.x.y.atan2(new_local.x.x));
+                    node2d::set_scale(
+                        tree,
+                        *node_id,
+                        gdcore::math::Vector2::new(new_local.x.length(), new_local.y.length()),
+                    );
+                } else {
+                    tree.reparent(*node_id, *new_parent_id)?;
+                }
                 tracing::debug!("ReparentNode {:?} -> {:?}", node_id, new_parent_id);
                 Ok(())
             }
@@ -288,8 +1006,56 @@ impl EditorCommand {
                     Ok(new_id)
                 }
 
+                // Generate a name not already used by `siblings`.
+                fn unique_sibling_name(base: &str, siblings: &[String]) -> String {
+                    if !siblings.iter().any(|s| s == base) {
+                        return base.to_string();
+                    }
+                    let stem = base.trim_end_matches(|c: char| c.is_ascii_digit());
+                    let stem = if stem.is_empty() { base } else { stem };
+                    let mut n = 2;
+                    loop {
+                        let candidate = format!("{stem}{n}");
+                        if !siblings.iter().any(|s| s == &candidate) {
+                            return candidate;
+                        }
+                        n += 1;
+                    }
+                }
+
                 created_ids.clear();
-                duplicate_subtree(tree, *source_id, parent_id, created_ids)?;
+                let new_top = duplicate_subtree(tree, *source_id, parent_id, created_ids)?;
+
+                // Give the top-level duplicate a unique name among its siblings.
+                let unique = {
+                    let siblings: Vec<String> = tree
+                        .get_node(parent_id)
+                        .map(|p| {
+                            p.children()
+                                .iter()
+                                .filter(|&&c| c != new_top)
+                                .filter_map(|&c| tree.get_node(c).map(|n| n.name().to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let base = tree
+                        .get_node(new_top)
+                        .map(|n| n.name().to_string())
+                        .unwrap_or_default();
+                    unique_sibling_name(&base, &siblings)
+                };
+                if let Some(node) = tree.get_node_mut(new_top) {
+                    node.set_name(unique);
+                }
+
+                // Insert the duplicate immediately after the source (next sibling).
+                if let Some(src_idx) = tree
+                    .get_node(parent_id)
+                    .and_then(|p| p.children().iter().position(|&c| c == *source_id))
+                {
+                    let _ = tree.move_child(parent_id, new_top, src_idx + 1);
+                }
+
                 tracing::debug!("DuplicateNode {:?} -> {:?}", source_id, created_ids);
                 Ok(())
             }
@@ -298,19 +1064,51 @@ impl EditorCommand {
                 tscn_source,
                 created_ids,
                 root_id,
+                source_path,
             } => {
-                use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+                use gdscene::packed_scene::{
+                    add_packed_scene_to_tree, add_packed_scene_to_tree_from_res, PackedScene,
+                    INSTANCE_EXPANDED_KEY,
+                };
                 let packed = PackedScene::from_tscn(tscn_source).map_err(|e| {
                     gdcore::error::EngineError::InvalidOperation(format!(
                         "failed to parse tscn: {e}"
                     ))
                 })?;
-                let scene_root = add_packed_scene_to_tree(tree, *parent_id, &packed)?;
+                // 🔑 Expanded, as the editor's own Open builds a scene
+                // (pat-i5igl): the instance's nodes, owned by its root, are its
+                // FOREIGN nodes, and its own `instance=` sub-scenes are built
+                // too. The placeholder builder cannot do that, so a scene with
+                // an editable child of an instance — the platformer's
+                // player.tscn, whose `Robot` lives inside player.glb — failed
+                // with "parent path not found". A scene whose sub-scenes cannot
+                // be read still instances, as placeholders.
+                let scene_root = match add_packed_scene_to_tree_from_res(tree, *parent_id, &packed)
+                {
+                    Ok(root) => {
+                        if let Some(node) = tree.get_node_mut(root) {
+                            node.set_property(INSTANCE_EXPANDED_KEY, Variant::Bool(true));
+                        }
+                        root
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "InstanceScene: expanding failed ({e}); instancing placeholders"
+                        );
+                        add_packed_scene_to_tree(tree, *parent_id, &packed)?
+                    }
+                };
                 *root_id = Some(scene_root);
 
-                // Mark the instanced root with a source indicator for the UI.
+                // Record the originating scene path on the instanced root so
+                // the scene-tree instance indicator can show where the
+                // instance came from. In-memory sources without a path fall
+                // back to a generic marker.
                 if let Some(node) = tree.get_node_mut(scene_root) {
-                    node.set_property("_instance_source", Variant::String("instanced".to_string()));
+                    let marker = source_path
+                        .clone()
+                        .unwrap_or_else(|| "instanced".to_string());
+                    node.set_property("_instance_source", Variant::String(marker));
                 }
 
                 // Collect all created node IDs for undo.
@@ -334,7 +1132,179 @@ impl EditorCommand {
             EditorCommand::TileMapPaint { .. }
             | EditorCommand::TileMapFill { .. }
             | EditorCommand::TileMapResize { .. } => Ok(()),
+            // Animation edits are replayed against the animation map by
+            // `execute_animation`, not the scene tree.
+            EditorCommand::AnimationEdit { .. } => Ok(()),
+            EditorCommand::PasteNodes {
+                parent_id,
+                entries,
+                created_ids,
+                subtree_ids,
+            } => {
+                // Redo: re-create the pasted nodes. The originals were removed
+                // by `undo`; they come back under their ORIGINAL ids (see
+                // `subtree_ids`), so redo restores the very nodes the paste
+                // made rather than look-alikes.
+                let mut fresh = Vec::with_capacity(entries.len());
+                for (i, e) in entries.iter().enumerate() {
+                    let reuse = subtree_ids.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                    fresh.push(crate::editor_server::paste_entry_reusing_ids(
+                        tree, *parent_id, e, reuse,
+                    )?);
+                }
+                *created_ids = fresh;
+                tracing::debug!("PasteNodes {} entries under {:?}", entries.len(), parent_id);
+                Ok(())
+            }
+            EditorCommand::MoveNode {
+                parent_id,
+                child_id,
+                new_index,
+                old_index,
+            } => {
+                // Find the current index of the child.
+                let parent = tree.get_node(*parent_id).ok_or_else(|| {
+                    gdcore::error::EngineError::NotFound("parent not found".into())
+                })?;
+                let children = parent.children();
+                *old_index = children.iter().position(|&c| c == *child_id).unwrap_or(0);
+                tree.move_child(*parent_id, *child_id, *new_index)?;
+                tracing::debug!(
+                    "MoveNode {:?} index {} -> {}",
+                    child_id,
+                    old_index,
+                    new_index
+                );
+                Ok(())
+            }
+            EditorCommand::ConnectSignal {
+                source_id,
+                signal_name,
+                target_object_id,
+                method,
+                options,
+            } => {
+                let conn = options.to_connection(*target_object_id, method);
+                tree.connect_signal(*source_id, signal_name, conn);
+                tracing::debug!(
+                    "ConnectSignal {:?}.{} -> {}::{} flags={}",
+                    source_id,
+                    signal_name,
+                    target_object_id,
+                    method,
+                    options.godot_flags()
+                );
+                Ok(())
+            }
+            EditorCommand::DisconnectSignal {
+                source_id,
+                signal_name,
+                target_object_id,
+                method,
+                removed,
+            } => {
+                // Capture the flags BEFORE removing the connection — once it is
+                // gone there is nothing left to read them off, and undo would
+                // have to guess.
+                *removed = tree
+                    .signal_store(*source_id)
+                    .and_then(|store| store.get_signal(signal_name))
+                    .and_then(|signal| {
+                        signal.connections().iter().find(|conn| {
+                            conn.target_id.raw() == *target_object_id && conn.method == *method
+                        })
+                    })
+                    .map(ConnectOptions::from_connection);
+                let store = tree.signal_store_mut(*source_id);
+                store.disconnect(
+                    signal_name,
+                    gdcore::id::ObjectId::from_raw(*target_object_id),
+                    method,
+                );
+                tracing::debug!(
+                    "DisconnectSignal {:?}.{} -> {}::{}",
+                    source_id,
+                    signal_name,
+                    target_object_id,
+                    method
+                );
+                Ok(())
+            }
+            EditorCommand::AddToGroup { node_id, group } => {
+                tree.add_to_group(*node_id, group)?;
+                tracing::debug!("AddToGroup {:?} -> '{}'", node_id, group);
+                Ok(())
+            }
+            EditorCommand::RemoveFromGroup { node_id, group } => {
+                tree.remove_from_group(*node_id, group)?;
+                tracing::debug!("RemoveFromGroup {:?} <- '{}'", node_id, group);
+                Ok(())
+            }
+            EditorCommand::Group { commands, label } => {
+                tracing::debug!("Group '{}' executing {} commands", label, commands.len());
+                for cmd in commands.iter_mut() {
+                    cmd.execute(tree)?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    /// Applies the animation-map half of this command (pat-0q2kx.12).
+    ///
+    /// Mirrors [`execute_tilemap`](Self::execute_tilemap) for
+    /// `EditorState::animations`: every non-animation command is a no-op, so
+    /// `undo_one`/`redo_one` can call this unconditionally.
+    pub fn execute_animation(
+        &mut self,
+        animations: &mut std::collections::HashMap<String, gdscene::animation::Animation>,
+    ) -> EditorResult<()> {
+        if let EditorCommand::AnimationEdit {
+            animation, after, ..
+        } = self
+        {
+            match after {
+                Some(next) => {
+                    animations.insert(animation.clone(), (**next).clone());
+                }
+                // The edit deleted the animation, so redoing it deletes again.
+                // `as_str()` rather than relying on a `&mut String` ->
+                // `&String` reborrow being inferred at the `Borrow<Q>` call,
+                // matching `undo_animation` below.
+                None => {
+                    animations.remove(animation.as_str());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reverses the animation-map half of this command (pat-0q2kx.12).
+    ///
+    /// A `before` of `None` means the animation did not exist prior to the
+    /// edit, so undoing removes it rather than restoring an empty one. The
+    /// mirror case — `after: None`, a deletion — is handled by
+    /// [`execute_animation`](Self::execute_animation).
+    pub fn undo_animation(
+        &mut self,
+        animations: &mut std::collections::HashMap<String, gdscene::animation::Animation>,
+    ) -> EditorResult<()> {
+        if let EditorCommand::AnimationEdit {
+            animation, before, ..
+        } = self
+        {
+            match before {
+                Some(prev) => {
+                    animations.insert(animation.clone(), (**prev).clone());
+                }
+                None => {
+                    // `as_str()` rather than relying on a `&mut String` -> `&String`
+                    // reborrow being inferred at the `Borrow<Q>` call.
+                    animations.remove(animation.as_str());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn execute_tilemap(
@@ -399,6 +1369,16 @@ impl EditorCommand {
                 }
                 Ok(())
             }
+            // A compound edit forwards to its parts, so a line or bucket fill
+            // built from many `TileMapPaint`s applies as one action and takes
+            // one Ctrl-Z (pat-0q2kx.75). Without this arm a `Group` fell into
+            // the catch-all below and silently did nothing to the grid.
+            EditorCommand::Group { commands, .. } => {
+                for cmd in commands.iter_mut() {
+                    cmd.execute_tilemap(store)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -441,12 +1421,21 @@ impl EditorCommand {
                 }
                 Ok(())
             }
+            // Reverse order, mirroring `undo` — two paints on the same cell in
+            // one group must be undone newest-first or the older one's saved
+            // value wins and the cell ends up wrong.
+            EditorCommand::Group { commands, .. } => {
+                for cmd in commands.iter().rev() {
+                    cmd.undo_tilemap(store)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
 
     /// Reverses this command on the given scene tree.
-    pub fn undo(&self, tree: &mut SceneTree) -> EditorResult<()> {
+    pub fn undo(&mut self, tree: &mut SceneTree) -> EditorResult<()> {
         match self {
             EditorCommand::SetProperty {
                 node_id,
@@ -470,23 +1459,46 @@ impl EditorCommand {
                 parent_id,
                 name,
                 class_name,
+                captured,
+                index,
+                restored_id,
                 ..
             } => {
-                // Re-add the node under its old parent. Note: the original
-                // NodeId cannot be reused because the arena assigns fresh IDs.
-                if let Some(pid) = parent_id {
-                    let node = Node::new(name.as_str(), class_name.as_str());
-                    tree.add_child(*pid, node)?;
+                // Re-add the node under its old parent, restoring its full
+                // subtree (properties + children) from the capture. The arena
+                // assigns a fresh id, so record it for a subsequent redo.
+                if let Some(pid) = *parent_id {
+                    let new_id = if let Some(cap) = captured {
+                        restore_subtree(tree, pid, cap)?
+                    } else {
+                        // Fallback for commands constructed without a capture.
+                        let node = Node::new(name.as_str(), class_name.as_str());
+                        tree.add_child(pid, node)?
+                    };
+                    // Restore the original sibling order where known.
+                    if let Some(idx) = *index {
+                        let _ = tree.move_child(pid, new_id, idx);
+                    }
+                    *restored_id = Some(new_id);
                 }
                 Ok(())
             }
             EditorCommand::ReparentNode {
                 node_id,
                 old_parent_id,
+                saved_transform,
                 ..
             } => {
                 if let Some(old_pid) = old_parent_id {
                     tree.reparent(*node_id, *old_pid)?;
+                }
+                // Restore the local transform captured before a keep-transform
+                // reparent so undo is an exact inverse.
+                if let Some((pos, rot, scl)) = saved_transform {
+                    use gdscene::node2d;
+                    node2d::set_position(tree, *node_id, *pos);
+                    node2d::set_rotation(tree, *node_id, *rot);
+                    node2d::set_scale(tree, *node_id, *scl);
                 }
                 Ok(())
             }
@@ -499,7 +1511,10 @@ impl EditorCommand {
                 node.set_name(old_name.as_str());
                 Ok(())
             }
+            // Reversed by `undo_animation` against the animation map.
+            EditorCommand::AnimationEdit { .. } => Ok(()),
             EditorCommand::DuplicateNode { created_ids, .. }
+            | EditorCommand::PasteNodes { created_ids, .. }
             | EditorCommand::InstanceScene { created_ids, .. } => {
                 // Remove all created nodes in reverse order (children first).
                 for &id in created_ids.iter().rev() {
@@ -510,6 +1525,111 @@ impl EditorCommand {
             EditorCommand::TileMapPaint { .. }
             | EditorCommand::TileMapFill { .. }
             | EditorCommand::TileMapResize { .. } => Ok(()),
+            EditorCommand::MoveNode {
+                parent_id,
+                child_id,
+                old_index,
+                ..
+            } => {
+                tree.move_child(*parent_id, *child_id, *old_index)?;
+                Ok(())
+            }
+            EditorCommand::ConnectSignal {
+                source_id,
+                signal_name,
+                target_object_id,
+                method,
+                // A connection is identified by (signal, target, method); the
+                // flags play no part in finding it again.
+                options: _,
+            } => {
+                // Undo connect = disconnect.
+                let store = tree.signal_store_mut(*source_id);
+                store.disconnect(
+                    signal_name,
+                    gdcore::id::ObjectId::from_raw(*target_object_id),
+                    method,
+                );
+                Ok(())
+            }
+            EditorCommand::DisconnectSignal {
+                source_id,
+                signal_name,
+                target_object_id,
+                method,
+                removed,
+            } => {
+                // Undo disconnect = reconnect, WITH the flags it had. `execute`
+                // recorded them; `None` means the connection was not there to
+                // begin with, so defaults are the honest answer.
+                let conn = removed
+                    .clone()
+                    .unwrap_or_default()
+                    .to_connection(*target_object_id, method);
+                tree.connect_signal(*source_id, signal_name, conn);
+                Ok(())
+            }
+            EditorCommand::AddToGroup { node_id, group } => {
+                // Undo add = remove.
+                tree.remove_from_group(*node_id, group)?;
+                Ok(())
+            }
+            EditorCommand::RemoveFromGroup { node_id, group } => {
+                // Undo remove = add.
+                tree.add_to_group(*node_id, group)?;
+                Ok(())
+            }
+            EditorCommand::Group { commands, .. } => {
+                // Undo in reverse order.
+                for cmd in commands.iter_mut().rev() {
+                    cmd.undo(tree)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns a human-readable label for this command.
+    pub fn label(&self) -> String {
+        match self {
+            EditorCommand::SetProperty { property, .. } => format!("Set {property}"),
+            EditorCommand::AddNode {
+                name, class_name, ..
+            } => format!("Add {class_name} '{name}'"),
+            EditorCommand::RemoveNode { name, .. } => format!("Remove '{name}'"),
+            EditorCommand::ReparentNode { .. } => "Reparent node".into(),
+            EditorCommand::RenameNode {
+                old_name, new_name, ..
+            } => {
+                format!("Rename '{old_name}' -> '{new_name}'")
+            }
+            EditorCommand::DuplicateNode { .. } => "Duplicate node".into(),
+            EditorCommand::InstanceScene { .. } => "Instance scene".into(),
+            EditorCommand::TileMapPaint { .. } => "Paint tile".into(),
+            EditorCommand::TileMapFill { .. } => "Fill tiles".into(),
+            EditorCommand::TileMapResize { .. } => "Resize tilemap".into(),
+            EditorCommand::AnimationEdit { label, .. } => label.clone(),
+            EditorCommand::PasteNodes { created_ids, .. } => {
+                format!("Paste {} node(s)", created_ids.len())
+            }
+            EditorCommand::MoveNode { .. } => "Move node".into(),
+            EditorCommand::ConnectSignal {
+                signal_name,
+                method,
+                ..
+            } => {
+                format!("Connect {signal_name} -> {method}")
+            }
+            EditorCommand::DisconnectSignal {
+                signal_name,
+                method,
+                ..
+            } => {
+                format!("Disconnect {signal_name} -> {method}")
+            }
+            EditorCommand::AddToGroup { group, .. } => format!("Add to group '{group}'"),
+            EditorCommand::RemoveFromGroup { group, .. } => format!("Remove from group '{group}'"),
+            EditorCommand::Group { label, .. } => label.clone(),
         }
     }
 }
@@ -521,8 +1641,14 @@ impl EditorCommand {
 pub struct Editor {
     /// The scene tree being edited.
     tree: SceneTree,
-    /// The currently selected node, if any.
-    selected_node: Option<NodeId>,
+    /// The current selection set, in selection order. This is the single
+    /// source of truth shared by the dock, viewport, and inspector; the last
+    /// entry is the active/primary selection. Empty when nothing is selected.
+    selection: Vec<NodeId>,
+    /// When `Some`, the inspector is pinned/locked to this node: it keeps that
+    /// object inspected even as the scene-tree selection changes. `None` means
+    /// the inspector follows the active selection. See [`Editor::pin_inspector`].
+    inspector_pin: Option<NodeId>,
     /// Undo stack (most recent command on top).
     undo_stack: Vec<EditorCommand>,
     /// Redo stack (cleared on new command).
@@ -534,7 +1660,7 @@ pub struct Editor {
 impl std::fmt::Debug for Editor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Editor")
-            .field("selected_node", &self.selected_node)
+            .field("selection", &self.selection)
             .field("undo_depth", &self.undo_stack.len())
             .field("redo_depth", &self.redo_stack.len())
             .field("plugin_count", &self.plugins.len())
@@ -547,7 +1673,8 @@ impl Editor {
     pub fn new(tree: SceneTree) -> Self {
         Self {
             tree,
-            selected_node: None,
+            selection: Vec::new(),
+            inspector_pin: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             plugins: Vec::new(),
@@ -564,20 +1691,124 @@ impl Editor {
         &mut self.tree
     }
 
-    /// Selects a node by ID.
+    /// Selects a single node, replacing any existing selection (a plain click
+    /// in the dock or viewport).
     pub fn select_node(&mut self, id: NodeId) {
-        self.selected_node = Some(id);
+        self.selection = vec![id];
         tracing::debug!("Selected node {:?}", id);
     }
 
-    /// Clears the current selection.
+    /// Clears the entire selection.
     pub fn deselect(&mut self) {
-        self.selected_node = None;
+        self.selection.clear();
     }
 
-    /// Returns the currently selected node ID.
+    /// Returns the active/primary selected node — the most recently added
+    /// entry in the selection set — or `None` when nothing is selected. This
+    /// is what the inspector header and single-node operations act on.
     pub fn selected_node(&self) -> Option<NodeId> {
-        self.selected_node
+        self.selection.last().copied()
+    }
+
+    /// Returns the full selection set in selection order. This is the single
+    /// source of truth the dock, viewport, and inspector all read, so their
+    /// highlighting stays synchronized.
+    pub fn selected_nodes(&self) -> &[NodeId] {
+        &self.selection
+    }
+
+    /// Returns `true` if `id` is part of the current selection.
+    pub fn is_selected(&self, id: NodeId) -> bool {
+        self.selection.contains(&id)
+    }
+
+    /// Replaces the selection with the given set, preserving order and dropping
+    /// duplicates (keeping first occurrence).
+    pub fn select_nodes(&mut self, ids: impl IntoIterator<Item = NodeId>) {
+        let mut next = Vec::new();
+        for id in ids {
+            if !next.contains(&id) {
+                next.push(id);
+            }
+        }
+        self.selection = next;
+    }
+
+    /// Toggles `id` in the selection (ctrl/cmd-click additive semantics):
+    /// removes it if already selected, otherwise appends it as the new active
+    /// selection. Returns `true` if `id` ended up selected.
+    pub fn toggle_select(&mut self, id: NodeId) -> bool {
+        if let Some(pos) = self.selection.iter().position(|&n| n == id) {
+            self.selection.remove(pos);
+            false
+        } else {
+            self.selection.push(id);
+            true
+        }
+    }
+
+    /// Selects the contiguous range between the current active selection (the
+    /// anchor) and `target` within `order` (shift-click range semantics). The
+    /// range replaces the selection. `order` is the visible row ordering (e.g.
+    /// [`SceneTree::all_nodes_in_tree_order`]). When there is no anchor, or
+    /// either endpoint is absent from `order`, falls back to selecting just
+    /// `target`.
+    pub fn select_range(&mut self, target: NodeId, order: &[NodeId]) {
+        let anchor = match self.selected_node() {
+            Some(a) => a,
+            None => {
+                self.select_node(target);
+                return;
+            }
+        };
+        let ai = order.iter().position(|&n| n == anchor);
+        let ti = order.iter().position(|&n| n == target);
+        match (ai, ti) {
+            (Some(a), Some(t)) => {
+                let (lo, hi) = if a <= t { (a, t) } else { (t, a) };
+                // Keep the range ordered so the anchor stays first and `target`
+                // becomes the active (last) selection.
+                let mut range: Vec<NodeId> = order[lo..=hi].to_vec();
+                if a > t {
+                    range.reverse();
+                }
+                self.selection = range;
+            }
+            _ => self.select_node(target),
+        }
+    }
+
+    /// Returns the node the inspector is currently showing. When the inspector
+    /// is pinned (see [`Editor::pin_inspector`]) this is the pinned node and
+    /// stays fixed as the scene-tree selection changes; otherwise it follows
+    /// the active selection ([`Editor::selected_node`]).
+    pub fn inspected_node(&self) -> Option<NodeId> {
+        match self.inspector_pin {
+            Some(id) => Some(id),
+            None => self.selected_node(),
+        }
+    }
+
+    /// Pins/locks the inspector to the currently inspected object so it keeps
+    /// showing that object even as the scene-tree selection moves elsewhere.
+    /// No-op (leaves the inspector unpinned) when nothing is currently
+    /// inspected. Re-pinning while already pinned re-captures the current
+    /// selection as the pin target.
+    pub fn pin_inspector(&mut self) {
+        // Pin the object the inspector is showing right now. When already
+        // pinned this is the pinned node, so the pin stays put; when following
+        // selection it captures the active node.
+        self.inspector_pin = self.inspected_node();
+    }
+
+    /// Unpins the inspector so it resumes following the scene-tree selection.
+    pub fn unpin_inspector(&mut self) {
+        self.inspector_pin = None;
+    }
+
+    /// Whether the inspector is currently pinned/locked to a specific object.
+    pub fn is_inspector_pinned(&self) -> bool {
+        self.inspector_pin.is_some()
     }
 
     /// Executes an editor command and pushes it onto the undo stack.
@@ -592,7 +1823,7 @@ impl Editor {
 
     /// Undoes the most recent command.
     pub fn undo(&mut self) -> EditorResult<()> {
-        let command = self.undo_stack.pop().ok_or(EditorError::NothingToUndo)?;
+        let mut command = self.undo_stack.pop().ok_or(EditorError::NothingToUndo)?;
         command.undo(&mut self.tree)?;
         self.redo_stack.push(command);
         Ok(())
@@ -632,14 +1863,157 @@ impl Editor {
         self.plugins.iter().map(|p| p.name()).collect()
     }
 
+    /// Enables a plugin by name, calling its `on_enable` hook.
+    pub fn enable_plugin(&mut self, name: &str) -> bool {
+        for p in &mut self.plugins {
+            if p.name() == name {
+                p.on_enable();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Disables a plugin by name, calling its `on_disable` hook.
+    pub fn disable_plugin(&mut self, name: &str) -> bool {
+        for p in &mut self.plugins {
+            if p.name() == name {
+                p.on_disable();
+                return true;
+            }
+        }
+        false
+    }
+
     /// Notifies all plugins that a node was selected.
     pub fn notify_selection_changed(&mut self) {
         // We need to call plugin methods but can't borrow self mutably
         // while iterating plugins. Collect node id first.
-        let selected = self.selected_node;
+        let selected = self.selected_node();
         for plugin in &mut self.plugins {
             plugin.on_selection_changed(selected);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Extended undo/redo features
+    // -------------------------------------------------------------------
+
+    /// Returns `true` if there is at least one undoable command.
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Returns `true` if there is at least one redoable command.
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Clears both undo and redo history.
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// Returns labels for the undo history, most recent first.
+    pub fn undo_history(&self) -> Vec<String> {
+        self.undo_stack.iter().rev().map(|c| c.label()).collect()
+    }
+
+    /// Returns labels for the redo history, most recent first.
+    pub fn redo_history(&self) -> Vec<String> {
+        self.redo_stack.iter().rev().map(|c| c.label()).collect()
+    }
+
+    /// Undoes multiple commands at once, returning the number actually undone.
+    pub fn undo_many(&mut self, count: usize) -> usize {
+        let mut undone = 0;
+        for _ in 0..count {
+            if self.undo().is_ok() {
+                undone += 1;
+            } else {
+                break;
+            }
+        }
+        undone
+    }
+
+    /// Redoes multiple commands at once, returning the number actually redone.
+    pub fn redo_many(&mut self, count: usize) -> usize {
+        let mut redone = 0;
+        for _ in 0..count {
+            if self.redo().is_ok() {
+                redone += 1;
+            } else {
+                break;
+            }
+        }
+        redone
+    }
+
+    /// Executes a command, merging it with the previous command if both are
+    /// `SetProperty` on the same node and property.
+    ///
+    /// This avoids flooding the undo stack when the user drags a slider or
+    /// types into a text field — each keystroke would otherwise create a
+    /// separate undo entry.
+    pub fn merge_or_execute(&mut self, mut command: EditorCommand) -> EditorResult<()> {
+        if let EditorCommand::SetProperty {
+            node_id,
+            ref property,
+            ..
+        } = command
+        {
+            if let Some(EditorCommand::SetProperty {
+                node_id: prev_node,
+                property: ref prev_prop,
+                ..
+            }) = self.undo_stack.last()
+            {
+                if node_id == *prev_node && property == prev_prop {
+                    // Merge: keep the old_value from the previous command,
+                    // apply the new value to the tree, and push directly
+                    // (bypassing EditorCommand::execute which would overwrite old_value).
+                    let prev = self.undo_stack.pop().unwrap();
+                    if let EditorCommand::SetProperty {
+                        old_value: prev_old,
+                        ..
+                    } = prev
+                    {
+                        if let EditorCommand::SetProperty {
+                            node_id,
+                            ref property,
+                            ref new_value,
+                            ref mut old_value,
+                        } = command
+                        {
+                            let node = self.tree.get_node_mut(node_id).ok_or_else(|| {
+                                gdcore::error::EngineError::NotFound("node not found".into())
+                            })?;
+                            node.set_property(property, new_value.clone());
+                            *old_value = prev_old;
+                        }
+                    }
+                    self.undo_stack.push(command);
+                    self.redo_stack.clear();
+                    return Ok(());
+                }
+            }
+        }
+        self.execute(command)
+    }
+
+    /// Executes a group of commands as a single undo/redo step.
+    pub fn execute_group(
+        &mut self,
+        label: impl Into<String>,
+        commands: Vec<EditorCommand>,
+    ) -> EditorResult<()> {
+        let group = EditorCommand::Group {
+            label: label.into(),
+            commands,
+        };
+        self.execute(group)
     }
 }
 
@@ -650,6 +2024,12 @@ impl Editor {
 pub trait EditorPlugin {
     /// Returns the plugin's display name.
     fn name(&self) -> &str;
+
+    /// Called when the plugin is enabled.
+    fn on_enable(&mut self) {}
+
+    /// Called when the plugin is disabled.
+    fn on_disable(&mut self) {}
 
     /// Called when the selected node changes.
     fn on_selection_changed(&mut self, _selected: Option<NodeId>) {}
@@ -681,6 +2061,50 @@ mod tests {
         assert_eq!(editor.selected_node(), Some(root));
         editor.deselect();
         assert_eq!(editor.selected_node(), None);
+    }
+
+    #[test]
+    fn inspector_pin_lock_holds_selection() {
+        // The pin/lock toggle keeps the current object inspected even as the
+        // scene-tree selection changes; unpinning resumes following selection.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree.add_child(root, Node::new("A", "Node2D")).unwrap();
+        let b = tree.add_child(root, Node::new("B", "Node2D")).unwrap();
+        let mut editor = Editor::new(tree);
+
+        // Unpinned, the inspector follows the active selection.
+        editor.select_node(a);
+        assert!(!editor.is_inspector_pinned());
+        assert_eq!(editor.inspected_node(), Some(a));
+
+        // Pinning locks the inspector to A.
+        editor.pin_inspector();
+        assert!(editor.is_inspector_pinned());
+
+        // Selecting B in the scene tree moves the selection but the pinned
+        // inspector keeps showing A.
+        editor.select_node(b);
+        assert_eq!(
+            editor.selected_node(),
+            Some(b),
+            "tree selection follows to B"
+        );
+        assert_eq!(
+            editor.inspected_node(),
+            Some(a),
+            "pinned inspector keeps showing A"
+        );
+
+        // Unpinning resumes following the selection, so the inspector now
+        // shows B.
+        editor.unpin_inspector();
+        assert!(!editor.is_inspector_pinned());
+        assert_eq!(
+            editor.inspected_node(),
+            Some(b),
+            "unpinning resumes following selection"
+        );
     }
 
     #[test]
@@ -755,6 +2179,9 @@ mod tests {
                 parent_id: None,
                 name: "Main".to_string(),
                 class_name: "Node".to_string(),
+                captured: None,
+                index: None,
+                restored_id: None,
             })
             .unwrap();
 
@@ -784,6 +2211,8 @@ mod tests {
                 node_id: c_id,
                 new_parent_id: b_id,
                 old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
             })
             .unwrap();
 
@@ -792,6 +2221,136 @@ mod tests {
         // Undo.
         editor.undo().unwrap();
         assert_eq!(editor.tree().get_node(c_id).unwrap().parent(), Some(a_id));
+    }
+
+    /// Unit-level coverage for the "Reparent" scene-tree operation
+    /// (bead scene-tree-ops-reparent-node / pat-94ac2): reparenting must
+    /// (1) move the node and its whole subtree under the target parent,
+    /// (2) reject reparenting a node into its own descendant, and
+    /// (3) preserve the node's global transform when requested.
+    ///
+    /// Named distinctly from the crate's HTTP-level `scene_tree_reparent_node`
+    /// acceptance test (in `editor_server`) so a `-p gdeditor
+    /// scene_tree_reparent_node` filter resolves to exactly one test.
+    #[test]
+    fn reparent_command_subtree_cycle_and_keep_transform() {
+        use gdcore::math::Vector2;
+        use gdscene::node2d;
+
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        // Build: Main -> A(100,50) -> C ;  Main -> B(10,20)
+        let a = editor
+            .tree_mut()
+            .add_child(main_id, Node::new("A", "Node2D"))
+            .unwrap();
+        let c = editor
+            .tree_mut()
+            .add_child(a, Node::new("C", "Node2D"))
+            .unwrap();
+        let b = editor
+            .tree_mut()
+            .add_child(main_id, Node::new("B", "Node2D"))
+            .unwrap();
+        node2d::set_position(editor.tree_mut(), a, Vector2::new(100.0, 50.0));
+        node2d::set_position(editor.tree_mut(), b, Vector2::new(10.0, 20.0));
+
+        // (1) Subtree preservation: reparent A under B; C stays A's child.
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: b,
+                old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
+            })
+            .unwrap();
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(b),
+            "A is reparented under B"
+        );
+        assert!(
+            editor.tree().get_node(b).unwrap().children().contains(&a),
+            "A is a child of B"
+        );
+        assert_eq!(
+            editor.tree().get_node(c).unwrap().parent(),
+            Some(a),
+            "C subtree is preserved under A"
+        );
+
+        // (2) Reject reparenting a node into its own descendant.
+        let rejected = editor.execute(EditorCommand::ReparentNode {
+            node_id: a,
+            new_parent_id: c,
+            old_parent_id: None,
+            keep_transform: false,
+            saved_transform: None,
+        });
+        assert!(
+            rejected.is_err(),
+            "reparenting A into its descendant C must be rejected"
+        );
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(b),
+            "A is unchanged after the rejected reparent"
+        );
+
+        // (3) Preserve global transform when requested. Move A back under Main
+        // with a known position, then reparent under B(10,20) keeping its
+        // global transform.
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: main_id,
+                old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
+            })
+            .unwrap();
+        node2d::set_position(editor.tree_mut(), a, Vector2::new(100.0, 50.0));
+        let global_before = node2d::get_global_transform(editor.tree(), a).origin;
+
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: b,
+                old_parent_id: None,
+                keep_transform: true,
+                saved_transform: None,
+            })
+            .unwrap();
+
+        let global_after = node2d::get_global_transform(editor.tree(), a).origin;
+        assert!(
+            (global_after.x - global_before.x).abs() < 1e-3
+                && (global_after.y - global_before.y).abs() < 1e-3,
+            "keep_transform preserves A's global position: before {global_before:?} after {global_after:?}"
+        );
+        // A's local position is now offset by B's position (100-10, 50-20).
+        let local_a = node2d::get_position(editor.tree(), a);
+        assert!(
+            (local_a.x - 90.0).abs() < 1e-3 && (local_a.y - 30.0).abs() < 1e-3,
+            "A local position is adjusted relative to B: {local_a:?}"
+        );
+
+        // Undo of the keep-transform reparent restores both parent and local
+        // position.
+        editor.undo().unwrap();
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(main_id),
+            "undo restores A under Main"
+        );
+        let restored = node2d::get_position(editor.tree(), a);
+        assert!(
+            (restored.x - 100.0).abs() < 1e-3 && (restored.y - 50.0).abs() < 1e-3,
+            "undo restores A's local position: {restored:?}"
+        );
     }
 
     #[test]
@@ -947,6 +2506,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -965,6 +2525,7 @@ position = Vector2(10, 20)
             tscn_source: INSTANCE_TSCN.to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         };
         cmd.execute(editor.tree_mut()).unwrap();
 
@@ -995,6 +2556,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -1017,6 +2579,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -1038,6 +2601,7 @@ position = Vector2(10, 20)
             tscn_source: "not valid tscn".to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         });
         assert!(result.is_err());
     }
@@ -1053,6 +2617,7 @@ position = Vector2(10, 20)
             tscn_source: INSTANCE_TSCN.to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         };
         cmd.execute(editor.tree_mut()).unwrap();
 
@@ -1133,5 +2698,844 @@ position = Vector2(10, 20)
         c.undo_tilemap(&mut s).unwrap();
         assert_eq!(s.get(n).unwrap().width, 5);
         assert_eq!(s.get(n).unwrap().get(4, 4), Some(7));
+    }
+
+    // ===== Batch 3: pat-0fa Plugin on_enable/on_disable =====
+
+    struct LifecyclePlugin {
+        enabled_count: Rc<Cell<u32>>,
+        disabled_count: Rc<Cell<u32>>,
+    }
+
+    impl EditorPlugin for LifecyclePlugin {
+        fn name(&self) -> &str {
+            "LifecyclePlugin"
+        }
+        fn on_enable(&mut self) {
+            self.enabled_count.set(self.enabled_count.get() + 1);
+        }
+        fn on_disable(&mut self) {
+            self.disabled_count.set(self.disabled_count.get() + 1);
+        }
+    }
+
+    #[test]
+    fn plugin_enable_disable_hooks() {
+        let mut editor = make_editor();
+        let en = Rc::new(Cell::new(0u32));
+        let dis = Rc::new(Cell::new(0u32));
+        let plugin = LifecyclePlugin {
+            enabled_count: en.clone(),
+            disabled_count: dis.clone(),
+        };
+        editor.add_plugin(Box::new(plugin));
+
+        assert!(editor.enable_plugin("LifecyclePlugin"));
+        assert_eq!(en.get(), 1);
+        assert_eq!(dis.get(), 0);
+
+        assert!(editor.disable_plugin("LifecyclePlugin"));
+        assert_eq!(dis.get(), 1);
+
+        // Non-existent plugin returns false
+        assert!(!editor.enable_plugin("NoSuchPlugin"));
+        assert!(!editor.disable_plugin("NoSuchPlugin"));
+    }
+
+    // ===== Undo/redo full parity tests (pat-l8nyi) =====
+
+    #[test]
+    fn can_undo_can_redo() {
+        let mut editor = make_editor();
+        assert!(!editor.can_undo());
+        assert!(!editor.can_redo());
+
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "x".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+
+        assert!(editor.can_undo());
+        assert!(!editor.can_redo());
+
+        editor.undo().unwrap();
+        assert!(!editor.can_undo());
+        assert!(editor.can_redo());
+    }
+
+    #[test]
+    fn clear_history() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "x".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+        editor.undo().unwrap();
+        assert!(editor.can_redo());
+
+        editor.clear_history();
+        assert!(!editor.can_undo());
+        assert!(!editor.can_redo());
+    }
+
+    #[test]
+    fn undo_redo_history_labels() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "hp".into(),
+                new_value: Variant::Int(10),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+        editor
+            .execute(EditorCommand::RenameNode {
+                node_id: main_id,
+                new_name: "Player".into(),
+                old_name: String::new(),
+            })
+            .unwrap();
+
+        let history = editor.undo_history();
+        assert_eq!(history.len(), 2);
+        assert!(history[0].contains("Rename"));
+        assert!(history[1].contains("Set hp"));
+
+        editor.undo().unwrap();
+        let redo_hist = editor.redo_history();
+        assert_eq!(redo_hist.len(), 1);
+        assert!(redo_hist[0].contains("Rename"));
+    }
+
+    #[test]
+    fn undo_many_and_redo_many() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        for i in 0..5 {
+            editor
+                .execute(EditorCommand::SetProperty {
+                    node_id: main_id,
+                    property: format!("p{i}"),
+                    new_value: Variant::Int(i),
+                    old_value: Variant::Nil,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(editor.undo_depth(), 5);
+        let undone = editor.undo_many(3);
+        assert_eq!(undone, 3);
+        assert_eq!(editor.undo_depth(), 2);
+        assert_eq!(editor.redo_depth(), 3);
+
+        let redone = editor.redo_many(10); // more than available
+        assert_eq!(redone, 3);
+        assert_eq!(editor.undo_depth(), 5);
+        assert_eq!(editor.redo_depth(), 0);
+    }
+
+    #[test]
+    fn merge_or_execute_merges_same_property() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        // First edit
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "speed".into(),
+                new_value: Variant::Int(10),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+
+        // Second edit on same property — should merge
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "speed".into(),
+                new_value: Variant::Int(20),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+
+        // Only one undo entry
+        assert_eq!(editor.undo_depth(), 1);
+
+        // Current value is 20
+        assert_eq!(
+            editor
+                .tree()
+                .get_node(main_id)
+                .unwrap()
+                .get_property("speed"),
+            Variant::Int(20)
+        );
+
+        // Undo should go back to original (Nil), not to 10
+        editor.undo().unwrap();
+        assert_eq!(
+            editor
+                .tree()
+                .get_node(main_id)
+                .unwrap()
+                .get_property("speed"),
+            Variant::Nil
+        );
+    }
+
+    #[test]
+    fn merge_or_execute_different_property_no_merge() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "a".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "b".into(),
+                new_value: Variant::Int(2),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+
+        // Different properties — no merge
+        assert_eq!(editor.undo_depth(), 2);
+    }
+
+    #[test]
+    fn move_node_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+
+        // Add two more children
+        editor
+            .execute(EditorCommand::AddNode {
+                parent_id: root,
+                name: "Child1".into(),
+                class_name: "Node".into(),
+                created_id: None,
+            })
+            .unwrap();
+        editor
+            .execute(EditorCommand::AddNode {
+                parent_id: root,
+                name: "Child2".into(),
+                class_name: "Node".into(),
+                created_id: None,
+            })
+            .unwrap();
+
+        let children: Vec<_> = editor.tree().get_node(root).unwrap().children().to_vec();
+        let last_child = *children.last().unwrap();
+
+        // Move last child to index 0
+        editor
+            .execute(EditorCommand::MoveNode {
+                parent_id: root,
+                child_id: last_child,
+                new_index: 0,
+                old_index: 0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            editor.tree().get_node(root).unwrap().children()[0],
+            last_child
+        );
+
+        // Undo should restore original order
+        editor.undo().unwrap();
+        let restored = editor.tree().get_node(root).unwrap().children().to_vec();
+        assert_eq!(restored, children);
+    }
+
+    #[test]
+    fn add_to_group_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        editor
+            .execute(EditorCommand::AddToGroup {
+                node_id: main_id,
+                group: "enemies".into(),
+            })
+            .unwrap();
+
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
+
+        editor.undo().unwrap();
+        assert!(!editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
+
+        editor.redo().unwrap();
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
+    }
+
+    #[test]
+    fn remove_from_group_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        // First add to a group directly
+        editor.tree_mut().add_to_group(main_id, "players").unwrap();
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
+
+        // Then remove via command
+        editor
+            .execute(EditorCommand::RemoveFromGroup {
+                node_id: main_id,
+                group: "players".into(),
+            })
+            .unwrap();
+        assert!(!editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
+
+        // Undo brings it back
+        editor.undo().unwrap();
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
+    }
+
+    #[test]
+    fn connect_signal_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let target_oid = gdcore::id::ObjectId::next().raw();
+
+        editor
+            .execute(EditorCommand::ConnectSignal {
+                source_id: main_id,
+                signal_name: "pressed".into(),
+                target_object_id: target_oid,
+                method: "on_pressed".into(),
+                options: ConnectOptions::default(),
+            })
+            .unwrap();
+
+        // Signal should be connected
+        let store = editor.tree().signal_store(main_id).unwrap();
+        let sig = store.get_signal("pressed").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+
+        // Undo should disconnect
+        editor.undo().unwrap();
+        let store = editor.tree().signal_store(main_id).unwrap();
+        let sig = store.get_signal("pressed").unwrap();
+        assert_eq!(sig.connection_count(), 0);
+
+        // Redo should reconnect
+        editor.redo().unwrap();
+        let store = editor.tree().signal_store(main_id).unwrap();
+        let sig = store.get_signal("pressed").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+    }
+
+    #[test]
+    fn disconnect_signal_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let target_oid = gdcore::id::ObjectId::next();
+
+        // Connect directly first
+        let conn = gdobject::signal::Connection::new(target_oid, "on_click");
+        editor.tree_mut().connect_signal(main_id, "clicked", conn);
+
+        // Disconnect via command
+        editor
+            .execute(EditorCommand::DisconnectSignal {
+                source_id: main_id,
+                signal_name: "clicked".into(),
+                target_object_id: target_oid.raw(),
+                method: "on_click".into(),
+                removed: None,
+            })
+            .unwrap();
+
+        let store = editor.tree().signal_store(main_id).unwrap();
+        let sig = store.get_signal("clicked").unwrap();
+        assert_eq!(sig.connection_count(), 0);
+
+        // Undo should reconnect
+        editor.undo().unwrap();
+        let store = editor.tree().signal_store(main_id).unwrap();
+        let sig = store.get_signal("clicked").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+    }
+
+    #[test]
+    fn group_command_undo_redo() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let commands = vec![
+            EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "hp".into(),
+                new_value: Variant::Int(100),
+                old_value: Variant::Nil,
+            },
+            EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "mp".into(),
+                new_value: Variant::Int(50),
+                old_value: Variant::Nil,
+            },
+        ];
+
+        editor.execute_group("Set stats", commands).unwrap();
+
+        assert_eq!(editor.undo_depth(), 1); // single group entry
+        assert_eq!(
+            editor.tree().get_node(main_id).unwrap().get_property("hp"),
+            Variant::Int(100)
+        );
+        assert_eq!(
+            editor.tree().get_node(main_id).unwrap().get_property("mp"),
+            Variant::Int(50)
+        );
+
+        // Undo the group — both properties revert
+        editor.undo().unwrap();
+        assert_eq!(
+            editor.tree().get_node(main_id).unwrap().get_property("hp"),
+            Variant::Nil
+        );
+        assert_eq!(
+            editor.tree().get_node(main_id).unwrap().get_property("mp"),
+            Variant::Nil
+        );
+
+        // Redo restores both
+        editor.redo().unwrap();
+        assert_eq!(
+            editor.tree().get_node(main_id).unwrap().get_property("hp"),
+            Variant::Int(100)
+        );
+    }
+
+    #[test]
+    fn group_command_label() {
+        let cmd = EditorCommand::Group {
+            label: "Transform all".into(),
+            commands: vec![],
+        };
+        assert_eq!(cmd.label(), "Transform all");
+    }
+
+    #[test]
+    fn command_labels() {
+        let nid = NodeId::next();
+        assert!(EditorCommand::SetProperty {
+            node_id: nid,
+            property: "pos".into(),
+            new_value: Variant::Nil,
+            old_value: Variant::Nil,
+        }
+        .label()
+        .contains("pos"));
+
+        assert!(EditorCommand::AddNode {
+            parent_id: nid,
+            name: "Foo".into(),
+            class_name: "Sprite2D".into(),
+            created_id: None,
+        }
+        .label()
+        .contains("Sprite2D"));
+
+        assert!(EditorCommand::MoveNode {
+            parent_id: nid,
+            child_id: nid,
+            new_index: 0,
+            old_index: 0,
+        }
+        .label()
+        .contains("Move"));
+
+        assert!(EditorCommand::ConnectSignal {
+            source_id: nid,
+            signal_name: "clicked".into(),
+            target_object_id: 0,
+            method: "handler".into(),
+            options: ConnectOptions::default(),
+        }
+        .label()
+        .contains("clicked"));
+    }
+
+    /// Godot's `ConnectFlags` are NOT consecutive bits, and getting that wrong
+    /// is silent: `CONNECT_DEFERRED = 1`, `CONNECT_PERSIST = 2`,
+    /// `CONNECT_ONE_SHOT = 4` (`core/object/object.h`). Writing `flags=2` for a
+    /// one-shot saves CONNECT_PERSIST instead, and the scene reloads as a
+    /// different connection with no error from anything.
+    ///
+    /// The literals here are deliberate. Asserting only against the
+    /// `gdscene::packed_scene` constants would pass even if BOTH sides drifted
+    /// together, which is exactly the failure that matters when the number is
+    /// also written into a `.tscn` on disk that older scenes already contain.
+    #[test]
+    fn connect_option_flags_match_godots_non_consecutive_values() {
+        assert_eq!(ConnectOptions::default().godot_flags(), 0, "no flags = 0");
+        assert_eq!(
+            ConnectOptions {
+                deferred: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            1,
+            "CONNECT_DEFERRED is 1"
+        );
+        assert_eq!(
+            ConnectOptions {
+                one_shot: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            4,
+            "CONNECT_ONE_SHOT is 4, NOT 2 - 2 is CONNECT_PERSIST"
+        );
+        assert_eq!(
+            ConnectOptions {
+                deferred: true,
+                one_shot: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            5,
+            "both flags OR together to 5, never 3"
+        );
+    }
+
+    /// The `flags=` field has to survive a save/load round trip, since that is
+    /// the whole reason the editor records it.
+    #[test]
+    fn connect_option_flags_round_trip_through_the_godot_encoding() {
+        for (deferred, one_shot) in [(false, false), (true, false), (false, true), (true, true)] {
+            let original = ConnectOptions {
+                deferred,
+                one_shot,
+                binds: Vec::new(),
+            };
+            let decoded = ConnectOptions::from_godot_flags(original.godot_flags());
+            assert_eq!(
+                decoded,
+                original,
+                "flags {} did not round trip",
+                original.godot_flags()
+            );
+        }
+    }
+
+    /// Undoing a disconnect must restore the flags the connection had, not
+    /// defaults. Reconnecting with `Connection::new` silently drops a user's
+    /// Deferred tick while making the undo look like it worked.
+    #[test]
+    fn undoing_a_disconnect_restores_the_connections_flags() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let source = tree.add_child(root, Node::new("Button", "Button")).unwrap();
+
+        let options = ConnectOptions {
+            deferred: true,
+            one_shot: true,
+            binds: vec![Variant::Int(7)],
+        };
+        let target = root.object_id().raw();
+        let mut connect = EditorCommand::ConnectSignal {
+            source_id: source,
+            signal_name: "pressed".into(),
+            target_object_id: target,
+            method: "_on_pressed".into(),
+            options: options.clone(),
+        };
+        connect.execute(&mut tree).unwrap();
+
+        let mut disconnect = EditorCommand::DisconnectSignal {
+            source_id: source,
+            signal_name: "pressed".into(),
+            target_object_id: target,
+            method: "_on_pressed".into(),
+            removed: None,
+        };
+        disconnect.execute(&mut tree).unwrap();
+        assert_eq!(
+            tree.signal_store(source)
+                .and_then(|s| s.get_signal("pressed"))
+                .map_or(0, |s| s.connection_count()),
+            0,
+            "the disconnect must actually remove it"
+        );
+
+        disconnect.undo(&mut tree).unwrap();
+        let restored = tree
+            .signal_store(source)
+            .and_then(|s| s.get_signal("pressed"))
+            .and_then(|s| s.connections().first())
+            .expect("the connection comes back");
+        assert!(restored.deferred, "Deferred was dropped by the undo");
+        assert!(restored.one_shot, "One Shot was dropped by the undo");
+        assert_eq!(
+            restored.binds,
+            vec![Variant::Int(7)],
+            "bound arguments were dropped by the undo"
+        );
+    }
+
+    // -- EditorMode ---------------------------------------------------------
+
+    #[test]
+    fn editor_mode_default_is_2d() {
+        assert_eq!(EditorMode::default(), EditorMode::Canvas2D);
+    }
+
+    #[test]
+    fn editor_mode_labels() {
+        assert_eq!(EditorMode::Canvas2D.label(), "2D");
+        assert_eq!(EditorMode::Spatial3D.label(), "3D");
+        assert_eq!(EditorMode::Script.label(), "Script");
+        assert_eq!(EditorMode::Game.label(), "Game");
+        assert_eq!(EditorMode::AssetLib.label(), "AssetLib");
+    }
+
+    #[test]
+    fn editor_mode_all_returns_five() {
+        assert_eq!(EditorMode::all().len(), 5);
+    }
+
+    #[test]
+    fn editor_mode_from_str_key() {
+        assert_eq!(EditorMode::from_str_key("2d"), Some(EditorMode::Canvas2D));
+        assert_eq!(EditorMode::from_str_key("3d"), Some(EditorMode::Spatial3D));
+        assert_eq!(EditorMode::from_str_key("script"), Some(EditorMode::Script));
+        assert_eq!(EditorMode::from_str_key("game"), Some(EditorMode::Game));
+        assert_eq!(
+            EditorMode::from_str_key("assetlib"),
+            Some(EditorMode::AssetLib)
+        );
+        assert_eq!(EditorMode::from_str_key("invalid"), None);
+    }
+
+    #[test]
+    fn editor_mode_key_roundtrip() {
+        for mode in EditorMode::all() {
+            assert_eq!(EditorMode::from_str_key(mode.key()), Some(mode));
+        }
+    }
+
+    // -- PlayState / RunControls --------------------------------------------
+
+    #[test]
+    fn play_state_default_is_stopped() {
+        assert_eq!(PlayState::default(), PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_initial_state() {
+        let rc = RunControls::new();
+        assert_eq!(rc.state, PlayState::Stopped);
+        assert!(!rc.is_running());
+        assert!(!rc.is_playing());
+        assert!(!rc.is_paused());
+    }
+
+    #[test]
+    fn run_controls_play() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        assert!(rc.is_playing());
+        assert!(rc.is_running());
+        assert!(!rc.is_paused());
+        assert!(!rc.last_ran_current);
+    }
+
+    #[test]
+    fn run_controls_play_current_scene() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::CurrentScene);
+        assert!(rc.is_playing());
+        assert!(rc.last_ran_current);
+    }
+
+    #[test]
+    fn run_controls_pause_resume() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.pause();
+        assert!(rc.is_paused());
+        assert!(rc.is_running());
+        assert!(!rc.is_playing());
+
+        rc.resume();
+        assert!(rc.is_playing());
+        assert!(!rc.is_paused());
+    }
+
+    #[test]
+    fn run_controls_toggle_pause() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.toggle_pause();
+        assert!(rc.is_paused());
+        rc.toggle_pause();
+        assert!(rc.is_playing());
+    }
+
+    #[test]
+    fn run_controls_stop() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_pause_when_stopped_is_noop() {
+        let mut rc = RunControls::new();
+        rc.pause();
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_resume_when_stopped_is_noop() {
+        let mut rc = RunControls::new();
+        rc.resume();
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_custom_scene() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::CustomScene("res://levels/boss.tscn".into()));
+        assert!(rc.is_playing());
+        assert!(!rc.last_ran_current);
+        assert_eq!(
+            rc.target,
+            RunTarget::CustomScene("res://levels/boss.tscn".into())
+        );
+    }
+
+    /// Acceptance (pat-twbea): the top-bar run controls play the project (main
+    /// scene), play the current scene, pause (toggle), and stop (terminate the
+    /// running instance).
+    #[test]
+    fn top_bar_run_controls() {
+        let main = "res://Main.tscn";
+        let current = "res://levels/Level2.tscn";
+        let mut rc = RunControls::new();
+
+        // Nothing runs until a run control is pressed.
+        assert!(!rc.is_running());
+        assert_eq!(rc.running_scene(main, current), None);
+
+        // Play-project (F5) launches the project's main scene.
+        rc.play_project();
+        assert!(rc.is_playing());
+        assert!(!rc.last_ran_current);
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(main),
+            "play-project launches the main scene"
+        );
+
+        // Stop terminates the running instance before switching targets.
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.running_scene(main, current), None);
+
+        // Play-scene (F6) launches the currently edited scene.
+        rc.play_current_scene();
+        assert!(rc.is_playing());
+        assert!(rc.last_ran_current);
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(current),
+            "play-scene launches the current scene"
+        );
+
+        // Pause toggles the paused state — the instance stays alive.
+        rc.toggle_pause();
+        assert!(rc.is_paused());
+        assert!(rc.is_running());
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(current),
+            "a paused instance is still the current scene"
+        );
+        // Toggling again resumes play.
+        rc.toggle_pause();
+        assert!(rc.is_playing());
+        assert!(!rc.is_paused());
+
+        // Stop terminates the running instance.
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.state, PlayState::Stopped);
+        assert_eq!(
+            rc.running_scene(main, current),
+            None,
+            "stop terminates the running instance"
+        );
     }
 }

@@ -1,0 +1,71 @@
+{
+  "fixture_id": "scene_csg_composition",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "CSGComposition",
+        "class": "Node3D",
+        "path": "/root/CSGComposition",
+        "children": ["Camera", "Sun", "Combiner", "Probe", "Floor"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/CSGComposition/Camera",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/CSGComposition/Sun",
+        "children": []
+      },
+      {
+        "name": "Combiner",
+        "class": "CSGCombiner3D",
+        "path": "/root/CSGComposition/Combiner",
+        "children": ["Base", "Dome", "Pillar"]
+      },
+      {
+        "name": "Base",
+        "class": "CSGBox3D",
+        "path": "/root/CSGComposition/Combiner/Base",
+        "children": []
+      },
+      {
+        "name": "Dome",
+        "class": "CSGSphere3D",
+        "path": "/root/CSGComposition/Combiner/Dome",
+        "children": []
+      },
+      {
+        "name": "Pillar",
+        "class": "CSGCylinder3D",
+        "path": "/root/CSGComposition/Combiner/Pillar",
+        "children": []
+      },
+      {
+        "name": "Probe",
+        "class": "ReflectionProbe",
+        "path": "/root/CSGComposition/Probe",
+        "children": []
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/CSGComposition/Floor",
+        "children": ["FloorShape"]
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/CSGComposition/Floor/FloorShape",
+        "children": []
+      }
+    ]
+  }
+}

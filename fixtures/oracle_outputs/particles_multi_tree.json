@@ -1,0 +1,67 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "GPUParticles2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Sparks2D",
+					"owner": "/root/ParticleWorld",
+					"path": "/root/ParticleWorld/Sparks2D"
+				},
+				{
+					"children": [],
+					"class": "CPUParticles2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Dust2D",
+					"owner": "/root/ParticleWorld",
+					"path": "/root/ParticleWorld/Dust2D"
+				},
+				{
+					"children": [],
+					"class": "GPUParticles3D",
+					"groups": [],
+					"name": "Fire3D",
+					"owner": "/root/ParticleWorld",
+					"path": "/root/ParticleWorld/Fire3D"
+				},
+				{
+					"children": [],
+					"class": "CPUParticles3D",
+					"groups": [],
+					"name": "Smoke3D",
+					"owner": "/root/ParticleWorld",
+					"path": "/root/ParticleWorld/Smoke3D"
+				},
+				{
+					"children": [],
+					"class": "GPUParticles2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Rain2D",
+					"owner": "/root/ParticleWorld",
+					"path": "/root/ParticleWorld/Rain2D"
+				}
+			],
+			"class": "Node",
+			"groups": [],
+			"name": "ParticleWorld",
+			"owner": "/root",
+			"path": "/root/ParticleWorld"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

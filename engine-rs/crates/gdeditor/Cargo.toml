@@ -5,13 +5,36 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# pat-ism62: wgpu is the default editor viewport renderer. The GPU pipeline
+# lives in `gdrender3d` behind its own `gpu` feature; we pull it in here so
+# a default `cargo build -p gdeditor` actually links wgpu. The legacy
+# software rasterizer is still reachable, but only by compiling with
+# `--no-default-features --features software-render`.
+[features]
+default = ["gpu-render"]
+gpu-render = ["gdrender3d/gpu"]
+software-render = []
+
 [dependencies]
+# Editor Play opens the platform audio device (`PlatformAudioOutput`) so a game
+# played in the editor is heard. Acyclic: gdaudio depends on gdcore alone.
+gdaudio = { path = "../gdaudio" }
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdscene = { path = "../gdscene" }
 gdrender2d = { path = "../gdrender2d" }
+gdrender3d = { path = "../gdrender3d" }
 gdplatform = { path = "../gdplatform" }
+gdresource = { path = "../gdresource" }
+gdscript-interop = { path = "../gdscript-interop" }
+gdserver3d = { path = "../gdserver3d" }
+# The `DrawCommand` type a script's `_draw()` emits (pat-s3rrv.22). Already an
+# indirect dependency through gdscene, which stores them on the SceneTree; named
+# directly so the canvas render list can convert them. gdserver2d depends only on
+# gdcore/gdvariant, so this adds no cycle.
+gdserver2d = { path = "../gdserver2d" }
+regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
@@ -19,3 +42,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# pat-s3rrv.52: the audio-bus acceptance test proves the layout the editor
+# SAVES is the one the runtime LOADS, which means re-reading it through the
+# real `AudioMixer::load_bus_layout_tres`. DEV-only and acyclic: gdaudio
+# depends on gdcore alone and never on gdeditor. (Also a normal dependency
+# above, since editor Play opens the audio device.)

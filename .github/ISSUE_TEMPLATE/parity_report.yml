@@ -1,0 +1,90 @@
+name: Parity Report
+description: Report a behavioral difference between Patina and Godot 4.6
+title: "[Parity]: "
+labels: ["parity", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a case where Patina behaves differently from Godot 4.6.
+        These reports help us track and close parity gaps.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      description: Which area has the parity gap?
+      options:
+        - Scene tree / Node lifecycle
+        - Signals / Notifications
+        - Resource loading (.tres / .tscn)
+        - 2D Physics
+        - 3D Physics
+        - Input handling
+        - Audio
+        - Animation
+        - Rendering
+        - GDScript behavior
+        - Property / Variant system
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: godot_behavior
+    attributes:
+      label: Godot 4.6 Behavior
+      description: What does Godot do?
+      placeholder: |
+        In Godot 4.6, when you call `node.move_and_slide()` with a
+        velocity of (100, 0) against a 45-degree slope, the node
+        slides along the slope at ~70.7 units/frame.
+    validations:
+      required: true
+
+  - type: textarea
+    id: patina_behavior
+    attributes:
+      label: Patina Behavior
+      description: What does Patina do differently?
+      placeholder: |
+        In Patina, the same call produces a velocity of (100, 0) —
+        the slope is ignored.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Test Case
+      description: |
+        A test or script that demonstrates the difference. Including
+        a concrete test case is the fastest path to a fix.
+      placeholder: |
+        ```rust
+        #[test]
+        fn slope_slide_parity() {
+            // Setup...
+            let result = body.move_and_slide(velocity, &bodies);
+            // In Godot: result.x ≈ 70.7
+            // In Patina: result.x = 100.0 (wrong)
+            assert!((result.x - 70.7).abs() < 1.0);
+        }
+        ```
+
+  - type: input
+    id: godot_version
+    attributes:
+      label: Godot Version Tested
+      description: Which Godot version did you test against?
+      placeholder: "4.6.1-stable"
+    validations:
+      required: true
+
+  - type: input
+    id: patina_version
+    attributes:
+      label: Patina Version
+      placeholder: "0.1.0 or commit abc1234"
+    validations:
+      required: true

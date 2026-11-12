@@ -6,11 +6,12 @@
 //!
 //! Designed to visually approximate Godot 4's 2D viewport appearance.
 
-use gdcore::math::{Color, Rect2, Vector2};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdrender2d::draw;
-use gdrender2d::renderer::FrameBuffer;
+use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
+use gdscene::{canvas_order, node2d};
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
@@ -40,6 +41,8 @@ const COLOR_SPRITE2D: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue
 const COLOR_CAMERA2D: Color = Color::new(0.2, 0.9, 0.3, 1.0); // green
 const COLOR_COLLISION: Color = Color::new(0.0, 0.85, 0.3, 0.7); // green outline
 const COLOR_AREA2D: Color = Color::new(0.3, 0.5, 1.0, 0.15); // blue tint
+const COLOR_NAVMESH_FACE: Color = Color::new(0.5, 1.0, 1.0, 0.4); // Godot geometry_face_color
+const COLOR_NAVMESH_EDGE: Color = Color::new(0.5, 1.0, 1.0, 1.0); // Godot geometry_edge_color
 const COLOR_CHARBODY: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue outline
 const COLOR_RIGIDBODY: Color = Color::new(1.0, 0.85, 0.0, 1.0); // yellow outline
 const COLOR_STATICBODY: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray outline
@@ -47,7 +50,7 @@ const COLOR_CONTROL: Color = Color::new(0.7, 0.3, 0.9, 1.0); // purple
 const COLOR_DEFAULT: Color = Color::new(0.8, 0.8, 0.8, 1.0); // white-ish
 const COLOR_SELECTED: Color = Color::new(1.0, 0.85, 0.0, 1.0); // bright amber
 const COLOR_NODE_DOT: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray
-const COLOR_LABEL_TEXT: Color = Color::new(0.85, 0.85, 0.85, 0.9); // label text
+const COLOR_PARTICLES: Color = Color::new(0.9, 0.6, 1.0, 1.0); // violet emitter glyph
 
 /// Gizmo colors for the transform arrows.
 const GIZMO_X_COLOR: Color = Color::new(1.0, 0.2, 0.2, 1.0); // red
@@ -92,7 +95,256 @@ pub fn render_scene_with_zoom_pan(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
-    render_scene_inner(tree, selected, width, height, zoom, pan, None)
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        None,
+        Vec::new(),
+    )
+}
+
+/// Whether `tree` should be drawn through the 3D renderer (rather than the 2D
+/// canvas rasterizer), mirroring Godot's main-plugin selection
+/// (`EditorNode::set_edited_scene` → `_find_node_types`): the scene root's own
+/// type wins — a `Node3D` root is 3D, a `CanvasItem` root is 2D — and a bare
+/// `Node` root (a level container) falls back to whichever spatial/canvas node
+/// type dominates the descendants. Ties and empty scenes default to 2D
+/// (`false`). This is the same rule the editor uses to pick the 2D vs 3D main
+/// screen for an opened scene, applied to the *running* scene so the Game view
+/// renders it the way the game itself would.
+pub fn scene_is_3d(tree: &SceneTree) -> bool {
+    let root = tree
+        .current_scene()
+        .or_else(|| {
+            tree.get_node(tree.root_id())
+                .and_then(|n| n.children().first().copied())
+        })
+        .unwrap_or_else(|| tree.root_id());
+    if let Some(node) = tree.get_node(root) {
+        if node.is_class("Node3D") {
+            return true;
+        }
+        if node.is_class("CanvasItem") {
+            return false;
+        }
+    }
+    let (mut count_3d, mut count_2d) = (0u32, 0u32);
+    for nid in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(nid) {
+            if node.is_class("Node3D") {
+                count_3d += 1;
+            } else if node.is_class("CanvasItem") {
+                count_2d += 1;
+            }
+        }
+    }
+    count_3d > count_2d
+}
+
+/// Renders one frame of the *running* scene for the editor's Game view, picking
+/// the renderer the way Godot's game viewport would: a 3D scene is drawn through
+/// the spatial renderer (`render_editor_3d_frame`, using the editor's 3D
+/// viewport camera so the view matches the spatial editor you launched from),
+/// and a 2D scene through the canvas rasterizer.
+///
+/// This fixes a blank Game view for 3D scenes: the run loop previously always
+/// used the 2D rasterizer, which has nothing to draw for a `Node3D` scene (no
+/// `CanvasItem`s), so pressing Play on a 3D scene showed an empty grid even
+/// though the scene was running. `viewport_3d` is borrowed read-only and cloned
+/// internally to apply the panel size, so callers can pass `&state`'s viewport
+/// alongside an immutable borrow of the running tree.
+pub fn render_runtime_frame(
+    tree: &SceneTree,
+    viewport_3d: &crate::viewport_3d::Viewport3D,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    // The editor's zoom/pan only frame the *editor* preview, so they stay out of
+    // the running frame — but the scene's own Camera2D does apply, and used to be
+    // discarded here alongside them, which made a scrolling game impossible to
+    // see in the Game view (pat-0q2kx.40).
+    let _ = (zoom, pan);
+    // Godot's viewport draws its World3D and THEN composites every CanvasItem /
+    // CanvasLayer over it in the same viewport (`scene/main/viewport.cpp`). It
+    // never picks one renderer, which is what Patina used to do here: a 3D game
+    // with a large UI took the `count_2d > count_3d` branch and its 3D world was
+    // never drawn at all, and a 3D-dominant scene drew the world with no HUD
+    // (pat-mgixk.36).
+    //
+    // ⚠️ `scene_is_3d` is NOT the predicate for this. That function answers a
+    // different question — which main screen the EDITOR opens a scene in, by
+    // Godot's main-plugin rule — and it is deliberately left alone. Whether a 3D
+    // PASS is needed is just "is there any 3D content", and the canvas pass runs
+    // either way.
+    let base_3d = if scene_has_3d_content(tree) {
+        let mut vp = viewport_3d.clone();
+        vp.width = width.max(1);
+        vp.height = height.max(1);
+        Some(crate::viewport_3d_render::render_editor_3d_frame(&vp, tree))
+    } else {
+        None
+    };
+    {
+        // The canvas pass, which now runs for EVERY running scene rather than
+        // only a 2D one: the real CanvasItem pixels the game would show
+        // (pat-u3l8c.23) — no editor grid/rulers/gizmos. This pass is
+        // texture-less; the texture-cached Play path lives in `examples/editor.rs`,
+        // so sprites here fall back to placeholder squares.
+        // Inlines `render_runtime_canvas` so the Camera2D view can be folded in
+        // between building the list and rasterizing it — the same order the Play
+        // loop in `examples/editor.rs` uses. `apply_camera2d_view` skips
+        // CanvasLayer items, so HUD pixels stay put while the world scrolls.
+        let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
+        let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+        // The root window's content scale is the OUTERMOST transform, applied
+        // after the camera and to CanvasLayer items too (pat-nzgdu.87). The
+        // window here is the Game view's rect, not the project's configured
+        // one, so the project's base resolution is stretched to whatever size
+        // the editor gave us — which is what makes the Game view show the same
+        // framing the exported game would.
+        let mut window = *tree.root_window();
+        window.size = viewport_size;
+        // The camera centres on the CANVAS (the base resolution under
+        // stretch), not the window — see `canvas_size_of`.
+        if let Some(view) = crate::viewport_2d_render::camera2d_view_transform(
+            tree,
+            gdscene::canvas_render::canvas_size_of(&window),
+            None,
+            1.0 / 60.0,
+        ) {
+            crate::viewport_2d_render::apply_camera2d_view(&mut items, view);
+        }
+        crate::viewport_2d_render::apply_stretch_transform(&mut items, window.stretch_transform());
+        // ⚠️ The clear colour is what makes this composable. Over a 3D frame the
+        // canvas must clear TRANSPARENT so the world shows through wherever no
+        // CanvasItem drew; with no 3D frame it keeps the opaque runtime clear, so
+        // a pure-2D scene's pixels are byte-identical to before
+        // (`runtime_2d_scene_uses_canvas_rasterizer` asserts exactly that).
+        let clear = if base_3d.is_some() {
+            CANVAS_OVERLAY_CLEAR
+        } else {
+            crate::viewport_2d_render::RUNTIME_CLEAR_COLOR
+        };
+        // Shares the one canvas core (pat-mgixk.45) instead of calling the bare
+        // rasterizer, so this path stops being a THIRD pipeline that silently
+        // skipped CanvasGroup compositing, the NoiseTexture2D bake,
+        // normal/specular surfaces and the light pass.
+        //
+        // ⚠️ Pixel-neutral for a scene without those features: the groups entry
+        // delegates straight to the rasterizer when no CanvasGroup exists, the
+        // bake is skipped with no cache, and `shade_runtime_canvas_with_surfaces`
+        // early-outs unless the scene has a Light2D or a CanvasModulate. Still
+        // `None` for the cache and default quality, keeping this path's
+        // texture-less, editor-framing contract
+        // (`runtime_2d_scene_uses_canvas_rasterizer` pins the byte identity).
+        let canvas = crate::viewport_2d_render::render_canvas_from_list(
+            tree,
+            &items,
+            width,
+            height,
+            clear,
+            None,
+            &crate::viewport_2d_render::CanvasQuality::default(),
+        );
+        let mut frame = match base_3d {
+            // A 3D scene with no CanvasItems composites a fully transparent
+            // canvas, which `composite_canvas_over` skips pixel by pixel — so
+            // that frame stays bit-identical to the plain 3D render too.
+            Some(mut base) => {
+                composite_canvas_over(&mut base, &canvas);
+                base
+            }
+            None => canvas,
+        };
+        // The keep-aspect letterbox, over the WHOLE frame (3D included): it is
+        // the window outside the viewport. A no-op without stretch.
+        gdscene::canvas_render::paint_black_bars(&mut frame, &window);
+        frame
+    }
+}
+
+/// The transparent clear a canvas pass uses when it will be composited over a
+/// 3D frame: alpha 0 means "nothing drawn here", which is what
+/// [`composite_canvas_over`] tests.
+///
+/// `pub` because the Play loop in `examples/editor.rs` rasterizes its own canvas
+/// pass for the GPU path and must clear it the same way — two different clear
+/// colours would make the editor's Play tab and this module disagree about what
+/// "untouched" means.
+pub const CANVAS_OVERLAY_CLEAR: Color = Color::new(0.0, 0.0, 0.0, 0.0);
+
+/// Whether `tree` holds any 3D content at all, and therefore needs a 3D pass
+/// before the canvas is composited over it.
+///
+/// ⚠️ Deliberately NOT [`scene_is_3d`]. That one implements Godot's
+/// main-plugin/main-screen choice (root type wins, then a descendant count) and
+/// is the right answer for "which editor tab does this scene open in". Using it
+/// to decide what to RENDER is the bug this replaces: it is exclusive by
+/// construction, so one of the two worlds always lost (pat-mgixk.36).
+pub fn scene_has_3d_content(tree: &SceneTree) -> bool {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter_map(|nid| tree.get_node(nid))
+        .any(|node| node.is_class("Node3D"))
+}
+
+/// Alpha-composites a canvas pass over an already-rendered frame, source-over,
+/// the way Godot's viewport puts its canvas layers over the 3D world.
+///
+/// `canvas` must have been rasterized with a TRANSPARENT clear
+/// ([`CANVAS_OVERLAY_CLEAR`]); its alpha is the only record of which pixels a
+/// CanvasItem actually touched.
+///
+/// ⚠️ Uses the canvas rasterizer's own [`BlendMode::Mix`] rather than a
+/// hand-rolled lerp, so an overlaid HUD blends exactly the way it would have
+/// inside `rasterize_render_list`. Note `blend`'s argument order is
+/// `(src, dst, mode)`.
+pub fn composite_canvas_over(base: &mut FrameBuffer, canvas: &FrameBuffer) {
+    for (dst, src) in base.pixels.iter_mut().zip(canvas.pixels.iter()) {
+        // Skip fully transparent source pixels. Not just an optimisation: it is
+        // what keeps a 3D-only scene's frame bit-identical, since `Mix` with
+        // a == 0 is the identity on `dst` but still rewrites the pixel.
+        if src.a <= 0.0 {
+            continue;
+        }
+        *dst = gdrender2d::canvas_material::blend(
+            *src,
+            *dst,
+            gdrender2d::canvas_material::BlendMode::Mix,
+        );
+    }
+}
+
+/// [`composite_canvas_over`] for the GPU Play path, whose frame is a byte-native
+/// [`Bgra8Image`] rather than a float [`FrameBuffer`].
+///
+/// ⚠️ Lives here rather than in `examples/editor.rs` so both Play paths composite
+/// through reviewed library code, and so this loop is reachable from tests —
+/// the example binary is not.
+///
+/// Uses the shared [`Raster::blend`] impl, which already writes a fully opaque
+/// alpha; a published frame has no transparency left to carry.
+pub fn composite_canvas_over_bgra(base: &mut Bgra8Image, canvas: &FrameBuffer) {
+    let w = canvas.width.min(base.width);
+    let h = canvas.height.min(base.height);
+    for y in 0..h {
+        for x in 0..w {
+            let src = canvas.get_pixel(x, y);
+            // Same skip as the float path, and for the same reason: a 3D scene
+            // with no CanvasItems must publish the untouched 3D frame.
+            if src.a <= 0.0 {
+                continue;
+            }
+            base.blend(x as i32, y as i32, src, src.a);
+        }
+    }
 }
 
 /// Renders with texture support for Sprite2D nodes.
@@ -113,9 +365,325 @@ pub fn render_scene_with_textures(
         zoom,
         pan,
         Some(texture_cache),
+        None,
+        Vec::new(),
     )
 }
 
+/// Renders the scene honouring an [`OverlaySettings`] set — Godot's View-menu
+/// overlay toggles (pat-s3rrv.82).
+///
+/// ⚠️ Deliberately a SEPARATE entry point rather than a parameter on the
+/// existing ones. `OverlaySettings::default()` enables only the origin cross and
+/// the lock/group icons, so routing the current callers through it would turn
+/// collision shapes and navmesh regions OFF for every existing caller and test —
+/// a silent change to what the editor draws, made while adding a toggle nobody
+/// had asked to flip yet. `render_scene`/`render_scene_with_zoom_pan`/
+/// `render_scene_with_textures` therefore keep drawing everything, and only a
+/// caller that actually has an overlay set gets the gating.
+pub fn render_scene_with_overlays(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    overlays: &crate::viewport_2d::OverlaySettings,
+) -> FrameBuffer {
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        Some(overlays),
+        Vec::new(),
+    )
+}
+
+/// Renders the edited scene for the 2D editor viewport **including the themed
+/// Control pass** — Button/Panel/TextureRect/RichTextLabel content, Control
+/// styleboxes, container layout and font-size/alignment overrides.
+///
+/// ⚠️ What this does NOT add, measured rather than assumed: **Label text**.
+/// `render_kind_for` already has a `"Label"` arm (`canvas_render.rs:1747`) and
+/// `Label` is registered with `.parent("Control")` inside
+/// `register_2d_classes`, so `collect_canvas_items`' `is_class("CanvasItem")`
+/// gate admits it and the immutable entries draw Label text on their own — IF
+/// ClassDB is populated. The classes with no arm there, which fall to `Marker`
+/// and so can only be drawn by this pass, are `Button`, `Panel`,
+/// `TextureRect` and `RichTextLabel`.
+///
+/// ⚠️ Font COLOUR still does not survive either path: `Render2DKind::Text`
+/// (`canvas_render.rs:259-270`) carries text, font_size, h_align and font_path
+/// and no colour, so a `theme_override_colors/font_color` changes no pixels.
+/// Tracked separately, along with Control `modulate` being forced neutral.
+///
+/// This exists as a separate entry rather than as a `&mut` widening of
+/// [`render_scene_with_zoom_pan`] on purpose. `build_control_render_items` needs
+/// `&mut SceneTree` because container layout writes each child's resolved rect
+/// back onto the node, and widening the existing wrappers would have to reach
+/// ~50 call sites across `gdeditor`, `patina-engine`'s integration tests and
+/// `examples/`, several of which only ever hold a `&SceneTree` (a fixture helper
+/// parameter, or a booted project's `tree()` accessor with no `tree_mut()`).
+/// Adding an entry leaves all of them byte-identical.
+///
+/// 🔑 The call sequence is deliberately the same one `render_play_frame`
+/// (`canvas_render.rs:4126-4128`) runs — runtime list, then root, then control
+/// items against the viewport size — so edit mode and Play agree about what the
+/// UI layer contains. The editor's zoom/pan transform is then applied to every
+/// item together, control items included: they are built with
+/// `CanvasFollow::DefaultCanvas`, so `apply_camera2d_view` transforms them
+/// rather than pinning them, and the UI stays registered with the grid, the
+/// selection outline and the gizmos.
+pub fn render_scene_with_zoom_pan_mut(
+    tree: &mut SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    // `max(1)` matches `render_play_frame`: a zero-sized viewport would make
+    // every anchored Control resolve to an empty rect.
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    let root = tree.root_id();
+    let control_items =
+        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, viewport_size);
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        None,
+        control_items,
+    )
+}
+
+/// [`render_scene_with_zoom_pan_mut`] that also draws every `instance=`
+/// sub-scene, textured — what the editor's 2D view shows while editing.
+///
+/// 🔑 The edited tree holds each instanced sub-scene as a childless
+/// placeholder (the shape the saver writes back as `instance=`), so the 2D view
+/// drew a main scene with no player, no enemies and no HUD — Godot's editor
+/// shows them all. Each placeholder's sub-scene is instanced into a SCRATCH
+/// tree, its items built and mapped onto the placeholder's place in the scene,
+/// and the scratch tree dropped. The edited tree is never touched, so the
+/// saver, undo, the scene dock and selection cannot see the preview.
+#[allow(clippy::too_many_arguments)]
+pub fn render_scene_with_instance_previews(
+    tree: &mut SceneTree,
+    project_root: &str,
+    texture_cache: &mut TextureCache,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    // Root Controls anchor to the GAME's base resolution, as Godot's 2D editor
+    // lays them out inside the game rect — the edited scene's own and every
+    // previewed sub-scene's alike. Anchoring to the editor panel stretched a
+    // full-rect background over the whole view.
+    let (control_items, previews) = edit_view_inputs(tree, project_root, viewport_size);
+    render_scene_inner_with_previews(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        Some(texture_cache),
+        None,
+        control_items,
+        previews,
+    )
+}
+
+/// The Control items and instanced-scene previews the edit view adds to the
+/// tree's own canvas items (see [`render_scene_with_instance_previews`]).
+fn edit_view_inputs(
+    tree: &mut SceneTree,
+    project_root: &str,
+    viewport_size: Vector2,
+) -> (
+    Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    Vec<crate::viewport_2d_render::Render2DItem>,
+) {
+    // Root Controls anchor to the GAME's base resolution, as Godot's 2D editor
+    // lays them out inside the game rect — the edited scene's own and every
+    // previewed sub-scene's alike. Anchoring to the editor panel stretched a
+    // full-rect background over the whole view.
+    let layout_size = project_layout_size(project_root).unwrap_or(viewport_size);
+    let root = tree.root_id();
+    let control_items =
+        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, layout_size);
+    let previews = instance_preview_items(tree, project_root, layout_size);
+    (control_items, previews)
+}
+
+/// The scene content the 2D edit view draws, in draw order, before the editor
+/// camera and the gizmos: the tree's canvas items with its Controls and
+/// instanced-scene previews merged in by (canvas layer, z). This is the exact
+/// list [`render_scene_with_instance_previews`] rasterizes, so a test can hold
+/// it against what Play draws — the edit view and Play disagreed three ways on
+/// the platformer demo (no TileSet at edit time, previews over everything,
+/// clicks on the wrong cell) and nothing compared them.
+pub fn edit_view_scene_items(
+    tree: &mut SceneTree,
+    project_root: &str,
+    width: u32,
+    height: u32,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    let (control_items, previews) = edit_view_inputs(tree, project_root, viewport_size);
+    edit_scene_items(tree, control_items, previews)
+}
+
+/// [`edit_view_scene_items`] from already-built inputs: the one assembly both
+/// it and the renderer use.
+fn edit_scene_items(
+    tree: &SceneTree,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    previews: Vec<crate::viewport_2d_render::Render2DItem>,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    let items = crate::viewport_2d_render::build_runtime_render_list(tree);
+    let items = crate::viewport_2d_render::merge_control_items(tree, items, control_items);
+    merge_previews_by_layer_and_z(items, previews)
+}
+
+/// The project's base resolution (`display/window/size/viewport_*`), or `None`
+/// when the folder has no readable `project.godot`.
+fn project_layout_size(project_root: &str) -> Option<Vector2> {
+    gdcore::ProjectSettings::load_godot_project(
+        &std::path::Path::new(project_root).join("project.godot"),
+    )
+    .ok()
+    .map(|ps| Vector2::new(ps.viewport_width() as f32, ps.viewport_height() as f32))
+}
+
+/// The render items of every instanced sub-scene's preview, in the edited
+/// scene's global canvas space. See [`render_scene_with_instance_previews`].
+fn instance_preview_items(
+    tree: &SceneTree,
+    project_root: &str,
+    viewport_size: Vector2,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    use gdscene::packed_scene::PackedScene;
+    let resolve = |path: &str| -> Option<PackedScene> {
+        let rel = path.strip_prefix("res://").unwrap_or(path);
+        let text = std::fs::read_to_string(std::path::Path::new(project_root).join(rel)).ok()?;
+        PackedScene::from_tscn(&text).ok()
+    };
+    // A sub-scene's UI is laid out in the game's base resolution (the caller's
+    // `layout_size`), as Godot's editor shows it inside the game rect.
+    let layout_size = viewport_size;
+    let mut out = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        // An instance the edited tree already holds EXPANDED draws through its
+        // own nodes; a preview on top would draw it twice (pat-hivyf).
+        if node.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY) {
+            continue;
+        }
+        let Variant::String(path) = node.get_property("_instance_path") else {
+            continue;
+        };
+        let Some(sub) = resolve(&path) else { continue };
+        let mut scratch = SceneTree::new();
+        let scratch_root = scratch.root_id();
+        let Ok(sub_root) = gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(
+            &mut scratch,
+            scratch_root,
+            &sub,
+            &resolve,
+        ) else {
+            continue;
+        };
+        // The outer scene's overrides on the instance (its position, say).
+        if let Some(preview_root) = scratch.get_node_mut(sub_root) {
+            for (key, value) in node.properties() {
+                if !key.starts_with('_') {
+                    preview_root.set_property(key, value.clone());
+                }
+            }
+        }
+        // An AnimatedSprite2D's frame texture is published by the animation
+        // step; a zero-delta step publishes the current frame without moving
+        // anything, so the sprite draws as it will at run time.
+        scratch.process_animated_sprites(0.0);
+        let controls = crate::viewport_2d_render::build_control_render_items_sourced(
+            &mut scratch,
+            scratch_root,
+            layout_size,
+        );
+        let runtime = crate::viewport_2d_render::build_runtime_render_list(&scratch);
+        let items = crate::viewport_2d_render::merge_control_items(&scratch, runtime, controls);
+        // Where the instance sits in the edited scene: its parent's global
+        // transform. A CanvasLayer item is screen-fixed and keeps its own.
+        let place = tree
+            .get_node(id)
+            .and_then(|n| n.parent())
+            .map(|parent| node2d::get_global_transform(tree, parent))
+            .unwrap_or(Transform2D::IDENTITY);
+        for mut item in items {
+            if matches!(
+                item.canvas_follow,
+                crate::viewport_2d_render::CanvasFollow::DefaultCanvas
+            ) {
+                item.global_transform = place * item.global_transform;
+            } else {
+                // A CanvasLayer's UI is shown registered with the scene, at
+                // the game rect's origin, panning and zooming with the view —
+                // as Godot's 2D editor draws it — not pinned to the panel.
+                item.canvas_follow = crate::viewport_2d_render::CanvasFollow::DefaultCanvas;
+            }
+            // Not a node of the edited tree: never pickable, never outlined.
+            item.node_id = 0;
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// Merges `previews` into the already-ordered `items` without reordering
+/// `items` itself (its control interleave is deliberate): each preview goes
+/// before the first item whose (canvas layer, z) is GREATER, so a preview on
+/// a lower CanvasLayer draws behind the scene and an equal-key one keeps the
+/// old drawn-last-within-its-key placement.
+fn merge_previews_by_layer_and_z(
+    items: Vec<crate::viewport_2d_render::Render2DItem>,
+    mut previews: Vec<crate::viewport_2d_render::Render2DItem>,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    if previews.is_empty() {
+        return items;
+    }
+    previews.sort_by_key(|p| (p.canvas_layer, p.z_index));
+    let mut out = Vec::with_capacity(items.len() + previews.len());
+    let mut pending = previews.into_iter().peekable();
+    for item in items {
+        let key = (item.canvas_layer, item.z_index);
+        while pending
+            .peek()
+            .is_some_and(|p| (p.canvas_layer, p.z_index) < key)
+        {
+            out.push(pending.next().unwrap());
+        }
+        out.push(item);
+    }
+    out.extend(pending);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_scene_inner(
     tree: &SceneTree,
     selected: Option<NodeId>,
@@ -123,8 +691,42 @@ fn render_scene_inner(
     height: u32,
     zoom: f64,
     pan: (f64, f64),
-    mut texture_cache: Option<&mut TextureCache>,
+    texture_cache: Option<&mut TextureCache>,
+    overlays: Option<&crate::viewport_2d::OverlaySettings>,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
 ) -> FrameBuffer {
+    render_scene_inner_with_previews(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        texture_cache,
+        overlays,
+        control_items,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_scene_inner_with_previews(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    mut texture_cache: Option<&mut TextureCache>,
+    overlays: Option<&crate::viewport_2d::OverlaySettings>,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    previews: Vec<crate::viewport_2d_render::Render2DItem>,
+) -> FrameBuffer {
+    // `None` means "no overlay set supplied" — draw every gizmo, which is what
+    // every pre-existing caller expects. It is NOT the same as an empty set.
+    let shows = |o: crate::viewport_2d::CanvasOverlay| -> bool {
+        overlays.is_none_or(|set| set.is_enabled(o))
+    };
     let mut fb = FrameBuffer::new(width, height, BG_COLOR);
     let z = zoom as f32;
 
@@ -141,28 +743,196 @@ fn render_scene_inner(
     // Draw origin crosshair (X=red horizontal, Y=green vertical).
     draw_origin_crosshair(&mut fb, offset_x, offset_y);
 
-    // Walk all nodes in tree order and draw them.
-    let node_ids = tree.all_nodes_in_tree_order();
+    // -- the edited scene itself, through the runtime canvas list (pat-mgixk.47)
+    //
+    // Before this, edit mode drew class icons from the hand-written match
+    // below and nothing else: only Sprite2D and ColorRect showed real content,
+    // Label/Button were placeholder rects, and Polygon2D, Line2D,
+    // TileMapLayer, AnimatedSprite2D, NinePatchRect and the rest all fell to a
+    // 2px dot. Worse, nodes were placed by global *position* alone, so
+    // rotation, scale and modulate were ignored — the edit view and Play
+    // disagreed about the same scene.
+    //
+    // ⚠️ Routed through `render_canvas_from_list`, NOT a fresh rasterizer call.
+    // There were THREE runtime canvas pipelines and no two agreed on which
+    // steps they ran — pat-mgixk.45 consolidated them, and the table in
+    // `play_frame_uses_runtime_canvas_pipeline` lists what each one silently
+    // skipped. A fourth would be that bug again, so this shares the one core
+    // and inherits CanvasGroup compositing, the NoiseTexture2D bake,
+    // normal/specular surfaces and the light pass rather than reimplementing
+    // any of them.
+    //
+    // ⚠️ Node2D-side CanvasItems only. The themed Control pass that
+    // `render_play_frame` adds needs `&mut SceneTree` (container layout writes
+    // resolved rects back onto the nodes), which this entry does not hold, so a
+    // caller that wants Label/Button text and Control geometry goes through
+    // `render_scene_with_zoom_pan_mut` and hands the items in.
+    //
+    // ⚠️ `ColorRect` is NOT exempt from that, which an earlier revision of this
+    // comment claimed. Having an arm in the canvas-item resolver
+    // (`canvas_render.rs:1741`) is useless when the node has no geometry: a
+    // Control's size comes from `offset_*` resolved by the layout pass, so on
+    // the immutable path a ColorRect is zero-sized and paints nothing.
+    // `canvas_composite.rs:34` warns about exactly this.
+    // The themed Control pass, when the caller could supply it (see
+    // `render_scene_with_zoom_pan_mut`). Empty for the immutable wrappers.
+    //
+    // 🔑 Appending here rather than compositing a second buffer afterwards is
+    // what makes this correct rather than merely visible: these items carry
+    // `z_index = CONTROL_Z_BASE + depth`, so the ONE sort inside
+    // `render_canvas_from_list` puts the UI above plain 2D nodes exactly as
+    // Play does.
+    //
+    // ⚠️ These items do NOT register in `canvas_drawn` below the way the
+    // Node2D-side ones do: a control primitive carries `node_id: 0` by design
+    // — "Control primitives are not one-per-node, so there is no single node
+    // id to attribute them to" (`canvas_render.rs:2444-2446`). The placeholder
+    // suppression therefore has to be by CLASS, which is what
+    // `controls_drawn` below does. Getting that wrong is not cosmetic:
+    // `draw_control_rect` is a `fill_rect`, so the opaque purple block would
+    // cover the text this pass just rasterized.
+    let controls_drawn = !control_items.is_empty();
+    // Interleaved at each Control's tree position — layer, then z, then tree
+    // order, as Play does — rather than appended above everything.
+    // Instanced sub-scene previews (see `render_scene_with_instance_previews`),
+    // merged in by (canvas layer, z).
+    //
+    // 🔑 NOT appended. The comment here used to say "the raster's stable
+    // (layer, z) sort places them" — there is no such sort: the ONLY
+    // `(canvas_layer, z_index)` sort is inside `build_runtime_render_list`, and
+    // `render_canvas_from_list` draws its list in the order given. So every
+    // preview drew on top of the whole edited scene: the platformer demo's
+    // instanced ParallaxBackground (CanvasLayer -100) covered its entire
+    // TileMapLayer, and the level looked like empty sky while editing.
+    // `edit_scene_items` is the ONE assembly: the runtime list, then the
+    // Controls at their tree positions, then the previews by (layer, z).
+    let mut items = edit_scene_items(tree, control_items, previews);
+    // The editor's view stands in for Play's Camera2D + window stretch.
+    //
+    // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with
+    // above. A separately derived transform would put the scene a few pixels
+    // off the grid, the selection outline and every gizmo — all of which are
+    // placed with these exact values. `apply_camera2d_view` also honours
+    // `CanvasFollow::Fixed`, so a CanvasLayer stays pinned here exactly as it
+    // does in Play.
+    crate::viewport_2d_render::apply_camera2d_view(
+        &mut items,
+        Transform2D {
+            x: Vector2::new(z, 0.0),
+            y: Vector2::new(0.0, z),
+            origin: Vector2::new(offset_x, offset_y),
+        },
+    );
+    // Transparent clear, then composite, so the grid and crosshair stay visible
+    // underneath and a translucent CanvasItem blends over them instead of
+    // replacing them. This is the documented path for a caller that supplies
+    // its own background: `render_play_frame`'s doc says a compositing caller
+    // goes through `render_canvas_from_list` with its own clear.
+    let canvas = crate::viewport_2d_render::render_canvas_from_list(
+        tree,
+        &items,
+        width,
+        height,
+        CANVAS_OVERLAY_CLEAR,
+        texture_cache.as_deref_mut(),
+        &crate::viewport_2d_render::CanvasQuality::default(),
+    );
+    composite_canvas_over(&mut fb, &canvas);
+    // Which nodes the canvas pass actually painted. Anything in here must not
+    // then get a placeholder icon drawn over its real pixels; everything else —
+    // a bare Node2D, a Camera2D, a physics body — draws nothing as a CanvasItem,
+    // so it is absent from the list and keeps its glyph, which is how the
+    // editor shows where an otherwise invisible node sits.
+    let canvas_drawn: std::collections::HashSet<u64> =
+        items.iter().map(|item| item.node_id).collect();
+
+    // Walk all nodes in draw order and draw them (pat-0q2kx.102).
+    //
+    // Godot's 2D editor draws each CanvasItem at its composed GLOBAL transform,
+    // skips hidden subtrees, and honours draw order
+    // (editor/plugins/canvas_item_editor_plugin.cpp). This walked raw tree order
+    // using each node's *local* `position`, so any scene with parent transforms
+    // looked wrong in edit mode while Play rendered it correctly.
+    //
+    // ⚠️ The sort must be STABLE: within one z_index, Godot keeps tree order,
+    // and `sort_by_key` preserves it. An unstable sort would reshuffle same-z
+    // siblings and make the edit view flicker between renders.
+    let mut node_ids = tree.all_nodes_in_tree_order();
+    node_ids.sort_by_key(|&id| canvas_order::effective_z_index(tree, id));
     for &node_id in &node_ids {
         let node = match tree.get_node(node_id) {
             Some(n) => n,
             None => continue,
         };
 
-        let world_pos = extract_position(node);
+        // A hidden node hides its whole subtree, so this tests visibility up the
+        // parent chain rather than the node's own `visible` flag.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
+        let world_pos = node2d::get_global_position(tree, node_id);
         let pos = Vector2::new(world_pos.x * z + offset_x, world_pos.y * z + offset_y);
         let class = node.class_name();
         let is_selected = selected == Some(node_id);
 
         // Draw node representation based on class.
         match class {
+            // Already painted by the canvas pass above, at its full transform
+            // with modulate — a placeholder icon here would cover the real
+            // pixels. The selection highlight, move gizmo and node label still
+            // draw below, so a selected Sprite2D keeps its outline and name.
+            //
+            // ⚠️ Safe as a FIRST arm specifically: when the guard is false the
+            // match falls through to the class arms that follow, not to the `_`
+            // catch-all. (Gating an individual arm with a guard is the mistake
+            // the CollisionShape2D comment below warns about — a failed guard
+            // there lands on `_` and draws a stray dot.)
+            _ if canvas_drawn.contains(&node_id.raw()) => {}
+            // Painted by the themed Control pass, which the caller supplied.
+            // The Label/Button/Control arms below are OPAQUE fills
+            // (`draw_control_rect` -> `fill_rect`), so leaving them on would
+            // bury the real text and geometry under a purple block — the
+            // `canvas_drawn` arm above cannot catch these because control
+            // primitives carry no node id (see the note at `items.extend`).
+            //
+            // Uses gdscene's own `is_control`, the same predicate the control
+            // walk uses to choose what it draws, so the two cannot drift.
+            //
+            // ⚠️ Guarded `_` arms are only safe here because a FAILED guard
+            // falls through to the class arms that follow, not to the `_`
+            // catch-all at the end — the same reason the arm above is sound.
+            _ if controls_drawn && gdscene::control_render::is_control(tree, node_id) => {}
             "Node2D" => draw_node2d_diamond(&mut fb, pos, COLOR_NODE2D),
             "Sprite2D" => {
                 draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);
             }
             "Camera2D" => draw_camera2d_icon(&mut fb, pos, COLOR_CAMERA2D, z),
+            "GPUParticles2D" | "CPUParticles2D" => {
+                // A stepped emitter shows its live cloud; an idle one (no
+                // published particles) keeps the emitter glyph so the node is
+                // still visible and pickable (pat-0q2kx.51).
+                if !draw_live_particles(&mut fb, node, pos, z) {
+                    draw_node2d_diamond(&mut fb, pos, COLOR_PARTICLES);
+                }
+            }
             "CollisionShape2D" => {
-                draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected)
+                // ⚠️ Gated INSIDE the arm, not with a match guard: a failing
+                // guard falls through to the `_` catch-all below, which draws a
+                // default dot — so an overlay switched off would swap the gizmo
+                // for a different mark rather than hiding it.
+                if shows(crate::viewport_2d::CanvasOverlay::CollisionShapes) {
+                    draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected);
+                }
+            }
+            // A baked NavigationRegion2D shows its navmesh, the same way a
+            // CollisionShape2D shows its shape (pat-s3rrv.82). Unbaked regions
+            // fall through to nothing drawn, which is what "not baked yet"
+            // should look like.
+            "NavigationRegion2D" => {
+                if shows(crate::viewport_2d::CanvasOverlay::NavigationRegions) {
+                    draw_navigation_region(&mut fb, node, pos, z);
+                }
             }
             "CharacterBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_CHARBODY, node),
             "RigidBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_RIGIDBODY, node),
@@ -184,6 +954,40 @@ fn render_scene_inner(
                 let scaled_size = Vector2::new(size.x * z, size.y * z);
                 draw_control_rect(&mut fb, pos, scaled_size, COLOR_CONTROL);
             }
+            // A ColorRect is a solid block of its own `color`, not a marker
+            // (pat-0q2kx.102). Without this arm it fell to the `_` case below
+            // and drew a 2px COLOR_DEFAULT dot: `size` and `color` were both
+            // ignored, so two stacked rects were byte-identical however they
+            // were ordered — which made the z-order half of this bead
+            // unobservable in edit mode even though the z sort above is
+            // correct.
+            //
+            // The Play view already draws it properly
+            // (`viewport_2d_render.rs` -> `Render2DKind::ColorRect`), so this
+            // was the two-views-disagree bug this bead exists to close. Same
+            // defaults as that path: `color` absent -> white, matching Godot's
+            // `ColorRect.color` default.
+            "ColorRect" => {
+                // Read `size` directly rather than through `extract_size`: that
+                // helper substitutes a 40x20 MARKER size when the property is
+                // absent, which is right for the Control/Label/Button glyphs
+                // but wrong here — an unsized ColorRect draws nothing in Godot,
+                // and inventing a block would put pixels on screen that Play
+                // does not draw.
+                let size = match node.get_property("size") {
+                    Variant::Vector2(v) => v,
+                    _ => Vector2::ZERO,
+                };
+                let color = match node.get_property("color") {
+                    Variant::Color(c) => c,
+                    _ => Color::WHITE,
+                };
+                draw::fill_rect(
+                    &mut fb,
+                    Rect2::new(pos, Vector2::new(size.x * z, size.y * z)),
+                    color,
+                );
+            }
             "Node" => {
                 // Skip root node, draw small circle for others.
                 if node.parent().is_some() {
@@ -196,15 +1000,30 @@ fn render_scene_inner(
         }
 
         // Draw selection highlight.
+        //
+        // ⚠️ No node NAMES are drawn (pat-uipye). Godot's 2D editor never
+        // labels nodes in the canvas (canvas_item_editor_plugin.cpp draws
+        // rects, pivots, anchors and gizmos, no names); Patina drew every
+        // node's name cut at 12 characters ("CollisionSha"), centred under the
+        // node's ORIGIN — so a Control's label sat left of the control and
+        // over its text.
         if is_selected {
-            draw_selection_highlight(&mut fb, pos, class, z);
-            // Draw transform gizmo at node position.
-            draw_move_gizmo(&mut fb, pos, z);
-            // Draw node label for selected node.
-            draw_node_label(&mut fb, pos, node.name(), COLOR_SELECTED);
-        } else if class != "Node" || node.parent().is_some() {
-            // Draw node label for non-root nodes.
-            draw_node_label(&mut fb, pos, node.name(), COLOR_LABEL_TEXT);
+            if gdscene::control_render::is_control(tree, node_id) {
+                // A Control is outlined as its whole RECT, as Godot's
+                // `_draw_selection` does (`get_anchorable_rect` through the
+                // item's global transform), not as a fixed-size marker box at
+                // its origin: a full-rect Title showed as an 8px square in the
+                // corner (pat-5puo3). The rect was resolved by the Control
+                // layout pass the edit view ran above.
+                let r = gdscene::control::get_global_rect(tree, node_id);
+                let tl = Vector2::new(r.position.x * z + offset_x, r.position.y * z + offset_y);
+                draw_selection_rect(&mut fb, tl, Vector2::new(r.size.x * z, r.size.y * z));
+                draw_move_gizmo(&mut fb, tl, z);
+            } else {
+                draw_selection_highlight(&mut fb, pos, class, z);
+                // Draw transform gizmo at node position.
+                draw_move_gizmo(&mut fb, pos, z);
+            }
         }
     }
 
@@ -229,10 +1048,19 @@ pub fn compute_scene_bounds(tree: &SceneTree) -> Rect2 {
             None => continue,
         };
 
-        let pos = extract_position(node);
-        if pos.x == 0.0 && pos.y == 0.0 && !node.has_property("position") {
+        // Global, to match what the render pass actually draws (pat-0q2kx.102).
+        // Bounding local positions while drawing global ones would centre the
+        // editor camera on a point no pixel occupies, so a scene built out of
+        // parent transforms would open off-screen.
+        //
+        // The "has no position property" skip still consults the node's OWN
+        // property: a node that never declares one is a non-visual node that
+        // should not stretch the bounds, even though its parent chain would
+        // give it a non-zero global position.
+        if !node.has_property("position") && extract_position(node) == Vector2::ZERO {
             continue;
         }
+        let pos = node2d::get_global_position(tree, node_id);
 
         found = true;
         min_x = min_x.min(pos.x);
@@ -260,7 +1088,7 @@ pub fn extract_position(node: &gdscene::node::Node) -> Vector2 {
 }
 
 /// Extracts the size from a node's properties, defaulting to (40, 20).
-fn extract_size(node: &gdscene::node::Node) -> Vector2 {
+pub fn extract_size(node: &gdscene::node::Node) -> Vector2 {
     match node.get_property("size") {
         Variant::Vector2(v) => v,
         _ => Vector2::new(40.0, 20.0),
@@ -400,7 +1228,7 @@ fn draw_node2d_diamond(fb: &mut FrameBuffer, pos: Vector2, color: Color) {
             continue;
         }
         let x_start = ((pos.x - half_w) as i32).max(0) as u32;
-        let x_end = ((pos.x + half_w) as i32).min(fb.width as i32) as u32;
+        let x_end = ((pos.x + half_w) as i32).max(0).min(fb.width as i32) as u32;
         for x in x_start..x_end {
             fb.set_pixel(x, y as u32, color);
         }
@@ -457,6 +1285,63 @@ fn draw_sprite2d_icon(fb: &mut FrameBuffer, pos: Vector2, color: Color, zoom: f3
 }
 
 /// Draws Sprite2D with texture from cache or blue placeholder.
+/// Edge length (px, at zoom 1) of the quad drawn for one live particle in the
+/// edit viewport. Matches the runtime quad so the preview and the Play frame
+/// agree on particle size.
+const PARTICLE_QUAD_SIZE: f32 = 4.0;
+
+/// Draws a particle emitter's live particles into the edit viewport, returning
+/// whether any were drawn (pat-0q2kx.51).
+///
+/// `MainLoop::process_particles` publishes the live set onto the node every frame
+/// as `_particle_positions` (emitter-local), `_particle_colors`, and
+/// `_particle_scales`; the edit viewport reads the same arrays the Play canvas
+/// does, so a scene being stepped shows moving particles in both. Positions are
+/// emitter-local, so each quad lands at the emitter's screen position plus its
+/// zoom-scaled local offset. Returns `false` when the node has no published
+/// particles (the scene is not running), leaving the caller to draw the emitter
+/// glyph instead.
+fn draw_live_particles(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+) -> bool {
+    let positions = match node.get_property("_particle_positions") {
+        Variant::PackedVector2Array(v) => v,
+        _ => return false,
+    };
+    if positions.is_empty() {
+        return false;
+    }
+    let colors = match node.get_property("_particle_colors") {
+        Variant::PackedColorArray(v) => v,
+        _ => Vec::new(),
+    };
+    let scales = match node.get_property("_particle_scales") {
+        Variant::PackedFloat32Array(v) => v,
+        _ => Vec::new(),
+    };
+    for (i, local) in positions.iter().enumerate() {
+        let scale = match scales.get(i).copied() {
+            Some(s) if s > 0.0 => s,
+            _ => 1.0,
+        };
+        let color = colors.get(i).copied().unwrap_or(Color::WHITE);
+        let side = (PARTICLE_QUAD_SIZE * scale * zoom).max(1.0);
+        let center = Vector2::new(pos.x + local.x * zoom, pos.y + local.y * zoom);
+        draw::fill_rect_blended(
+            fb,
+            Rect2::new(
+                Vector2::new(center.x - side / 2.0, center.y - side / 2.0),
+                Vector2::new(side, side),
+            ),
+            color,
+        );
+    }
+    true
+}
+
 fn draw_sprite2d_with_texture(
     fb: &mut FrameBuffer,
     node: &gdscene::node::Node,
@@ -488,21 +1373,51 @@ fn draw_sprite2d_with_texture(
             Variant::Color(c) => c,
             _ => Color::WHITE,
         };
+        // Which pixels of the texture this sprite samples — an explicit region
+        // or cell `frame` of the hframes × vframes sheet (pat-0q2kx.107). The
+        // edit view drew the whole texture regardless, so a sheet-based sprite
+        // looked nothing like it does at runtime.
+        let sheet = crate::viewport_2d_render::sprite_sheet_for_node(node);
+        let (tw, th) = (tex.width as f32, tex.height as f32);
+        let mut src = gdscene::sprite_frames::sprite_source_rect(
+            Vector2::new(tw, th),
+            sheet.region_enabled,
+            sheet.region_rect,
+            sheet.hframes,
+            sheet.vframes,
+            sheet.frame,
+        );
+
         let mut draw_tex = tex;
         if flip_h {
             draw_tex = draw_tex.flip_horizontal();
+            // Flipping maps x → width - x, so the cell's span moves with it.
+            // Mirroring the source rect keeps the same pixels selected instead
+            // of sampling the mirrored position of a different cell.
+            src.position.x = tw - (src.position.x + src.size.x);
         }
         if flip_v {
             draw_tex = draw_tex.flip_vertical();
+            src.position.y = th - (src.position.y + src.size.y);
         }
-        let sw = draw_tex.width as f32 * zoom;
-        let sh = draw_tex.height as f32 * zoom;
-        let dx = pos.x + offset.x * zoom - sw / 2.0;
-        let dy = pos.y + offset.y * zoom - sh / 2.0;
-        draw::draw_texture_rect_blended(
+
+        // The drawn size is the SOURCE size, not the whole texture.
+        let sw = src.size.x * zoom;
+        let sh = src.size.y * zoom;
+        // `centered` (Godot's default) centres the sub-rect on the node origin.
+        let (dx, dy) = if sheet.centered {
+            (
+                pos.x + offset.x * zoom - sw / 2.0,
+                pos.y + offset.y * zoom - sh / 2.0,
+            )
+        } else {
+            (pos.x + offset.x * zoom, pos.y + offset.y * zoom)
+        };
+        draw::draw_texture_region_blended(
             fb,
             &draw_tex,
             Rect2::new(Vector2::new(dx, dy), Vector2::new(sw, sh)),
+            src,
             modulate,
         );
     } else {
@@ -602,6 +1517,48 @@ fn draw_collision_shape(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
 /// Supports `shape_type` property values: "circle", "rectangle", "capsule".
 /// Falls back to a default circle when no shape_type is set.
 /// When `selected`, also draws resize handles.
+/// Draws a baked `NavigationRegion2D`'s navmesh as closed polygon outlines.
+///
+/// ⚠️ `pos` is the region's GLOBAL position already mapped into screen space by
+/// the caller (`world_pos * zoom + offset`), and the polygons come back in
+/// node-LOCAL space, so each point is `pos + v * zoom`. Using the pre-offset
+/// points from `navigation_overlay_2d` here would apply the position twice.
+///
+/// Faces are filled and edges stroked, matching Godot, whose defaults are
+/// `geometry_face_color = Color(0.5, 1, 1, 0.4)` and
+/// `geometry_edge_color = Color(0.5, 1, 1, 1)`
+/// (`servers/navigation_2d/navigation_server_2d.cpp:232`).
+///
+/// ⚠️ The fill must be BLENDED. `polygon_raster::fill_polygon` writes through
+/// `set_pixel`, so a 0.4-alpha face there lands fully opaque and erases the
+/// scene under the overlay instead of tinting it.
+///
+/// Edges close the loop — a polygon of N points draws N segments, not N - 1 —
+/// so a region never renders as an open fan.
+fn draw_navigation_region(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+) {
+    for points in crate::navigation_overlay::navigation_polygons_local(node) {
+        let screen: Vec<Vector2> = points
+            .iter()
+            .map(|v| Vector2::new(pos.x + v.x * zoom, pos.y + v.y * zoom))
+            .collect();
+        gdrender2d::polygon_raster::fill_polygon_blended(fb, &screen, COLOR_NAVMESH_FACE);
+        for i in 0..screen.len() {
+            draw::draw_line_blended(
+                fb,
+                screen[i],
+                screen[(i + 1) % screen.len()],
+                COLOR_NAVMESH_EDGE,
+                1.0,
+            );
+        }
+    }
+}
+
 fn draw_collision_shape_from_node(
     fb: &mut FrameBuffer,
     node: &gdscene::node::Node,
@@ -962,6 +1919,29 @@ fn draw_control_rect(fb: &mut FrameBuffer, pos: Vector2, size: Vector2, color: C
 }
 
 /// Draws a selection highlight around a node (zoom-aware).
+/// Outlines a selected Control's screen-space rect, with Godot's corner
+/// handles.
+fn draw_selection_rect(fb: &mut FrameBuffer, tl: Vector2, size: Vector2) {
+    let tr = Vector2::new(tl.x + size.x, tl.y);
+    let br = Vector2::new(tl.x + size.x, tl.y + size.y);
+    let bl = Vector2::new(tl.x, tl.y + size.y);
+    draw::draw_line(fb, tl, tr, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, tr, br, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, br, bl, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, bl, tl, COLOR_SELECTED, 1.0);
+    let cs = 2.0;
+    for corner in &[tl, tr, br, bl] {
+        draw::fill_rect(
+            fb,
+            Rect2::new(
+                Vector2::new(corner.x - cs, corner.y - cs),
+                Vector2::new(cs * 2.0, cs * 2.0),
+            ),
+            COLOR_SELECTED,
+        );
+    }
+}
+
 fn draw_selection_highlight(fb: &mut FrameBuffer, pos: Vector2, class: &str, zoom: f32) {
     let (hw, hh) = match class {
         "Sprite2D" => ((18.0 * zoom).max(10.0), (18.0 * zoom).max(10.0)),
@@ -1129,111 +2109,16 @@ fn draw_bitmap_string(fb: &mut FrameBuffer, x: f32, y: f32, s: &str, color: Colo
     }
 }
 
-/// Returns a 5x7 bitmap for common characters. Each `u8` has its low 5 bits
-/// representing pixel columns for that row.
+/// Returns a 5x7 bitmap for a character, with full printable-ASCII coverage.
+///
+/// Delegates to the shared [`gdrender2d::font`] bitmap font so viewport labels
+/// and ruler ticks use the same complete glyph set as the rest of the engine.
+/// This module previously kept its own partial table (only `0-9`, `A-F`, `a`,
+/// `-`, space), so every other letter fell back to a filled box — node names
+/// like "Player" rendered as tofu (pat-rvebj). The encoding is identical: each
+/// `u8` holds one row, low 5 bits, MSB = leftmost column.
 fn char_bitmap(ch: char) -> [u8; 7] {
-    match ch {
-        '0' => [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-        '1' => [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-        '2' => [
-            0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111,
-        ],
-        '3' => [
-            0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110,
-        ],
-        '4' => [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-        '5' => [
-            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-        ],
-        '6' => [
-            0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-        '7' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-        '8' => [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-        '9' => [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
-        ],
-        'A' => [
-            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-        'a' => [
-            0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111,
-        ],
-        'B' => [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-        ],
-        'C' => [
-            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
-        ],
-        'D' => [
-            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-        ],
-        'E' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-        ],
-        'F' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-        '-' => [
-            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
-        ],
-        ' ' => [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
-        ],
-        _ => {
-            // For unrecognized chars, draw a small filled block.
-            if ch.is_ascii_uppercase() || ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-                // Generic letter: filled square with gap.
-                [
-                    0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
-                ]
-            } else {
-                [
-                    0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
-                ]
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Node labels
-// ---------------------------------------------------------------------------
-
-/// Draws a node name label below the node position.
-fn draw_node_label(fb: &mut FrameBuffer, pos: Vector2, name: &str, color: Color) {
-    if name.is_empty() {
-        return;
-    }
-    // Truncate to 12 chars to avoid very long labels.
-    let display: &str = if name.len() > 12 { &name[..12] } else { name };
-    let text_w = bitmap_string_width(display);
-    let lx = pos.x - text_w / 2.0;
-    let ly = pos.y + 14.0; // Below the node icon.
-
-    // Draw a small dark background behind the text for readability.
-    let bg = Color::new(0.0, 0.0, 0.0, 0.5);
-    let pad = 2.0;
-    draw::fill_rect_blended(
-        fb,
-        Rect2::new(
-            Vector2::new(lx - pad, ly - pad),
-            Vector2::new(text_w + pad * 2.0, 7.0 + pad * 2.0),
-        ),
-        bg,
-    );
-
-    draw_bitmap_string(fb, lx, ly, display, color);
+    gdrender2d::font::char_bitmap(ch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,8 +2391,16 @@ pub fn hit_test_with_zoom_pan(
             continue;
         }
 
+        // Hit-testing must use the SAME transform the render pass draws with,
+        // or clicking a child of a moved/rotated parent would select nothing
+        // where its pixels actually are (pat-0q2kx.102). A hidden node is not
+        // pickable, matching Godot's editor.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
         let class = node.class_name();
-        let node_pos = extract_position(node);
+        let node_pos = node2d::get_global_position(tree, node_id);
 
         if matches!(class, "Control" | "Label" | "Button") {
             let size = extract_size(node);
@@ -1579,8 +2472,16 @@ pub fn hit_test(
             continue;
         }
 
+        // Hit-testing must use the SAME transform the render pass draws with,
+        // or clicking a child of a moved/rotated parent would select nothing
+        // where its pixels actually are (pat-0q2kx.102). A hidden node is not
+        // pickable, matching Godot's editor.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
         let class = node.class_name();
-        let node_pos = extract_position(node);
+        let node_pos = node2d::get_global_position(tree, node_id);
 
         // For Control nodes, use bounding rect hit test.
         if matches!(class, "Control" | "Label" | "Button") {
@@ -1633,6 +2534,12 @@ fn extract_z_index(node: &gdscene::node::Node) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    //! 🔑 Every test here starts with `clear_for_testing()` (pat-hukbz): a
+    //! test-scoped, EMPTY ClassDB. The marker arms (`draw_static_body`, the
+    //! Node2D diamond, …) only draw a node the canvas pass did not, and with
+    //! Sprite2D/StaticBody2D registered the canvas pass claims them. So these
+    //! tests pin the unregistered-fallback path, and under `cargo test` the
+    //! process-wide ClassDB holds whatever other tests registered.
     use super::*;
     use gdscene::node::Node;
 
@@ -1647,6 +2554,7 @@ mod tests {
 
     #[test]
     fn render_empty_scene() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 100, 100);
         assert_eq!(fb.width, 100);
@@ -1658,6 +2566,7 @@ mod tests {
 
     #[test]
     fn render_scene_dimensions() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 200, 150);
         assert_eq!(fb.width, 200);
@@ -1666,6 +2575,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_node2d() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene(&tree, None, 200, 200);
         // The node should have drawn something — not all BG color.
@@ -1675,6 +2585,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_sprite2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Sprite", "Sprite2D");
@@ -1689,6 +2600,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_camera2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Cam", "Camera2D");
@@ -1703,6 +2615,7 @@ mod tests {
 
     #[test]
     fn selected_node_highlighting() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_no_sel = render_scene(&tree, None, 200, 200);
         let fb_sel = render_scene(&tree, Some(node_id), 200, 200);
@@ -1721,6 +2634,7 @@ mod tests {
 
     #[test]
     fn grid_draws_lines() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 200, 200);
         // Grid lines should produce pixels that differ from BG.
@@ -1730,6 +2644,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_empty_scene() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let bounds = compute_scene_bounds(&tree);
         assert_eq!(bounds.size, Vector2::ZERO);
@@ -1737,6 +2652,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_single_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let bounds = compute_scene_bounds(&tree);
         // Single node at (100, 100) → bounds is a zero-size rect at (100, 100).
@@ -1745,6 +2661,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_multiple_nodes() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1763,6 +2680,7 @@ mod tests {
 
     #[test]
     fn render_control_node() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Btn", "Button");
@@ -1778,6 +2696,7 @@ mod tests {
 
     #[test]
     fn render_default_class_node() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Custom", "CustomClass");
@@ -1791,6 +2710,7 @@ mod tests {
 
     #[test]
     fn render_multiple_nodes() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1815,6 +2735,7 @@ mod tests {
 
     #[test]
     fn selected_dot_above_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene(&tree, Some(node_id), 200, 200);
         // The selected dot should be bright amber.
@@ -1828,6 +2749,7 @@ mod tests {
 
     #[test]
     fn node_without_position_at_origin() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let node = Node::new("Plain", "Node");
@@ -1840,6 +2762,7 @@ mod tests {
 
     #[test]
     fn render_is_deterministic() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb1 = render_scene(&tree, Some(node_id), 200, 200);
         let fb2 = render_scene(&tree, Some(node_id), 200, 200);
@@ -1850,6 +2773,7 @@ mod tests {
 
     #[test]
     fn hit_test_finds_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // Node is at (100, 100). Viewport is 200x200.
         // Scene bounds center = (100, 100), offset = (0, 0).
@@ -1860,6 +2784,7 @@ mod tests {
 
     #[test]
     fn hit_test_misses_empty_area() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Click far from the node at (100, 100).
         let result = hit_test(&tree, 200, 200, 0.0, 0.0);
@@ -1868,6 +2793,7 @@ mod tests {
 
     #[test]
     fn hit_test_returns_closest() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1891,6 +2817,7 @@ mod tests {
 
     #[test]
     fn hit_test_skips_root() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         // Click at center — root should not be returned.
         let result = hit_test(&tree, 200, 200, 100.0, 100.0);
@@ -1899,6 +2826,7 @@ mod tests {
 
     #[test]
     fn hit_test_sprite2d_larger_radius() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1914,6 +2842,7 @@ mod tests {
 
     #[test]
     fn hit_test_control_bounding_rect() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1935,6 +2864,7 @@ mod tests {
 
     #[test]
     fn hit_test_prefers_higher_z_index() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -1956,6 +2886,7 @@ mod tests {
 
     #[test]
     fn hit_test_within_radius_boundary() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // Node at (100, 100), Node2D hit radius = 15.
         // Click exactly at radius boundary (115, 100).
@@ -1969,6 +2900,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_round_trip() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Node at (100, 100), viewport 200x200.
         // Offset should be (0, 0), so pixel (100, 100) = scene (100, 100).
@@ -1981,6 +2913,7 @@ mod tests {
 
     #[test]
     fn render_with_zoom_does_not_panic() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 2.0, (0.0, 0.0));
         assert_eq!(fb.width, 200);
@@ -1989,6 +2922,7 @@ mod tests {
 
     #[test]
     fn render_with_zoom_and_pan() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 0.5, (50.0, -30.0));
         assert_eq!(fb.width, 200);
@@ -1996,6 +2930,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_with_zoom_pan_identity() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // zoom=1, pan=(0,0) should match regular pixel_to_scene.
         let a = pixel_to_scene(&tree, 200, 200, 100.0, 100.0);
@@ -2006,6 +2941,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_zoom_scales_correctly() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // At zoom=2, moving 10 pixels in screen space = 5 pixels in world space.
         let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 2.0, (0.0, 0.0), 100.0, 100.0);
@@ -2018,6 +2954,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_pan_offsets() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Panning right by 20px should shift the scene left by 20 world units (at zoom=1).
         let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
@@ -2030,6 +2967,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_finds_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // At zoom=1, pan=(0,0), pixel (100,100) maps to scene (100,100) which is on the node.
         let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
@@ -2038,6 +2976,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_zoom_in() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // At zoom=2, the node at world (100,100) appears at pixel
         // (100*2 + offset_x, 100*2 + offset_y) where offset = (100 - 100*2, 100 - 100*2) = (-100, -100).
@@ -2048,6 +2987,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_miss_after_pan() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Pan far away — node should no longer be at pixel (100,100).
         let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (500.0, 500.0), 100.0, 100.0);
@@ -2056,6 +2996,7 @@ mod tests {
 
     #[test]
     fn render_selected_has_gizmo() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -2074,6 +3015,7 @@ mod tests {
 
     #[test]
     fn render_selected_has_green_gizmo() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -2093,6 +3035,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_draws_red_horizontal_line() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The origin crosshair at Y=0 should add some reddish blended pixels.
@@ -2112,6 +3055,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_draws_green_vertical_line() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // offset_x for an empty scene is 100.
@@ -2130,6 +3074,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_semi_transparent() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The crosshair should be blended, not full red/green.
@@ -2151,6 +3096,7 @@ mod tests {
 
     #[test]
     fn rulers_draw_dark_background() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The top-left corner should be ruler background (darker than BG).
@@ -2163,6 +3109,7 @@ mod tests {
 
     #[test]
     fn rulers_have_tick_marks() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 400, 400, 1.0, (0.0, 0.0));
         // The ruler region should contain tick marks that differ from the ruler background.
@@ -2182,6 +3129,7 @@ mod tests {
 
     #[test]
     fn rulers_border_lines_present() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // Vertical ruler border at x=RULER_SIZE.
@@ -2196,6 +3144,7 @@ mod tests {
 
     #[test]
     fn node2d_diamond_is_filled() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // Count amber pixels -- a filled diamond should have significantly more
@@ -2214,6 +3163,7 @@ mod tests {
 
     #[test]
     fn sprite2d_has_white_border_and_cross() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Sprite", "Sprite2D");
@@ -2231,6 +3181,7 @@ mod tests {
 
     #[test]
     fn camera2d_has_viewport_outline() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Cam", "Camera2D");
@@ -2252,6 +3203,7 @@ mod tests {
 
     #[test]
     fn collision_shape2d_renders_green_circle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Col", "CollisionShape2D");
@@ -2268,6 +3220,7 @@ mod tests {
 
     #[test]
     fn area2d_renders_blue_tint() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Area", "Area2D");
@@ -2285,6 +3238,7 @@ mod tests {
 
     #[test]
     fn label_node_shows_aa_icon() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("MyLabel", "Label");
@@ -2307,6 +3261,7 @@ mod tests {
 
     #[test]
     fn button_renders_with_border() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Btn", "Button");
@@ -2331,6 +3286,7 @@ mod tests {
 
     #[test]
     fn selected_node_shows_label() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -2344,27 +3300,32 @@ mod tests {
         };
         assert!(
             count_label(&fb_sel) > count_label(&fb_no),
-            "selected node should show name label"
+            "a selected node shows its selection highlight"
         );
     }
 
+    /// Godot's 2D editor draws no node names (pat-uipye; the real-game
+    /// differential is `tests/edit_view_2d_selection_and_no_node_names.rs`).
     #[test]
-    fn non_selected_nodes_show_labels() {
-        let (tree, _) = make_tree_with_node2d();
-        let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
-        // Non-root nodes get labels too (in gray/white).
-        // The label background is a dark blended rect; text is light colored.
-        let has_label_text = fb
-            .pixels
-            .iter()
-            .any(|p| p.r > 0.7 && p.g > 0.7 && p.b > 0.7 && p.a > 0.8);
-        assert!(has_label_text, "non-selected nodes should show name labels");
+    fn non_selected_nodes_draw_no_name_labels() {
+        gdobject::class_db::clear_for_testing();
+        let (mut tree, node_id) = make_tree_with_node2d();
+        let before = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        tree.get_node_mut(node_id)
+            .unwrap()
+            .set_name("SomeOtherLongName");
+        let after = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        assert!(
+            before.pixels == after.pixels,
+            "a node's name must not change the canvas"
+        );
     }
 
     // -- bitmap font tests ------------------------------------------------
 
     #[test]
     fn bitmap_string_width_correct() {
+        gdobject::class_db::clear_for_testing();
         assert_eq!(bitmap_string_width(""), 0.0);
         assert_eq!(bitmap_string_width("A"), 5.0);
         assert_eq!(bitmap_string_width("AB"), 11.0);
@@ -2373,6 +3334,7 @@ mod tests {
 
     #[test]
     fn bitmap_char_draws_pixels() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(20, 20, Color::BLACK);
         draw_bitmap_char(&mut fb, 5.0, 5.0, 'A', Color::WHITE);
         // The 'A' character should draw some white pixels.
@@ -2385,6 +3347,7 @@ mod tests {
 
     #[test]
     fn bitmap_char_clips_to_bounds() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(10, 10, Color::BLACK);
         // Draw character partially off-screen; should not panic.
         draw_bitmap_char(&mut fb, -3.0, -3.0, '0', Color::WHITE);
@@ -2394,6 +3357,7 @@ mod tests {
 
     #[test]
     fn bitmap_string_draws_multiple_chars() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(50, 20, Color::BLACK);
         draw_bitmap_string(&mut fb, 2.0, 5.0, "123", Color::WHITE);
         let white_count = fb.pixels.iter().filter(|&&p| p == Color::WHITE).count();
@@ -2403,10 +3367,48 @@ mod tests {
         );
     }
 
+    /// Regression for pat-rvebj: viewport node-name labels rendered as tofu
+    /// boxes because this module kept its own partial glyph table (only `0-9`,
+    /// `A-F`, `a`, `-`, space), so every other letter fell through to a filled
+    /// placeholder box. Now that `char_bitmap` delegates to the shared
+    /// `gdrender2d::font`, every printable character in real node names and
+    /// ruler ticks must resolve to a distinct, non-placeholder glyph.
+    #[test]
+    fn editor_viewport_label_glyph_coverage() {
+        gdobject::class_db::clear_for_testing();
+        // The old fallback drawn for unknown letters: a filled rectangle.
+        const FALLBACK_BOX: [u8; 7] = [
+            0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
+        ];
+
+        // Every char that appears in the demo scene's node labels and ruler
+        // ticks must map to a real glyph — not the tofu box, not blank.
+        for ch in "PlayerEnemyGround0123456789-".chars() {
+            let bm = char_bitmap(ch);
+            assert_ne!(
+                bm, FALLBACK_BOX,
+                "char '{ch}' renders as a placeholder box (tofu)"
+            );
+            assert_ne!(bm, [0u8; 7], "char '{ch}' renders as blank");
+        }
+
+        // "Player" must not be six identical cells: each letter is its own
+        // glyph. Before the fix, P/l/y/e/r all collapsed to the box and only
+        // 'a' differed (2 distinct), which is exactly the reported tofu.
+        let player_cells: std::collections::HashSet<[u8; 7]> =
+            "Player".chars().map(char_bitmap).collect();
+        assert!(
+            player_cells.len() >= 5,
+            "'Player' label has only {} distinct glyph cells (tofu collapse)",
+            player_cells.len()
+        );
+    }
+
     // -- blend_pixel tests ------------------------------------------------
 
     #[test]
     fn blend_pixel_alpha_compositing() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         // Blend semi-transparent red on top of blue.
         fb.blend_pixel(2, 2, Color::new(1.0, 0.0, 0.0, 0.5));
@@ -2418,6 +3420,7 @@ mod tests {
 
     #[test]
     fn blend_pixel_fully_opaque_replaces() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         fb.blend_pixel(1, 1, Color::rgb(1.0, 0.0, 0.0));
         let p = fb.get_pixel(1, 1);
@@ -2427,6 +3430,7 @@ mod tests {
 
     #[test]
     fn blend_pixel_fully_transparent_no_change() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         fb.blend_pixel(1, 1, Color::new(1.0, 0.0, 0.0, 0.0));
         let p = fb.get_pixel(1, 1);
@@ -2438,6 +3442,7 @@ mod tests {
 
     #[test]
     fn dashed_line_draws_segments() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(100, 10, Color::BLACK);
         draw_dashed_line(
             &mut fb,
@@ -2458,6 +3463,7 @@ mod tests {
 
     #[test]
     fn format_ruler_number_values() {
+        gdobject::class_db::clear_for_testing();
         assert_eq!(format_ruler_number(0.0), "0");
         assert_eq!(format_ruler_number(100.0), "100");
         assert_eq!(format_ruler_number(-200.0), "-200");
@@ -2468,12 +3474,14 @@ mod tests {
 
     #[test]
     fn snap_ruler_interval_at_normal_zoom() {
+        gdobject::class_db::clear_for_testing();
         let interval = snap_ruler_interval(100.0, 1.0);
         assert!((interval - 100.0).abs() < 0.01);
     }
 
     #[test]
     fn snap_ruler_interval_zoomed_out() {
+        gdobject::class_db::clear_for_testing();
         // At zoom 0.1, screen_size = 10 < 20, so interval should be 4x.
         let interval = snap_ruler_interval(100.0, 0.1);
         assert!((interval - 400.0).abs() < 0.01);
@@ -2481,6 +3489,7 @@ mod tests {
 
     #[test]
     fn snap_ruler_interval_zoomed_in() {
+        gdobject::class_db::clear_for_testing();
         // At zoom 3.0, screen_size = 300 > 200, so interval should be halved.
         let interval = snap_ruler_interval(100.0, 3.0);
         assert!((interval - 50.0).abs() < 0.01);
@@ -2490,6 +3499,7 @@ mod tests {
 
     #[test]
     fn selection_highlight_collision_shape() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Col", "CollisionShape2D");
@@ -2511,6 +3521,7 @@ mod tests {
 
     #[test]
     fn selection_highlight_area2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Area", "Area2D");
@@ -2533,6 +3544,7 @@ mod tests {
 
     #[test]
     fn render_scene_backward_compat() {
+        gdobject::class_db::clear_for_testing();
         // render_scene() should still work and produce output.
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene(&tree, Some(node_id), 200, 200);
@@ -2551,6 +3563,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_circle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -2573,6 +3586,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_rectangle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -2596,6 +3610,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_capsule() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -2619,6 +3634,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_default_when_no_type() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -2639,6 +3655,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_selected_has_handles() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -2665,6 +3682,7 @@ mod tests {
 
     #[test]
     fn render_character_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Player", "CharacterBody2D");
@@ -2679,6 +3697,7 @@ mod tests {
 
     #[test]
     fn render_rigid_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ball", "RigidBody2D");
@@ -2696,6 +3715,7 @@ mod tests {
 
     #[test]
     fn render_static_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ground", "StaticBody2D");
@@ -2713,6 +3733,7 @@ mod tests {
 
     #[test]
     fn render_rigid_body_with_velocity_arrow() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ball", "RigidBody2D");
@@ -2735,6 +3756,7 @@ mod tests {
 
     #[test]
     fn debug_hierarchy_hang_repro() {
+        gdobject::class_db::clear_for_testing();
         // Reproduce hierarchy.tscn: Node2D parent with Sprite2D child, wide spread positions
         let mut tree = SceneTree::new();
         let root = tree.root_id();
@@ -2761,5 +3783,166 @@ mod tests {
         let fb = render_scene(&tree, None, 256, 256);
         assert_eq!(fb.width, 256);
         eprintln!("Part 2 OK");
+    }
+
+    /// A `NavigationRegion2D` at the scene origin, optionally carrying a baked
+    /// quad navmesh.
+    fn nav_region_tree(baked: bool) -> SceneTree {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        if baked {
+            region.set_property(
+                "__navmesh_vertices__",
+                Variant::PackedVector2Array(vec![
+                    Vector2::new(-40.0, -30.0),
+                    Vector2::new(40.0, -30.0),
+                    Vector2::new(40.0, 30.0),
+                    Vector2::new(-40.0, 30.0),
+                ]),
+            );
+            region.set_property(
+                "__navmesh_polygons__",
+                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])].into()),
+            );
+        }
+        tree.add_child(root, region).unwrap();
+        tree
+    }
+
+    /// Pixels of the navmesh EDGE colour, Godot's opaque `Color(0.5, 1, 1)`.
+    ///
+    /// ⚠️ Keyed on the edge, not the face: the face is blended at alpha 0.4 and
+    /// lands near (0.25, 0.45, 0.46), which no tight predicate can share with
+    /// the opaque edge. The fill is asserted separately, by interior coverage.
+    /// Verified against every `Color` constant in this file — nothing else has
+    /// both green and blue above 0.9.
+    fn navmesh_edge_pixels(fb: &FrameBuffer) -> usize {
+        fb.pixels
+            .iter()
+            .filter(|p| p.g > 0.9 && p.b > 0.9 && p.r > 0.3 && p.r < 0.7)
+            .count()
+    }
+
+    /// 🔑 A BAKED `NavigationRegion2D` DRAWS ITS NAVMESH IN THE EDITOR VIEWPORT.
+    ///
+    /// ⚠️ The editor viewport is IMMEDIATE-MODE — `render_scene_inner` draws
+    /// straight into the framebuffer, it does not build a `Render2DItem` list.
+    /// An overlay written as render items (which is the right shape for the
+    /// runtime canvas) never appears here, so this test asserts PIXELS.
+    ///
+    /// The unbaked half is the control: it is the same scene minus the baked
+    /// properties, so a pass cannot come from some other cyan chrome.
+    #[test]
+    fn a_baked_navigation_region_draws_its_navmesh_in_the_editor_viewport() {
+        gdobject::class_db::clear_for_testing();
+        let baked = render_scene(&nav_region_tree(true), None, 320, 240);
+        let unbaked = render_scene(&nav_region_tree(false), None, 320, 240);
+
+        let drawn = navmesh_edge_pixels(&baked);
+        let control = navmesh_edge_pixels(&unbaked);
+        assert!(
+            drawn > control,
+            "a baked region must add navmesh pixels: baked={drawn}, unbaked={control}"
+        );
+        assert!(
+            drawn >= 100,
+            "an 80x60 quad outline should cover a few hundred pixels, got {drawn} \
+             — a handful means only a corner or a single edge landed"
+        );
+
+        // ⚠️ The FACE fill, asserted through the interior rather than the edge
+        // predicate. A centre pixel that is still the background means only the
+        // outline drew — which is what shipped before the blended fill existed.
+        let centre = (baked.height / 2 * baked.width + baked.width / 2) as usize;
+        assert_ne!(
+            baked.pixels[centre], BG_COLOR,
+            "the navmesh interior must be tinted by the filled face"
+        );
+        // ...and TINTED, not painted over: an opaque fill would erase whatever
+        // the scene draws underneath, which is the bug `fill_polygon_blended`
+        // exists to avoid.
+        assert_ne!(
+            baked.pixels[centre], COLOR_NAVMESH_FACE,
+            "the face must be blended over the background, not written opaque"
+        );
+    }
+
+    /// 🔑 AN UNBAKED REGION DRAWS NO NAVMESH.
+    ///
+    /// "Not baked yet" must look like nothing, not like an empty box at the
+    /// origin — an author needs to be able to tell the two apart, which is the
+    /// same reason the overlay draws a DISABLED region greyed rather than
+    /// skipping it.
+    #[test]
+    fn an_unbaked_navigation_region_draws_no_navmesh() {
+        gdobject::class_db::clear_for_testing();
+        let fb = render_scene(&nav_region_tree(false), None, 320, 240);
+        assert_eq!(
+            navmesh_edge_pixels(&fb),
+            0,
+            "nothing in the default chrome is navmesh-cyan, so an unbaked \
+             region must contribute no such pixels"
+        );
+    }
+
+    /// 🔑 THE NAVMESH IS PLACED ONCE, NOT TWICE.
+    ///
+    /// ⚠️ `navigation_polygons_local` returns NODE-LOCAL points and the caller
+    /// has already mapped the region's GLOBAL position into screen space. A draw
+    /// routine that used the pre-offset points from `navigation_overlay_2d`
+    /// would apply the position twice — invisible at the origin, which is why
+    /// this region sits at (120, 90).
+    ///
+    /// Asserted as a bounding box rather than exact pixels: the mesh must land
+    /// around the region's own screen position, and double-offsetting puts it
+    /// twice as far from centre.
+    #[test]
+    fn the_navmesh_follows_the_regions_position_exactly_once() {
+        gdobject::class_db::clear_for_testing();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property("position", Variant::Vector2(Vector2::new(120.0, 90.0)));
+        region.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(-10.0, -10.0),
+                Vector2::new(10.0, -10.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(-10.0, 10.0),
+            ]),
+        );
+        region.set_property(
+            "__navmesh_polygons__",
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])].into()),
+        );
+        tree.add_child(root, region).unwrap();
+
+        let fb = render_scene(&tree, None, 320, 240);
+        let xs: Vec<usize> = (0..fb.pixels.len())
+            .filter(|&i| {
+                let p = fb.pixels[i];
+                p.g > 0.9 && p.b > 0.9 && p.r > 0.3 && p.r < 0.7
+            })
+            .map(|i| i % fb.width as usize)
+            .collect();
+        assert!(!xs.is_empty(), "the navmesh must be drawn at all");
+
+        // The scene is centred on its own bounds, so a single region lands near
+        // the middle of the frame whatever its authored position. Double
+        // offsetting breaks that — the mesh walks off toward one edge.
+        let (min_x, max_x) = (
+            *xs.iter().min().unwrap() as f32,
+            *xs.iter().max().unwrap() as f32,
+        );
+        let mid = (min_x + max_x) / 2.0;
+        let centre = fb.width as f32 / 2.0;
+        assert!(
+            (mid - centre).abs() < 40.0,
+            "the navmesh should sit near the centred region (x~{centre}), got \
+             x~{mid} spanning {min_x}..{max_x} — a doubled offset walks it away"
+        );
     }
 }

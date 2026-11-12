@@ -8,17 +8,136 @@
 //! The [`SceneTree`] stores attached scripts in a side map
 //! (`HashMap<NodeId, Box<dyn ScriptInstance>>`) and exposes methods to
 //! dispatch lifecycle callbacks to them.
+//!
+//! # How a script-backed Resource is represented (pat-fk17e.1)
+//!
+//! A GDScript that `extends Resource` — Godot's custom data resource, saved as
+//! a `.tres` carrying `script = ExtResource("<id>")` — becomes **an object with
+//! an instance id**, built by the scene accessor's
+//! `instantiate_script_resource` and reached from script as a
+//! `Variant::ObjectId`. It is the same carrier
+//! `load("x.gd").new()` already returned, and the exported-var values live in
+//! exactly one place: the attached [`ScriptInstance`].
+//!
+//! 🔑 **`gdvariant::ResourceRef` deliberately gets no `script` field.** The
+//! alternative the bead weighed was to keep `load()` returning
+//! `Variant::Resource` and hang a script on it. That stores the exported values
+//! twice — once in the live `ScriptInstance`, once in `ResourceRef.properties` —
+//! and `ResourceRef` is a `Clone`, `PartialEq` **value** type that is copied
+//! into node properties, compared, and written back out by the saver. Two
+//! copies of mutable state behind a value type diverge on the first assignment,
+//! and which one a save observed would depend on which copy the writer held.
+//! `ResourceRef` therefore stays a pure property bag, and a scripted resource is
+//! not one.
+//!
+//! The cost of that choice, inherited from [`SceneAccess::instantiate_script`]:
+//! the object is a `Node` parented under the scene root, so it is visible to
+//! `root.get_children()` and is not cached by path the way Godot's
+//! `ResourceLoader` caches. Replacing the node carrier with a real
+//! resource-object carrier is the parent epic's work, not a property of this
+//! representation choice.
 
 use std::collections::HashMap;
 
+use gdcore::math::{Color, Rect2, Vector2};
 use gdscript_interop::bindings::{
-    MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
+    is_scene_tree_handle, MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance,
+    ScriptPropertyInfo, SCENE_TREE_SIGNALS,
 };
 use gdscript_interop::interpreter::{ClassInstance, Interpreter, RuntimeError};
+use gdserver2d::canvas::DrawCommand;
 use gdvariant::variant::VariantType;
 use gdvariant::Variant;
 
 use crate::node::NodeId;
+
+// -- `draw_*` argument coercion (pat-0q2kx.82) ------------------------------
+//
+// GDScript is dynamically typed, so a literal `2` reaches a float parameter as
+// `Variant::Int`. These accept either numeric form the way Godot's Variant
+// argument conversion does, and return `None` for a genuinely wrong type so the
+// caller falls through to "not a native method" instead of drawing garbage.
+
+fn arg_f32(args: &[Variant], index: usize) -> Option<f32> {
+    match args.get(index)? {
+        Variant::Float(f) => Some(*f as f32),
+        Variant::Int(i) => Some(*i as f32),
+        _ => None,
+    }
+}
+
+fn arg_vec2(args: &[Variant], index: usize) -> Option<Vector2> {
+    match args.get(index)? {
+        Variant::Vector2(v) => Some(*v),
+        Variant::Vector2i(v) => Some(Vector2::new(v.x as f32, v.y as f32)),
+        _ => None,
+    }
+}
+
+fn arg_color(args: &[Variant], index: usize) -> Option<Color> {
+    match args.get(index)? {
+        Variant::Color(c) => Some(*c),
+        _ => None,
+    }
+}
+
+fn arg_rect2(args: &[Variant], index: usize) -> Option<Rect2> {
+    match args.get(index)? {
+        Variant::Rect2(r) => Some(*r),
+        _ => None,
+    }
+}
+
+/// Reads a point list, accepting either a `PackedVector2Array` or a plain
+/// `Array` of `Vector2` — a GDScript literal `[Vector2(0,0), ...]` parses as
+/// the latter, which is exactly how these are written by hand (pat-0q2kx.129).
+fn arg_vec2_array(args: &[Variant], index: usize) -> Option<Vec<Vector2>> {
+    match args.get(index)? {
+        Variant::PackedVector2Array(pts) => Some(pts.clone()),
+        Variant::Array(items) => Some(
+            items
+                .to_vec()
+                .iter()
+                .filter_map(|v| match v {
+                    Variant::Vector2(p) => Some(*p),
+                    Variant::Vector2i(p) => Some(Vector2::new(p.x as f32, p.y as f32)),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Reads a color list (`PackedColorArray` or `Array` of `Color`).
+fn arg_color_array(args: &[Variant], index: usize) -> Vec<Color> {
+    match args.get(index) {
+        Some(Variant::PackedColorArray(cs)) => cs.clone(),
+        Some(Variant::Array(items)) => items
+            .to_vec()
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// First color of a color-array argument, for the `*_colors` draw variants.
+fn arg_first_color(args: &[Variant], index: usize) -> Option<Color> {
+    arg_color_array(args, index).first().copied()
+}
+
+/// A stroke width in pixels. Godot's `-1` (and an absent argument) means
+/// "thinnest visible line", which the rasterizer wants as 1.
+fn positive_width(args: &[Variant], index: usize) -> f32 {
+    match arg_f32(args, index) {
+        Some(w) if w > 0.0 => w,
+        _ => 1.0,
+    }
+}
 
 /// Per-node script storage.
 pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
@@ -32,10 +151,129 @@ pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
 /// Wraps an [`Interpreter`], [`ClassDef`], and [`ClassInstance`] so that
 /// lifecycle methods like `_ready` and `_process` execute the corresponding
 /// GDScript methods defined in the source file.
+/// Attaches a [`GDScriptNodeInstance`] to every node in `subtree_root`'s
+/// subtree that carries a `_script_path` and has no script yet, returning how
+/// many were attached.
+///
+/// Godot's `PackedScene.instantiate()` hands back a graph whose nodes already
+/// hold their script instances; `.tscn` parsing in Patina records the path as
+/// `_script_path` but nothing on the runtime spawn path ever turned that into a
+/// live script, so a spawned enemy's `_ready`/`_process` never ran
+/// (pat-mgixk.61).
+///
+/// ⚠️ Reads through [`FileAccess`](gdcore::file_access::FileAccess), NOT
+/// `std::fs`, so a script packed inside an exported `.pck` loads too — the same
+/// reason `instantiate_packed_scene` reads the `.tscn` that way. The
+/// boot-time loops this mirrors use `std::fs` against a project root, which is
+/// why they cannot serve an exported game.
+///
+/// A script that fails to read or parse is skipped rather than fatal: one bad
+/// script in a spawned scene must not take the whole spawn down, matching how
+/// the autoload path treats it.
+/// Copies the subtree at `source` into the arena as a DETACHED subtree and
+/// returns the copy's root (`Node.duplicate`, pat-b4zhq). Every node keeps its
+/// name, class and properties; `groups` copies group membership too. `None`
+/// when `source` is unknown.
+fn duplicate_node_detached(tree: &mut SceneTree, source: NodeId, groups: bool) -> Option<NodeId> {
+    let copy_one = |tree: &SceneTree, id: NodeId| -> Option<(crate::node::Node, Vec<NodeId>)> {
+        let original = tree.get_node(id)?;
+        let mut clone = crate::node::Node::new(original.name(), original.class_name());
+        for (key, value) in original.properties() {
+            clone.set_property(key, value.clone());
+        }
+        clone.set_unique_name(original.is_unique_name());
+        if groups {
+            for group in original.groups() {
+                clone.add_to_group(group.clone());
+            }
+        }
+        Some((clone, original.children().to_vec()))
+    };
+    let (root_clone, children) = copy_one(tree, source)?;
+    let root = tree.insert_detached(root_clone);
+    let mut stack: Vec<(NodeId, NodeId)> = children.into_iter().rev().map(|c| (c, root)).collect();
+    while let Some((old, new_parent)) = stack.pop() {
+        let Some((clone, grandchildren)) = copy_one(tree, old) else {
+            continue;
+        };
+        let Ok(new_id) = tree.add_child(new_parent, clone) else {
+            continue;
+        };
+        stack.extend(grandchildren.into_iter().rev().map(|c| (c, new_id)));
+    }
+    Some(root)
+}
+
+pub fn attach_subtree_scripts_from_res(tree: &mut SceneTree, subtree_root: NodeId) -> usize {
+    // Ids first: the attach loop mutates the tree, so no borrow may be held.
+    let mut ids = Vec::new();
+    let mut stack = vec![subtree_root];
+    while let Some(id) = stack.pop() {
+        if let Some(node) = tree.get_node(id) {
+            for &child in node.children() {
+                stack.push(child);
+            }
+            ids.push(id);
+        }
+    }
+
+    let mut to_load: Vec<(NodeId, String)> = Vec::new();
+    for id in ids {
+        if tree.get_script(id).is_some() {
+            continue;
+        }
+        if let Some(node) = tree.get_node(id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                to_load.push((id, res_path));
+            }
+        }
+    }
+
+    let mut attached = 0;
+    for (id, res_path) in to_load {
+        let source = match gdcore::file_access::FileAccess::read_file_string(&res_path) {
+            Ok(source) => source,
+            Err(e) => {
+                // Skipped, but not silently (pat-kkqnm): into the script-error
+                // log every host drains.
+                tree.record_script_load_error(id, &res_path, &format!("{e:?}"));
+                continue;
+            }
+        };
+        match GDScriptNodeInstance::from_source(&source, id) {
+            Ok(instance) => {
+                tree.attach_script(id, Box::new(instance));
+                attached += 1;
+            }
+            Err(e) => tree.record_script_load_error(id, &res_path, &e.to_string()),
+        }
+    }
+    attached
+}
+
+/// An AnimatedSprite2D's current animation name, or Godot's `"default"`.
+///
+/// ⚠️ Accepts a `StringName` as well as a `String`. A Godot 4 `.tscn` writes
+/// `animation = &"right"` (a StringName), and scripts assign `&"right"` too;
+/// matching only `String` made `play()` fall back to `"default"` — a clip the
+/// scene does not have — so the sprite froze on frame 0 (Dodge the Creeps'
+/// player never animated). `scene_tree`'s frame advance already took both.
+fn current_sprite_animation(n: &crate::node::Node) -> String {
+    match n.get_property("animation") {
+        Variant::String(s) if !s.is_empty() => s,
+        Variant::StringName(s) if !s.as_str().is_empty() => s.as_str().to_string(),
+        _ => "default".to_string(),
+    }
+}
+
 pub struct GDScriptNodeInstance {
     interpreter: Interpreter,
     instance: ClassInstance,
     node_id: NodeId,
+    /// The `.gd` file this was loaded from, when it came from one
+    /// (pat-fk17e.1). `from_source` cannot know it — the source arrives as a
+    /// string — so the loading path sets it afterwards.
+    script_file_path: Option<String>,
 }
 
 impl std::fmt::Debug for GDScriptNodeInstance {
@@ -60,7 +298,18 @@ impl GDScriptNodeInstance {
             interpreter,
             instance,
             node_id,
+            script_file_path: None,
         })
+    }
+
+    /// The `@export`-annotated variable names, in declaration order.
+    fn exported_property_names_impl(&self) -> Vec<String> {
+        self.instance
+            .class_def
+            .exports
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
     }
 
     /// Returns the node ID this script is attached to.
@@ -69,12 +318,99 @@ impl GDScriptNodeInstance {
     }
 
     /// Returns true if the class defines a method with the given name.
+    ///
+    /// ⚠️ A `__lambda_connection_N` name is **not** in `class_def.methods` and
+    /// never will be — it is the synthetic name a lambda parked in a signal
+    /// connection comes back under (pat-s3rrv.67). It has to answer `true` here
+    /// anyway, because `SceneTree::call_script_method` skips any method this
+    /// reports as undefined, and skipping it means a signal-connected lambda
+    /// never runs: the connect succeeds, the emit does nothing, and the symptom
+    /// looks like broken capture rather than a rejected name.
     pub fn has_method(&self, name: &str) -> bool {
-        self.instance.class_def.methods.contains_key(name)
+        // Chain-aware: a method declared only in a base script must answer
+        // `true` here, or `SceneTree::call_script_method` skips it and an
+        // inherited `_ready` / handler silently never runs (pat-mgixk.21).
+        gdscript_interop::interpreter::class_chain_has_method(&self.instance.class_def, name)
+            || gdscript_interop::interpreter::is_lambda_connection_name(name)
+    }
+
+    /// The `@rpc`-annotated methods, as `(method_name, annotation_args)`.
+    ///
+    /// The parser has always recorded these; `FuncDef` used to discard them, so
+    /// nothing downstream could see them (pat-0q2kx.79). Returned as raw
+    /// argument strings because the RPC config type lives in `gdplatform`, which
+    /// the interpreter crate does not depend on.
+    fn rpc_methods_impl(&self) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = self
+            .instance
+            .class_def
+            .methods
+            .iter()
+            .filter_map(|(name, def)| {
+                def.rpc_annotation()
+                    .map(|args| (name.clone(), args.to_vec()))
+            })
+            .collect();
+        // Deterministic order: a HashMap walk would register in a different
+        // order each run, which matters the moment two methods disagree.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Whether the script carries `@tool`, i.e. it is meant to run in the
+    /// editor as well as at runtime (pat-0q2kx.76).
+    ///
+    /// The parser already records the annotation; nothing outside the
+    /// interpreter could read it, so the editor had no way to tell a tool
+    /// script from an ordinary one.
+    pub fn is_tool(&self) -> bool {
+        self.instance.class_def.is_tool
+    }
+
+    /// Drains anything the script printed since the last call.
+    ///
+    /// `print` accumulates into the interpreter's output buffer; draining it is
+    /// how a host surfaces script output — the editor routes it to the Output
+    /// panel, so a `@tool` script's prints are visible where a user expects.
+    pub fn take_output(&mut self) -> Vec<String> {
+        self.interpreter.take_output()
     }
 }
 
 impl ScriptInstance for GDScriptNodeInstance {
+    fn script_class_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut def = Some(&self.instance.class_def);
+        while let Some(d) = def {
+            if let Some(n) = &d.name {
+                names.push(n.clone());
+            }
+            match d.base.as_deref() {
+                Some(base) => def = Some(base),
+                None => {
+                    // `extends Enemy` with no parsed base attached: the parent
+                    // is still a class this script IS. A path (`extends
+                    // "res://x.gd"`) or an engine class is not a script
+                    // class name and is answered by the native check.
+                    if let Some(p) = &d.parent_class {
+                        if !p.contains('/')
+                            && !p.ends_with(".gd")
+                            && !gdobject::class_db::class_exists(p)
+                        {
+                            names.push(p.clone());
+                        }
+                    }
+                    def = None;
+                }
+            }
+        }
+        names
+    }
+
+    fn rpc_methods(&self) -> Vec<(String, Vec<String>)> {
+        self.rpc_methods_impl()
+    }
+
     fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError> {
         self.interpreter
             .call_instance_method(&mut self.instance, name, args)
@@ -89,11 +425,80 @@ impl ScriptInstance for GDScriptNodeInstance {
             })
     }
 
+    fn pump_js_callbacks(&mut self) -> usize {
+        // ⚠️ The INSTANCE-bound pump. The plain one binds no `self`, so a
+        // callback body touching its own members raises and the pump swallows
+        // it — a callback that silently does nothing (pat-mgixk.41).
+        //
+        // The interpreter still identifies the OWNER itself, via its own
+        // `current_node_id`, so a caller cannot route another node's callbacks
+        // here by passing the wrong instance.
+        self.interpreter
+            .pump_javascript_callbacks_for_instance(&mut self.instance)
+    }
+
+    fn drain_print_output(&mut self) -> Vec<String> {
+        // Straight to the interpreter rather than through the inherent
+        // `take_output` above, so the call can never be read as recursing into
+        // this trait method.
+        self.interpreter.take_output()
+    }
+
+    fn drain_print_output_stamped(&mut self) -> Vec<(u64, String)> {
+        self.interpreter.take_output_stamped()
+    }
+
+    fn drain_error_output(&mut self) -> Vec<String> {
+        self.interpreter.take_errors()
+    }
+
     fn get_property(&self, name: &str) -> Option<Variant> {
-        self.instance.properties.get(name).cloned()
+        self.instance
+            .properties
+            .get(name)
+            .or_else(|| self.instance.constants.get(name))
+            .cloned()
+            // A named `enum Mood { … }` read from ANOTHER object
+            // (`town.Mood.DAY`, truck_town's car_select.gd) is the same
+            // Dictionary the script sees for its own bareword `Mood`; it was
+            // Nil, so `town.Mood.DAY` raised inside a resumed coroutine and
+            // the town never loaded. Sorted by value, as the interpreter
+            // seeds the in-script constant.
+            .or_else(|| {
+                let variants = self.instance.class_def.enums.get(name)?;
+                let mut pairs: Vec<(&String, &i64)> = variants.iter().collect();
+                pairs.sort_by_key(|(n, v)| (**v, (*n).clone()));
+                let mut dict = gdvariant::Dictionary::new();
+                for (n, v) in pairs {
+                    dict.insert(Variant::String(n.clone()), Variant::Int(*v));
+                }
+                Some(Variant::Dictionary(dict.into()))
+            })
     }
 
     fn set_property(&mut self, name: &str, value: Variant) -> bool {
+        // A property declared with `set = fn` must be written *through* its
+        // setter: Godot's `Object::set` routes into `GDScriptInstance::set`, which
+        // runs the setter (gdscript.cpp), so a scene override or an engine-side
+        // write that bypassed it would leave whatever the setter maintains —
+        // derived state, clamping, a dirty flag — unapplied (pat-0q2kx.17).
+        if let Some(setter) = self.instance.class_def.setters.get(name).cloned() {
+            // Must go through `call_property_setter`, not `call_instance_method`:
+            // the latter leaves `current_function` unset, so the setter body's own
+            // `self.prop = value` does not recognise that it is already inside the
+            // setter and fires it a second time.
+            // A setter that raises is still a write the script TOOK (Godot
+            // reports the error and moves on). The error was dropped here, so a
+            // failing setter was invisible (pat-ivcj2); it is queued for the
+            // host's error log under the setter's own name instead.
+            if let Err(err) =
+                self.interpreter
+                    .call_property_setter(&mut self.instance, &setter, value)
+            {
+                self.interpreter.record_detached_error(setter, err);
+            }
+            return true;
+        }
         if self.instance.properties.contains_key(name) {
             self.instance.properties.insert(name.to_string(), value);
             true
@@ -124,6 +529,8 @@ impl ScriptInstance for GDScriptNodeInstance {
                 name: name.clone(),
                 property_type: val.variant_type(),
                 default_value: val.clone(),
+                hint: 0,
+                hint_string: String::new(),
             })
             .collect()
     }
@@ -136,8 +543,45 @@ impl ScriptInstance for GDScriptNodeInstance {
             .unwrap_or("GDScript")
     }
 
+    fn script_file_path(&self) -> Option<&str> {
+        self.script_file_path.as_deref()
+    }
+
+    fn set_script_file_path(&mut self, path: &str) {
+        self.script_file_path = Some(path.to_string());
+        // pat-mgixk.14: the debugger matches a breakpoint on `(script, line)`,
+        // and the interpreter is the layer that checks it before each
+        // statement — but `Interpreter::from_source` never sees a path, so this
+        // is the only place that can tell it which file it is running. Without
+        // the forward, `debug_break_before` declines every statement and a
+        // breakpoint can never be hit.
+        self.interpreter.set_script_path(path);
+    }
+
+    fn exported_property_names(&self) -> Vec<String> {
+        self.exported_property_names_impl()
+    }
+
     fn has_method(&self, name: &str) -> bool {
-        self.instance.class_def.methods.contains_key(name)
+        // Same widening as the inherent `has_method` above, and for the same
+        // reason — this is the one `call_script_method` actually calls.
+        // Chain-aware: a method declared only in a base script must answer
+        // `true` here, or `SceneTree::call_script_method` skips it and an
+        // inherited `_ready` / handler silently never runs (pat-mgixk.21).
+        gdscript_interop::interpreter::class_chain_has_method(&self.instance.class_def, name)
+            || gdscript_interop::interpreter::is_lambda_connection_name(name)
+    }
+
+    fn resolve_onready(&mut self) -> Result<(), ScriptError> {
+        self.interpreter
+            .resolve_onready_vars(&mut self.instance)
+            .map_err(|e| ScriptError::TypeError(e.to_string()))
+    }
+
+    fn resolve_member_initializers(&mut self) -> Result<(), ScriptError> {
+        self.interpreter
+            .resolve_deferred_initializers(&mut self.instance)
+            .map_err(|e| ScriptError::TypeError(e.to_string()))
     }
 
     fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
@@ -147,6 +591,94 @@ impl ScriptInstance for GDScriptNodeInstance {
     fn clear_scene_access(&mut self) {
         self.interpreter.clear_scene_access();
     }
+
+    fn poll_coroutines(&mut self, _delta: f32) {
+        // Advance frame-based awaits (e.g. `await RenderingServer.frame_post_draw`)
+        // by one frame and resume any that are ready. Timer-based awaits are
+        // driven centrally by the SceneTree once per frame (via
+        // `notify_await_signal`), so we deliberately do NOT re-process the shared
+        // SceneTree timers here — doing so per attached script would advance them
+        // N times per frame (pat-nzgdu.6). The instance is threaded in as `self`
+        // so resumed `self.x = ...` writes land on this script's properties.
+        let _ = self
+            .interpreter
+            .tick_instance_coroutine_frames(&mut self.instance);
+    }
+
+    fn take_coroutine_errors(&mut self) -> Vec<(String, String)> {
+        self.interpreter
+            .take_coroutine_errors()
+            .into_iter()
+            .map(|(function, err)| {
+                // One line, kind + location — the call-stack tail of the full
+                // Display is multi-line and the log is line-oriented.
+                let msg = match &err.source_location {
+                    Some(loc) if loc.line > 0 => format!("{} at line {}", err.kind, loc.line),
+                    _ => err.kind.to_string(),
+                };
+                (function, msg)
+            })
+            .collect()
+    }
+
+    fn pump_xr_signals(&mut self) {
+        // Errors here are a script's own fault (a bad signal callback) and must
+        // not abort the frame, matching how `call_script_method` swallows a
+        // failed script call.
+        if let Err(err) = self
+            .interpreter
+            .pump_instance_xr_signals(&mut self.instance)
+        {
+            tracing::debug!("XR signal pump failed: {err}");
+        }
+    }
+
+    fn list_signals(&self) -> Vec<String> {
+        self.instance.class_def.signals.clone()
+    }
+
+    fn notify_await_signal(&mut self, name: &str, args: &[Variant]) {
+        // Wake `await`s parked on this signal name; the interpreter's coroutine
+        // host resumes the matching suspended frames, binding the first emitted
+        // argument as the awaited value for `var v = await sig` (pat-nzgdu.6).
+        // The instance is threaded in as `self` so resumed property writes and
+        // declared-signal lookups resolve against this script.
+        let _ = self
+            .interpreter
+            .notify_instance_await_signal(&mut self.instance, name, args);
+    }
+
+    fn notify_await_signal_from(&mut self, source: u64, name: &str, args: &[Variant]) {
+        // Same as above, but carrying the emitter so an object-bound `await`
+        // (`await $ButtonA.pressed`) ignores another node's same-named signal
+        // (pat-0q2kx.9).
+        let _ = self.interpreter.notify_instance_await_signal_from(
+            &mut self.instance,
+            Some(source),
+            name,
+            args,
+        );
+    }
+
+    fn notification(&mut self, what: i64) {
+        // Deliver the engine notification to the script's `_notification(what)`
+        // virtual, matching Godot's GDScriptInstance::notification. Only scripts
+        // that override `_notification` receive it (pat-nzgdu.13). The caller
+        // (SceneTree::notify_script) has already installed scene access, so a
+        // `_notification` body can call get_node/emit_signal like any callback.
+        if self
+            .instance
+            .class_def
+            .methods
+            .contains_key("_notification")
+        {
+            let _ = self.interpreter.call_instance_method(
+                &mut self.instance,
+                "_notification",
+                &[Variant::Int(what)],
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +686,197 @@ impl ScriptInstance for GDScriptNodeInstance {
 // ---------------------------------------------------------------------------
 
 use std::collections::HashSet;
+
+/// An `Input` mutation a script asked for, queued on the [`crate::SceneTree`] and
+/// applied to the engine `InputState` by the frame owner (pat-0q2kx.24).
+///
+/// Godot's `Input` methods mutate live engine state directly
+/// (upstream/godot/core/input/input.cpp). A running script here reaches only the
+/// tree, never the `InputState` that `MainLoop` owns, so intent is recorded and
+/// drained once per frame instead of being silently dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputCommand {
+    /// `Input.set_mouse_mode(mode)` — Godot `MOUSE_MODE_*` as an int.
+    SetMouseMode(i64),
+    /// `Input.warp_mouse(position)`.
+    WarpMouse {
+        /// Target x in window coordinates.
+        x: f32,
+        /// Target y in window coordinates.
+        y: f32,
+    },
+    /// `Input.action_press(action, strength)`.
+    ActionPress {
+        /// Action name.
+        action: String,
+        /// Press strength, 0..1.
+        strength: f32,
+    },
+    /// `Input.action_release(action)`.
+    ActionRelease {
+        /// Action name.
+        action: String,
+    },
+    /// `Input.start_joy_vibration(device, weak, strong, duration)`.
+    StartJoyVibration {
+        /// Joypad device id.
+        device: i64,
+        /// Weak motor amplitude.
+        weak: f32,
+        /// Strong motor amplitude.
+        strong: f32,
+        /// Duration in seconds (0 = until stopped).
+        duration: f32,
+    },
+    /// `Input.stop_joy_vibration(device)`.
+    StopJoyVibration {
+        /// Joypad device id.
+        device: i64,
+    },
+    // -- cursor shape (pat-0q2kx.90) --------------------------------------
+    //
+    // The `CursorManager` lives on the frame loop beside `InputState`, so a
+    // script's cursor change is queued here and applied in the same drain. The
+    // browser game view then reads the resulting shape out of the input-state
+    // payload and applies it as a CSS `cursor`.
+    /// `Input.set_default_cursor_shape(shape)` — Godot `CURSOR_*` as an int.
+    SetDefaultCursorShape(i64),
+    /// `Input.set_custom_mouse_cursor(image, shape, hotspot)`.
+    SetCustomMouseCursor {
+        /// Resource path of the cursor image, or empty to clear the override.
+        image_path: String,
+        /// Which `CURSOR_*` shape this image replaces.
+        shape: i64,
+        /// Hotspot x within the image.
+        hotspot_x: f32,
+        /// Hotspot y within the image.
+        hotspot_y: f32,
+    },
+    // -- InputMap singleton (pat-0q2kx.89) --------------------------------
+    //
+    // Runtime rebinding. The engine `InputMap` lives beside `InputState` in the
+    // frame loop, so a script's mutation is queued here and applied in the same
+    // drain — which is what makes the rebind live before the next event is
+    // resolved against the map.
+    /// `InputMap.add_action(action, deadzone)`.
+    InputMapAddAction {
+        /// Action name.
+        action: String,
+        /// Deadzone for analog bindings.
+        deadzone: f32,
+    },
+    /// `InputMap.erase_action(action)`.
+    InputMapEraseAction {
+        /// Action name.
+        action: String,
+    },
+    /// `InputMap.action_set_deadzone(action, deadzone)`.
+    InputMapSetDeadzone {
+        /// Action name.
+        action: String,
+        /// New deadzone.
+        deadzone: f32,
+    },
+    /// `InputMap.action_add_event(action, event)`.
+    InputMapAddEvent {
+        /// Action name.
+        action: String,
+        /// The binding to add.
+        binding: gdplatform::input::ActionBinding,
+    },
+    /// `InputMap.action_erase_event(action, event)`.
+    InputMapEraseEvent {
+        /// Action name.
+        action: String,
+        /// The binding to remove.
+        binding: gdplatform::input::ActionBinding,
+    },
+    /// `InputMap.action_erase_events(action)`.
+    InputMapEraseEvents {
+        /// Action name.
+        action: String,
+    },
+    /// `InputMap.load_from_project_settings()` — restore the project-declared
+    /// map, discarding every runtime change.
+    InputMapLoadFromProjectSettings,
+}
+
+/// Converts a script-described input event into the engine's typed binding
+/// (pat-0q2kx.89).
+///
+/// `None` for a class or code the engine does not model, so an unrecognized
+/// rebind is dropped rather than silently bound to the wrong control.
+/// Runs every script's pending `JavaScriptBridge` callbacks, returning how
+/// many ran across the whole tree (pat-mgixk.41).
+///
+/// 🔑 Called once per frame from [`crate::main_loop::MainLoop::step`]. Before
+/// this existed `Interpreter::pump_javascript_callbacks` had NO runtime caller
+/// — only tests — so a `Callable` handed to JavaScript by
+/// `JavaScriptBridge.create_callback` queued its invocations forever and never
+/// ran. `JavaScriptBridge.create_callback` was documented as working and did
+/// nothing observable.
+///
+/// ⚠️ Every scripted node is pumped, and that is safe only because each
+/// interpreter drains just the callbacks IT registered: the invocation queue
+/// and the callback registry are both process-wide, so a blanket drain would
+/// let the first script run every other script's callbacks against its own
+/// instance. See `gdplatform::js_bridge::take_callback_invocations_where`.
+///
+/// Lives here rather than in `main_loop.rs` deliberately: that file is heavily
+/// contended, and the loop needs nothing from `MainLoop` except the tree.
+pub fn pump_javascript_callbacks(tree: &mut SceneTree) -> usize {
+    let mut ran = 0usize;
+    // Tree order so the dispatch order is deterministic and matches every other
+    // per-frame script walk, rather than depending on HashMap iteration.
+    for node_id in tree.all_nodes_in_tree_order() {
+        if let Some(script) = tree.get_script_mut(node_id) {
+            ran += script.pump_js_callbacks();
+        }
+    }
+    ran
+}
+
+pub fn binding_from_event_spec(
+    spec: &gdscript_interop::bindings::InputEventSpec,
+) -> Option<gdplatform::input::ActionBinding> {
+    use gdplatform::input::{ActionBinding, KeyCombo};
+
+    match spec.class.as_str() {
+        "InputEventKey" => {
+            let key = gdplatform::input::key_from_godot_keycode(spec.code)?;
+            if spec.shift || spec.ctrl || spec.alt {
+                Some(ActionBinding::KeyWithModifiers(KeyCombo {
+                    key,
+                    shift: spec.shift,
+                    ctrl: spec.ctrl,
+                    alt: spec.alt,
+                }))
+            } else {
+                Some(ActionBinding::KeyBinding(key))
+            }
+        }
+        "InputEventMouseButton" => Some(ActionBinding::MouseBinding(
+            gdplatform::input::mouse_button_from_godot(spec.code)?,
+        )),
+        "InputEventJoypadButton" => Some(ActionBinding::GamepadButtonBinding(
+            gdplatform::input::gamepad_button_from_godot(spec.code)?,
+        )),
+        "InputEventJoypadMotion" => Some(ActionBinding::GamepadAxisDirection {
+            axis: gdplatform::input::gamepad_axis_from_godot(spec.code)?,
+            positive: spec.axis_value >= 0.0,
+        }),
+        _ => None,
+    }
+}
+
+/// The "just pressed / just released" part of an [`InputSnapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct JustState {
+    keys_pressed: HashSet<String>,
+    keys_released: HashSet<String>,
+    actions_pressed: HashSet<String>,
+    actions_released: HashSet<String>,
+}
 
 /// A snapshot of input state at a single frame, passed to scripts via
 /// [`SceneTreeAccessor`] so they can query `Input.is_action_pressed()` etc.
@@ -163,17 +886,64 @@ pub struct InputSnapshot {
     pub pressed_keys: HashSet<String>,
     /// Keys that were first pressed this frame.
     pub just_pressed_keys: HashSet<String>,
+    /// Keys that were released this frame (pat-nzgdu.9).
+    pub just_released_keys: HashSet<String>,
     /// Action name → list of key names.
     pub input_map: std::collections::HashMap<String, Vec<String>>,
     /// Current mouse position in screen coordinates.
     pub mouse_position: gdcore::math::Vector2,
+    /// Motion of the last frame in pixels per second — Godot
+    /// `Input.get_last_mouse_velocity` (pat-0q2kx.92).
+    ///
+    /// Velocity rather than raw displacement because that is what Godot
+    /// reports and what drag-inertia code integrates; the frame owner divides
+    /// the accumulated motion by the frame delta, which is where the delta is
+    /// known.
+    pub mouse_velocity: gdcore::math::Vector2,
     /// Mouse buttons currently held (button index strings: "1"=Left, "2"=Right, "3"=Middle).
     pub mouse_buttons_pressed: HashSet<String>,
+    /// Actions currently pressed, as the engine resolved them (pat-0q2kx.88).
+    ///
+    /// [`input_map`](Self::input_map) only relates actions to **key names**, so
+    /// an action bound to a gamepad button or a mouse button could never report
+    /// pressed through it. These carry the engine's own action state, which
+    /// `InputState::process_event` resolves for every device.
+    pub actions_pressed: HashSet<String>,
+    /// Actions that became pressed this frame (pat-0q2kx.88).
+    pub actions_just_pressed: HashSet<String>,
+    /// Actions released this frame (pat-0q2kx.88).
+    pub actions_just_released: HashSet<String>,
+    /// Gamepad buttons held, keyed by `(device, Godot JoyButton index)`
+    /// (pat-0q2kx.88). Godot's numbering, not the browser's — see
+    /// `GamepadButton::to_godot_index`.
+    pub gamepad_buttons_pressed: HashSet<(i64, i64)>,
+    /// Latest value per `(device, Godot JoyAxis index)` (pat-0q2kx.88).
+    pub gamepad_axis_values: std::collections::HashMap<(i64, i64), f32>,
+    /// Per-action `(strength, raw_strength)` for actions held this frame
+    /// (pat-s3rrv.14).
+    ///
+    /// ⚠️ The pair is NOT redundant. They differ only for ANALOG bindings and
+    /// only once a deadzone applies: a stick at 0.6 under a 0.1 deadzone reads
+    /// **0.56** as strength and **0.6** as raw. A digital binding reports 1.0
+    /// from both — which is exactly why an implementation that aliases them
+    /// passes every keyboard-shaped test and is wrong on every gamepad.
+    ///
+    /// Absent means "not held": both accessors fall back to the digital
+    /// default, matching `gdplatform`'s own accessors, which gate on
+    /// `actions_pressed` before consulting either map.
+    pub action_strengths: std::collections::HashMap<String, (f32, f32)>,
 }
 
 impl InputSnapshot {
-    /// Returns `true` if any key mapped to `action` is held.
+    /// Returns `true` if `action` is held.
+    ///
+    /// Consults the engine-resolved action set first so a gamepad- or
+    /// mouse-bound action reports correctly, then falls back to the key-name
+    /// map for snapshots built by hand from keys alone (pat-0q2kx.88).
     pub fn is_action_pressed(&self, action: &str) -> bool {
+        if self.actions_pressed.contains(action) {
+            return true;
+        }
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.pressed_keys.contains(k))
         } else {
@@ -181,8 +951,40 @@ impl InputSnapshot {
         }
     }
 
-    /// Returns `true` if any key mapped to `action` was just pressed.
+    /// Takes the four "just" sets out of the snapshot, leaving the held state.
+    ///
+    /// Godot reports `is_action_just_pressed` in `_physics_process` for ONE
+    /// tick only — the first after the event (`input.cpp`:
+    /// `pressed_physics_frame = physics_frames + 1`, compared with `==`). A
+    /// frame running two ticks (any project at 120 ticks/s on a 60 Hz display)
+    /// must not see the press twice: the 2D Platformer's jump applied
+    /// `velocity.y = JUMP_VELOCITY` in BOTH ticks and rose 0.146 px higher than
+    /// Godot in its first frame.
+    pub fn take_just_state(&mut self) -> JustState {
+        JustState {
+            keys_pressed: std::mem::take(&mut self.just_pressed_keys),
+            keys_released: std::mem::take(&mut self.just_released_keys),
+            actions_pressed: std::mem::take(&mut self.actions_just_pressed),
+            actions_released: std::mem::take(&mut self.actions_just_released),
+        }
+    }
+
+    /// Puts back what [`take_just_state`](Self::take_just_state) removed, so
+    /// `_process` still sees this frame's presses (Godot's process-frame
+    /// `just_pressed` is per FRAME).
+    pub fn restore_just_state(&mut self, s: JustState) {
+        self.just_pressed_keys.extend(s.keys_pressed);
+        self.just_released_keys.extend(s.keys_released);
+        self.actions_just_pressed.extend(s.actions_pressed);
+        self.actions_just_released.extend(s.actions_released);
+    }
+
+    /// Returns `true` if `action` became pressed this frame — see
+    /// [`is_action_pressed`](Self::is_action_pressed) for how it resolves.
     pub fn is_action_just_pressed(&self, action: &str) -> bool {
+        if self.actions_just_pressed.contains(action) {
+            return true;
+        }
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.just_pressed_keys.contains(k))
         } else {
@@ -190,9 +992,74 @@ impl InputSnapshot {
         }
     }
 
+    /// Returns `true` if `action` was released this frame (pat-nzgdu.9).
+    pub fn is_action_just_released(&self, action: &str) -> bool {
+        if self.actions_just_released.contains(action) {
+            return true;
+        }
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.just_released_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if the Godot `JOY_BUTTON_*` `button` is held on joypad
+    /// `device` (`Input.is_joy_button_pressed`, pat-0q2kx.88).
+    pub fn is_joy_button_pressed(&self, device: i64, button: i64) -> bool {
+        self.gamepad_buttons_pressed.contains(&(device, button))
+    }
+
+    /// The value of the Godot `JOY_AXIS_*` `axis` on joypad `device`, `0.0`
+    /// when untouched (`Input.get_joy_axis`, pat-0q2kx.88).
+    pub fn get_joy_axis(&self, device: i64, axis: i64) -> f32 {
+        self.gamepad_axis_values
+            .get(&(device, axis))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     /// Returns `true` if the raw key is held.
     pub fn is_key_pressed(&self, key: &str) -> bool {
         self.pressed_keys.contains(key)
+    }
+
+    /// The reserved key name representing a script-injected action press.
+    ///
+    /// Godot's `Input.action_press` sets action state directly, with no physical
+    /// key involved. This snapshot resolves actions through `input_map`, so an
+    /// injected press is modelled as a synthetic binding whose name no real device
+    /// can produce (pat-0q2kx.24).
+    fn injected_action_key(action: &str) -> String {
+        format!("__script_action__{action}")
+    }
+
+    /// Marks `action` pressed as if a script had called `Input.action_press`, so
+    /// `is_action_pressed` and `is_action_just_pressed` report it for the rest of
+    /// this frame — Godot makes the state visible immediately.
+    pub fn inject_action_press(&mut self, action: &str) {
+        let key = Self::injected_action_key(action);
+        let keys = self.input_map.entry(action.to_string()).or_default();
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key.clone());
+        }
+        self.just_released_keys.remove(&key);
+        self.just_pressed_keys.insert(key.clone());
+        self.pressed_keys.insert(key);
+    }
+
+    /// The `Input.action_release` counterpart of
+    /// [`inject_action_press`](Self::inject_action_press).
+    pub fn inject_action_release(&mut self, action: &str) {
+        let key = Self::injected_action_key(action);
+        // The binding stays so `is_action_just_released` can resolve it.
+        let keys = self.input_map.entry(action.to_string()).or_default();
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key.clone());
+        }
+        self.pressed_keys.remove(&key);
+        self.just_pressed_keys.remove(&key);
+        self.just_released_keys.insert(key);
     }
 
     /// Returns the current mouse position.
@@ -214,6 +1081,9 @@ impl InputSnapshot {
 // ---------------------------------------------------------------------------
 
 use crate::scene_tree::SceneTree;
+use crate::tween::{
+    EaseType, TransFunc, Tween, TweenId, TweenPauseMode, TweenProcessMode, TweenStep,
+};
 use gdcore::id::ObjectId;
 use gdobject::signal::Connection;
 
@@ -245,11 +1115,1443 @@ impl SceneTreeAccessor {
     }
 
     fn tree(&self) -> &SceneTree {
+        // SAFETY: The raw pointer is valid for the lifetime of the SceneTreeAccessor.
+        // Callers of `new`/`with_input` (both `unsafe`) guarantee the pointer is valid
+        // and that no mutable alias exists while this shared reference is live.
         unsafe { &*self.tree }
     }
 
+    /// The absolute-path hash used to address `nid` over the network, or `None`
+    /// when the node is not in the tree.
+    fn rpc_hash_for(&self, nid: NodeId) -> Option<u64> {
+        self.tree()
+            .node_path(nid)
+            .map(|p| crate::scene_tree::rpc_path_hash(&p))
+    }
+
     fn tree_mut(&mut self) -> &mut SceneTree {
+        // SAFETY: We hold `&mut self`, so no other accessor can alias this pointer.
+        // The raw pointer validity is guaranteed by the caller of `new`/`with_input`.
         unsafe { &mut *self.tree }
+    }
+
+    /// Loads the GDScript at `path`, attaches it to a fresh object of the
+    /// script's `extends` class, seeds `values` over the script's own defaults
+    /// and returns the object's raw id.
+    ///
+    /// Shared by `load("x.gd").new()` (no `values`) and the script-backed
+    /// `.tres` load (the saved property lines as `values`) — see
+    /// [`SceneAccess::instantiate_script_resource`] for why the id, not a
+    /// `ResourceRef` with a script slot, is the representation.
+    ///
+    /// ⚠️ `values` are applied with `set_property`, i.e. **after**
+    /// `instantiate_class` has evaluated the declared defaults. A `.tres` that
+    /// omits a line therefore keeps the script's default, which is what Godot
+    /// does — it only writes properties that differ from the default.
+    fn instantiate_script_with_values(
+        &mut self,
+        path: &str,
+        values: &[(String, Variant)],
+    ) -> Option<u64> {
+        self.instantiate_script_inner(path, values, &[])
+    }
+
+    /// `instantiate_script_with_values`, plus the positional arguments to hand
+    /// the script's `_init` (pat-mgixk.100).
+    ///
+    /// `values` are exported-property assignments; `init_args` are `.new(..)`'s
+    /// arguments. Godot keeps them distinct — `GDScript::_create_instance`
+    /// passes the call's args to the initializer, while exported values are set
+    /// afterwards — so they cannot share one parameter.
+    fn instantiate_script_inner(
+        &mut self,
+        path: &str,
+        values: &[(String, Variant)],
+        init_args: &[Variant],
+    ) -> Option<u64> {
+        // `res://` resolves against the project root (mirrors
+        // `instantiate_packed_scene`); see the note there on why the previous
+        // CWD-relative mapping broke `load("res://enemy.gd").new()`.
+        // `resolved` is still needed for the instance name below, but the bytes
+        // come from `FileAccess` so a packed script loads too (pat-s3rrv.34).
+        let resolved = gdcore::resolve_path(path).ok()?;
+        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
+        let base_class = script_base_class(&source);
+        // Name the instance after the script file stem, matching how a
+        // developer thinks of `load("enemy.gd").new()`.
+        let name = resolved
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Script")
+            .to_string();
+        let tree = self.tree_mut();
+        let root = tree.root_id();
+        // Attach under the root; the script's follow-up `add_child` reparents
+        // it to the desired parent (see `add_child`), mirroring scenes.
+        let node_id = tree
+            .add_child(root, crate::node::Node::new(name, base_class))
+            .ok()?;
+        // On a parse error this is non-fatal: the node exists without a live
+        // script (Godot logs and still yields an object); behaviour tests use a
+        // parseable script.
+        if let Ok(mut instance) = GDScriptNodeInstance::from_source(&source, node_id) {
+            // Set before boxing so `get_script()` can name the file even if
+            // seeding a value below fails.
+            instance.set_script_file_path(path);
+            for (key, value) in values {
+                // A `.tres` line naming a var the script no longer declares
+                // is dropped rather than inventing a property — Godot's
+                // loader also discards state the current script has no slot
+                // for. `set_property`'s `false` return says exactly that.
+                instance.set_property(key, value.clone());
+            }
+            tree.attach_script_with_init_args(node_id, Box::new(instance), init_args)
+        }
+        Some(node_id.raw())
+    }
+
+    /// The physics server bound to the tree for this script phase, or `None`
+    /// when nothing is driving physics (pat-0q2kx.200).
+    ///
+    /// The address is read back off the tree rather than carried in the
+    /// accessor so that every existing `SceneTreeAccessor` construction site
+    /// keeps working unchanged — the accessor already holds the tree pointer.
+    fn physics(&self) -> Option<&crate::physics_server::PhysicsServer> {
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: `set_script_physics_server` stored the address of a live
+        // `PhysicsServer` and its caller (`MainLoop`) clears it before that
+        // server can move or drop, so a non-zero address points at a live
+        // server. The server is a sibling of the tree, never inside it, so this
+        // borrow cannot alias the tree pointer.
+        Some(unsafe { &*(addr as *const crate::physics_server::PhysicsServer) })
+    }
+
+    /// The 3D twin of [`physics`](Self::physics) (pat-s3rrv.107).
+    fn physics_3d(&self) -> Option<&crate::physics_server_3d::PhysicsServer3D> {
+        let addr = self.tree().script_physics_3d_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: identical contract to `physics()`. `set_script_physics_server_3d`
+        // stored the address of a live `PhysicsServer3D` and `MainLoop` clears it
+        // before that server can move or drop, at every one of the paired
+        // set/clear brackets. A zero address means "not bound" and is handled
+        // above, so a non-zero one points at a live server. The server is a
+        // sibling of the tree, never inside it, so this borrow cannot alias the
+        // tree pointer.
+        // SAFETY: (summary of the above) non-zero addr = live, non-aliasing server.
+        Some(unsafe { &*(addr as *const crate::physics_server_3d::PhysicsServer3D) })
+    }
+
+    /// Mutable counterpart of [`Self::physics_3d`] (pat-s3rrv.105).
+    fn physics_3d_mut(&mut self) -> Option<&mut crate::physics_server_3d::PhysicsServer3D> {
+        let addr = self.tree().script_physics_3d_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: identical contract to `physics_3d`, plus: we hold `&mut self`,
+        // so no other accessor can hand out a second reference to the same
+        // server while this one is alive.
+        Some(unsafe { &mut *(addr as *mut crate::physics_server_3d::PhysicsServer3D) })
+    }
+
+    /// Maps a shape query's `exclude` list from NODE ids to `BodyId`s
+    /// (pat-s3rrv.26).
+    ///
+    /// Godot's `exclude` takes RIDs; Patina has none, so a script passes the
+    /// node objects. A node with no registered body drops out of the list rather
+    /// than becoming body 0 and excluding an unrelated body.
+    fn shape_query_exclude(
+        &self,
+        params: &ShapeParams2D,
+    ) -> Option<Vec<gdphysics2d::body::BodyId>> {
+        let phys = self.physics()?;
+        Some(
+            params
+                .exclude
+                .iter()
+                .filter_map(|raw| {
+                    phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                })
+                .collect(),
+        )
+    }
+
+    /// Mutable counterpart of [`Self::physics`].
+    fn physics_mut(&mut self) -> Option<&mut crate::physics_server::PhysicsServer> {
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: As in `physics`, plus: we hold `&mut self`, so no other
+        // accessor can hand out a second reference to the same server.
+        Some(unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) })
+    }
+
+    /// The audio server bound to the tree for this script phase, or `None` when
+    /// nothing is driving audio (pat-s3rrv.6).
+    ///
+    /// Read off the tree for the same reason as [`Self::physics`]: the accessor
+    /// already holds the tree pointer, so every existing construction site keeps
+    /// working unchanged.
+    fn audio(&self) -> Option<&gdaudio::AudioServer> {
+        let addr = self.tree().script_audio_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: `set_script_audio_server` stored the address of a live
+        // `AudioServer` owned by `MainLoop`'s `AudioServerBridge`, and its
+        // caller clears it before that server can move or drop. The server is a
+        // sibling of the tree, never inside it, so this borrow cannot alias the
+        // tree pointer.
+        Some(unsafe { &*(addr as *const gdaudio::AudioServer) })
+    }
+
+    /// Mutable counterpart of [`Self::audio`].
+    fn audio_mut(&mut self) -> Option<&mut gdaudio::AudioServer> {
+        let addr = self.tree().script_audio_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: As in `audio`, plus: we hold `&mut self`, so no other accessor
+        // can hand out a second reference to the same server.
+        Some(unsafe { &mut *(addr as *mut gdaudio::AudioServer) })
+    }
+
+    // -- Tween step plumbing (pat-0q2kx.4) ----------------------------------
+
+    /// Appends a step to the tween, returning `None` if it no longer exists.
+    fn push_tween_step(&mut self, tid: TweenId, mut step: TweenStep) -> Option<()> {
+        let tween = self.tree_mut().get_tween_mut(tid)?;
+        // `set_parallel(true)` makes every SUBSEQUENT tweener run alongside the
+        // previous one, so the default is stamped onto each step as it is added
+        // (Godot `Tween.set_parallel`, distinct from the one-shot `parallel()`).
+        if tween.default_parallel {
+            step.parallel = true;
+        }
+        tween.steps.push(step);
+        // Chaining a tweener onto a tween that already ran dry restarts it, so
+        // `create_tween()` followed by tweeners in the same frame animates even
+        // though the tween was momentarily empty.
+        tween.running = true;
+        Some(())
+    }
+
+    /// Applies `f` to the most recently added step — the one Godot's per-tweener
+    /// setters (`set_ease`/`set_trans`/`set_delay`) target in a fluent chain.
+    ///
+    /// `None` means the *tween* is gone. Having no steps yet is NOT an error:
+    /// `create_tween().set_trans(TRANS_SINE).tween_property(...)` is a common
+    /// Godot idiom where the setter records a tween-wide default for subsequent
+    /// tweeners. Patina's `Tween` has no default slot, so that setting is
+    /// currently dropped — but it must still report success, or the call would
+    /// fall through to node dispatch and raise `UndefinedFunction` on a handle
+    /// that is not a node. **Known gap:** setters placed *before* the first
+    /// tweener are ignored rather than applied as defaults.
+    fn with_last_step(&mut self, tid: TweenId, f: impl FnOnce(&mut TweenStep)) -> Option<()> {
+        let tween = self.tree_mut().get_tween_mut(tid)?;
+        if let Some(step) = tween.steps.last_mut() {
+            f(step);
+        }
+        Some(())
+    }
+}
+
+// -- Tween argument coercion (pat-0q2kx.4) ----------------------------------
+
+/// The raw object id behind a `Variant`, for `tween_property`'s target.
+fn variant_object_raw(v: &Variant) -> Option<u64> {
+    match v {
+        Variant::ObjectId(id) => Some(id.raw()),
+        // A script may hand back a bare instance id from `get_instance_id()`.
+        Variant::Int(i) if *i > 0 => Some(*i as u64),
+        _ => None,
+    }
+}
+
+/// String-ish `Variant` as an owned `String` (property paths, method names).
+fn variant_string(v: &Variant) -> Option<String> {
+    match v {
+        Variant::String(s) => Some(s.clone()),
+        Variant::StringName(s) => Some(s.as_str().to_string()),
+        Variant::NodePath(p) => Some(p.to_string()),
+        _ => None,
+    }
+}
+
+/// Numeric `Variant` as `f64` — Godot accepts int or float for durations.
+fn variant_number(v: &Variant) -> Option<f64> {
+    match v {
+        Variant::Float(f) => Some(*f),
+        Variant::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// The method name a `tween_callback` / `tween_method` argument names.
+///
+/// Godot passes a `Callable`; Patina's tween steps carry a plain method name
+/// dispatched against the tween's **owning node**, so a Callable bound to some
+/// other object is invoked on the owner instead. That is the pre-existing
+/// `TweenStep::method` contract, not something this bridge introduces.
+fn variant_callable_method(v: &Variant) -> Option<String> {
+    match v {
+        Variant::Callable(c) => match c.inner_callable() {
+            gdvariant::variant::CallableRef::Method { method, .. } => Some(method.clone()),
+            _ => None,
+        },
+        _ => variant_string(v),
+    }
+}
+
+/// Godot `Tween.EaseType`: EASE_IN=0, EASE_OUT=1, EASE_IN_OUT=2, EASE_OUT_IN=3.
+///
+/// All four are now real curves (pat-0q2kx.55); `OUT_IN` used to collapse onto
+/// `InOut`, which is a visibly different shape (fast-slow-fast vs
+/// slow-fast-slow).
+fn ease_type_from_i64(v: i64) -> EaseType {
+    match v {
+        0 => EaseType::In,
+        1 => EaseType::Out,
+        3 => EaseType::OutIn,
+        _ => EaseType::InOut,
+    }
+}
+
+/// Godot `Tween.TransitionType`: LINEAR=0, SINE=1, QUINT=2, QUART=3, QUAD=4,
+/// EXPO=5, ELASTIC=6, CUBIC=7, CIRC=8, BOUNCE=9, BACK=10, SPRING=11.
+///
+/// ⚠️ All twelve now map to their own curve (pat-0q2kx.55). This mapping used to
+/// substitute approximations — QUINT and QUART both became Cubic, CIRC became
+/// Sine, and SPRING became Elastic — so a script asking for `TRANS_SPRING` got a
+/// visibly wrong motion with nothing reporting an error. Do not reintroduce a
+/// "nearest shape" fallback here: a silently different curve is harder to spot
+/// than a missing one.
+fn trans_func_from_i64(v: i64) -> TransFunc {
+    match v {
+        0 => TransFunc::Linear,
+        1 => TransFunc::Sine,
+        2 => TransFunc::Quint,
+        3 => TransFunc::Quart,
+        4 => TransFunc::Quad,
+        5 => TransFunc::Expo,
+        6 => TransFunc::Elastic,
+        7 => TransFunc::Cubic,
+        8 => TransFunc::Circ,
+        9 => TransFunc::Bounce,
+        10 => TransFunc::Back,
+        11 => TransFunc::Spring,
+        _ => TransFunc::Linear,
+    }
+}
+
+/// Reads a `Vector3` argument, or `None` when the argument is absent or is a
+/// different type — which is how the 3D force arms decline a 2D call.
+fn vec3_arg(args: &[Variant], index: usize) -> Option<gdcore::math::Vector3> {
+    match args.get(index) {
+        Some(Variant::Vector3(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Adds `delta` to a node's `Vector3` property, treating an absent value as zero
+/// — the accumulate step of the `_pending_*` force bridge (pat-0q2kx.37).
+fn accumulate_vec3_prop(
+    tree: &mut SceneTree,
+    nid: NodeId,
+    key: &str,
+    delta: gdcore::math::Vector3,
+) {
+    let current = match tree.get_node(nid).map(|n| n.get_property(key)) {
+        Some(Variant::Vector3(v)) => v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    if let Some(node) = tree.get_node_mut(nid) {
+        node.set_property(key, Variant::Vector3(current + delta));
+    }
+}
+
+/// The built-in properties Godot guarantees exist on a class, with their
+/// documented defaults — reported when the node itself was never given one
+/// (pat-0q2kx.33).
+///
+/// A static table rather than a ClassDB lookup: ClassDB is only populated by an
+/// explicit `register_*_classes()` call, so a ClassDB-derived fallback silently
+/// vanishes in exactly the contexts that need it most (bare tests, partially
+/// registered servers) — the same reasoning that keeps the transform routing in
+/// [`SceneAccess::set_node_property`] off ClassDB.
+///
+/// Deliberately narrow: the `CharacterBody*` runtime state whose absence breaks a
+/// verbatim Godot script, and only values that agree with what
+/// [`crate::physics_server::PhysicsServer::process_character_movement`] assumes
+/// for the same key, so the script and the simulation cannot disagree.
+fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
+    match (class_name, prop) {
+        // doc/classes/CharacterBody2D.xml: velocity Vector2(0, 0),
+        // up_direction Vector2(0, -1), floor_max_angle 0.785398 (45°).
+        ("CharacterBody2D", "velocity") => Some(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+        ("CharacterBody2D", "up_direction") => {
+            Some(Variant::Vector2(gdcore::math::Vector2::new(0.0, -1.0)))
+        }
+        ("CharacterBody2D", "floor_max_angle") => Some(Variant::Float(std::f64::consts::FRAC_PI_4)),
+        // doc/classes/CharacterBody3D.xml: velocity Vector3(0, 0, 0). The other 3D
+        // knobs are left out — no 3D character step reads them yet, and inventing
+        // a value the simulation ignores would be worse than reporting nothing.
+        ("CharacterBody3D", "velocity") => Some(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+        // doc/classes/RigidBody3D.xml: all four are Vector3(0, 0, 0). Without
+        // these, `linear_velocity.y += lift * delta` on a body the scene never
+        // gave a velocity dies exactly as CharacterBody2D's did (pat-0q2kx.37).
+        ("RigidBody3D", "linear_velocity")
+        | ("RigidBody3D", "angular_velocity")
+        | ("RigidBody3D", "constant_force")
+        | ("RigidBody3D", "constant_torque") => Some(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+        _ => None,
+    }
+}
+
+// -- AnimationNodeStateMachinePlayback handles (pat-s3rrv.1) ----------------
+//
+// Godot hands a script an *object* for `parameters/playback`, which it then
+// calls methods on: `$AnimationTree.get("parameters/playback").travel("run")`.
+// Patina has no engine-side Object for that, so the read mints a tagged
+// `ObjectId` naming (AnimationTree node, graph-node name) and
+// `animation_tree_playback_call` resolves it back on every call. The tag byte
+// keeps a playback id from ever colliding with a node id, and the table is
+// deduped by address so re-reading `parameters/playback` returns the same
+// handle each frame — as it does in Godot, where the playback is one object.
+
+/// Tag byte marking an `ObjectId` as a state-machine playback handle. Distinct
+/// from every other handle family's tag (see the `*_HANDLE_TAG` constants in
+/// `gdscript-interop`).
+const PLAYBACK_HANDLE_TAG: u64 = 0xA500_0000_0000_0000;
+
+thread_local! {
+    /// Live playback handles: raw id -> (AnimationTree node id, graph-node name).
+    /// The name is empty for the tree root's own machine.
+    static PLAYBACK_HANDLES: std::cell::RefCell<HashMap<u64, (u64, String)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_PLAYBACK_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `raw` was issued by [`playback_handle_for`].
+fn is_playback_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == PLAYBACK_HANDLE_TAG
+}
+
+// -- KinematicCollision2D handles (pat-s3rrv.95) ----------------------------
+//
+// Godot hands `get_slide_collision(i)` and `move_and_collide()` back an OBJECT
+// whose getters the script then calls:
+//
+//     for i in get_slide_collision_count():
+//         var c = get_slide_collision(i)
+//         if c.get_collider().is_in_group("hazard"): die()
+//
+// The contacts were already computed every physics tick and discarded;
+// `physics_server` now publishes them onto the character node as
+// `_slide_collisions`. These handles are what makes one addressable.
+//
+// ⚠️ The handle stores (character node, index) and RE-READS the record on every
+// getter, exactly as the playback handle re-resolves itself. Copying the values
+// in at mint time would freeze a contact that the next physics tick has already
+// replaced, so a script holding one across frames would read stale geometry.
+
+/// Tag byte marking an `ObjectId` as a slide-collision handle. Distinct from
+/// every other family's tag — 0x71 was free in the workspace-wide sweep.
+const KINEMATIC_COLLISION_TAG: u64 = 0x7100_0000_0000_0000;
+
+thread_local! {
+    /// Live collision handles: raw id -> (character node raw id, contact index).
+    static COLLISION_HANDLES: std::cell::RefCell<HashMap<u64, (u64, usize)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_COLLISION_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Index marking a handle as addressing the single `move_and_collide` result
+/// rather than an entry in the slide list (pat-s3rrv.97).
+///
+/// ⚠️ A sentinel rather than a second handle family: both kinds are a
+/// `KinematicCollision2D` with identical getters, so splitting them would mean
+/// two tags and two dispatch paths answering the same method names — and tag
+/// bytes are a workspace-wide namespace where a collision misroutes silently.
+const MOVE_AND_COLLIDE_INDEX: usize = usize::MAX;
+
+/// Returns `true` when `raw` was issued by [`kinematic_collision_handle_for`].
+fn is_kinematic_collision_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == KINEMATIC_COLLISION_TAG
+}
+
+/// A handle addressing contact `index` on character `node`, deduped so reading
+/// the same contact twice yields the same object — as it does in Godot.
+fn kinematic_collision_handle_for(node: u64, index: usize) -> u64 {
+    COLLISION_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some((raw, _)) = handles.iter().find(|(_, v)| **v == (node, index)) {
+            return *raw;
+        }
+        let seq = NEXT_COLLISION_HANDLE.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
+        let raw = KINEMATIC_COLLISION_TAG | seq;
+        handles.insert(raw, (node, index));
+        raw
+    })
+}
+
+/// The published record behind a handle, re-read from the node every call.
+fn collision_record(tree: &SceneTree, raw: u64) -> Option<gdvariant::Dictionary> {
+    let (node, index) = COLLISION_HANDLES.with(|h| h.borrow().get(&raw).copied())?;
+    let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+    if index == MOVE_AND_COLLIDE_INDEX {
+        return match tree
+            .get_node(nid)
+            .map(|n| n.get_property("_move_and_collide"))
+        {
+            Some(Variant::Dictionary(d)) => Some(d.to_dict()),
+            _ => None,
+        };
+    }
+    match tree
+        .get_node(nid)
+        .map(|n| n.get_property("_slide_collisions"))
+    {
+        Some(Variant::Array(items)) => match items.get(index) {
+            Some(Variant::Dictionary(d)) => Some(d.clone().to_dict()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// How many contacts the last physics tick published on `nid`.
+fn slide_collision_count(tree: &SceneTree, nid: NodeId) -> usize {
+    match tree
+        .get_node(nid)
+        .map(|n| n.get_property("_slide_collisions"))
+    {
+        Some(Variant::Array(items)) => items.len(),
+        _ => 0,
+    }
+}
+
+/// `KinematicCollision2D`'s getter surface, answered for handle receivers only.
+///
+/// ⚠️ Must run BEFORE the generic method table. `get_collider`, `get_normal`
+/// and `get_position` all already exist there reading RayCast2D's `_hit_*`
+/// keys, and a handle reaching those arms would read a raycast's empty results
+/// and report nothing — the same shadowing ShapeCast2D had to be lifted above.
+/// Declines every non-handle receiver, so the table stays reachable.
+/// `Timer.start()` / `stop()` / `is_stopped()` from GDScript (pat-s3rrv.121).
+///
+/// `SceneTree::process_timer_nodes` drives Timers from the stashed
+/// `__timer_running` / `time_left` properties, and **nothing outside that
+/// function ever wrote them**, so `$Timer.start()` was a silent no-op: a Timer
+/// without `autostart = true` could never run at all.
+///
+/// Declines every non-Timer node, leaving the dispatch table below reachable.
+fn timer_node_call(
+    tree: &mut SceneTree,
+    nid: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if !matches!(method, "start" | "stop" | "is_stopped") {
+        return None;
+    }
+    if tree.get_node(nid)?.class_name() != "Timer" {
+        return None;
+    }
+
+    let num = |v: Option<&Variant>| -> Option<f64> {
+        match v {
+            Some(Variant::Float(f)) => Some(*f),
+            Some(Variant::Int(i)) => Some(*i as f64),
+            _ => None,
+        }
+    };
+    let read = |tree: &SceneTree, key: &str, default: f64| -> f64 {
+        tree.get_node(nid)
+            .map(|n| n.get_property(key))
+            .and_then(|v| num(Some(&v)))
+            .unwrap_or(default)
+    };
+
+    match method {
+        "start" => {
+            // 🔑 `start(time_sec)` changes `wait_time` PERMANENTLY — Godot calls
+            // `set_wait_time(p_time)` (`timer.cpp:121-123`), it does not
+            // override the duration for one run. A repeating timer restarted
+            // with `start(0.25)` keeps firing every 0.25s afterwards.
+            if let Some(t) = num(args.first()) {
+                if t > 0.0 {
+                    tree.get_node_mut(nid)?
+                        .set_property("wait_time", Variant::Float(t));
+                }
+            }
+            let wait = read(tree, "wait_time", 1.0).max(1e-4);
+            let node = tree.get_node_mut(nid)?;
+            node.set_property("time_left", Variant::Float(wait));
+            node.set_property("__timer_running", Variant::Bool(true));
+            // Mark it started so the first-frame init pass in
+            // `process_timer_nodes` cannot re-seed the countdown underneath us.
+            node.set_property("__timer_started", Variant::Bool(true));
+            Some(Variant::Nil)
+        }
+        "stop" => {
+            let node = tree.get_node_mut(nid)?;
+            node.set_property("time_left", Variant::Float(0.0));
+            node.set_property("__timer_running", Variant::Bool(false));
+            node.set_property("__timer_started", Variant::Bool(true));
+            // ⚠️ `stop()` also CLEARS `autostart` (`timer.cpp:131`). Without
+            // this a stopped Timer whose scene set `autostart = true` would be
+            // restarted by the next init pass — stop would not stick.
+            node.set_property("autostart", Variant::Bool(false));
+            Some(Variant::Nil)
+        }
+        // ⚠️ Godot derives this from the clock alone: `get_time_left() <= 0`,
+        // where `get_time_left()` clamps negatives to 0 (`timer.cpp:155-161`).
+        // It is NOT a separate "running" flag — a *paused* Timer with time
+        // remaining reports `false`, i.e. not stopped.
+        "is_stopped" => Some(Variant::Bool(read(tree, "time_left", 0.0) <= 0.0)),
+        _ => None,
+    }
+}
+
+fn kinematic_collision_call(
+    tree: &SceneTree,
+    node: u64,
+    method: &str,
+    _args: &[Variant],
+) -> Option<Variant> {
+    if !is_kinematic_collision_handle(node) {
+        return None;
+    }
+    let rec = collision_record(tree, node)?;
+    let field = |k: &str| rec.get(k).cloned().unwrap_or(Variant::Nil);
+    let value = match method {
+        "get_normal" => field("normal"),
+        "get_position" => field("position"),
+        "get_remainder" => field("remainder"),
+        "get_depth" => field("depth"),
+        // The collider is published as a node ObjectId, so the value handed
+        // back is an ordinary node reference — `is_in_group()` and every other
+        // node method then work on it through the normal dispatch below.
+        "get_collider" => field("collider"),
+        "get_collider_id" => match field("collider") {
+            Variant::ObjectId(id) => Variant::Int(id.raw() as i64),
+            _ => Variant::Nil,
+        },
+        // `get_travel` is Godot's motion-applied-before-contact. The slide loop
+        // does not record it yet, so it is deliberately NOT answered here: a
+        // getter returning a plausible zero would read as "no travel" rather
+        // than "not implemented".
+        _ => return None,
+    };
+    Some(value)
+}
+
+// -- Physics 2D space-query handles (pat-s3rrv.26) --------------------------
+//
+// Godot's query surface is a chain of *objects*:
+//
+//     get_world_2d().direct_space_state.intersect_ray(
+//         PhysicsRayQueryParameters2D.create(from, to))
+//
+// ClassDB knows all of these (registered by this bead's other half), which
+// makes a query *describable*; these handles make it *runnable*. The interpreter
+// routes any `ObjectId` receiver through `SceneAccess::call_node_method`
+// (interpreter.rs:11863), so a tagged id dispatches here without a new trait
+// method.
+//
+// `World2D` and the space state are **fixed singletons**: Patina has one
+// `PhysicsWorld2D` per tree (`PhysicsServer::world`), so there is nothing to key
+// a registry on. Only the query parameters carry per-call state and need one.
+const PHYS_QUERY_TAG: u64 = 0xA600_0000_0000_0000;
+/// `get_world_2d()`'s return value.
+const WORLD_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x01;
+/// `World2D.direct_space_state`'s value.
+const SPACE_STATE_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x02;
+/// Top byte of a SubViewport's `World2D` handle (pat-8mb8y); the low bits are
+/// the raw id of the viewport that owns the world. Distinct from
+/// `PHYS_QUERY_TAG` so the handle never enters the physics-query routing.
+const VIEWPORT_WORLD_2D_TAG: u64 = 0x2A00_0000_0000_0000;
+
+fn viewport_world_2d_handle(owner_raw: u64) -> u64 {
+    VIEWPORT_WORLD_2D_TAG | owner_raw
+}
+
+fn is_viewport_world_2d_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == VIEWPORT_WORLD_2D_TAG
+}
+/// Builds a `PhysicsShapeQuery3D` from a script's
+/// `PhysicsShapeQueryParameters3D` resource (pat-s3rrv.107).
+///
+/// Shared by every shape-based 3D query — `intersect_shape`, `cast_motion`,
+/// `collide_shape`, `get_rest_info` — so the shape decoding, the extent
+/// conversion and the mask handling cannot drift apart between them.
+///
+/// ⚠️ Godot's `BoxShape3D.size` and the capsule/cylinder `height` are FULL
+/// extents; `Shape3D` stores HALF-extents and a total height. Passing `size`
+/// straight through yields a box twice the authored size, which silently
+/// over-reports overlaps.
+///
+/// Returns `None` when the params carry no usable shape — the callers turn that
+/// into Godot's empty answer rather than guessing geometry, because a
+/// substituted shape reports contacts that do not exist.
+fn shape_query_3d_from_params(
+    params: &gdvariant::ResourceRef,
+) -> Option<gdphysics3d::query::PhysicsShapeQuery3D> {
+    let Some(Variant::Resource(shape_res)) = params.properties.get("shape") else {
+        return None;
+    };
+    let num = |k: &str, d: f32| match shape_res.properties.get(k) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(i)) => *i as f32,
+        _ => d,
+    };
+    let shape = match shape_res.class_name.as_str() {
+        "SphereShape3D" => gdphysics3d::shape::Shape3D::Sphere {
+            radius: num("radius", 0.5),
+        },
+        "BoxShape3D" => {
+            let size = match shape_res.properties.get("size") {
+                Some(Variant::Vector3(v)) => *v,
+                _ => gdcore::math::Vector3::new(1.0, 1.0, 1.0),
+            };
+            gdphysics3d::shape::Shape3D::BoxShape {
+                half_extents: gdcore::math::Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0),
+            }
+        }
+        "CapsuleShape3D" => gdphysics3d::shape::Shape3D::CapsuleShape {
+            radius: num("radius", 0.5),
+            height: num("height", 2.0),
+        },
+        "CylinderShape3D" => gdphysics3d::shape::Shape3D::CylinderShape {
+            radius: num("radius", 0.5),
+            height: num("height", 2.0),
+        },
+        _ => return None,
+    };
+    // Godot types `transform` as a Transform3D and uses its ORIGIN; a bare
+    // Vector3 is accepted too, since the query consumes only a position.
+    let position = match params.properties.get("transform") {
+        Some(Variant::Transform3D(t)) => t.origin,
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    let mut query = gdphysics3d::query::PhysicsShapeQuery3D::new(shape, position);
+    if let Some(Variant::Int(m)) = params.properties.get("collision_mask") {
+        query.collision_mask = *m as u32;
+    }
+    if let Some(Variant::Vector3(v)) = params.properties.get("motion") {
+        query.motion = *v;
+    }
+    Some(query)
+}
+
+/// `get_world_3d()`'s return value (pat-s3rrv.107).
+const WORLD_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x11;
+/// `World3D.direct_space_state`'s value.
+const SPACE_STATE_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x12;
+/// `World3D.get_space()`'s RID — the one 3D space, which
+/// `PhysicsServer3D.space_get_direct_state` maps back to the space state
+/// (pat-v3co1).
+const SPACE_3D_RID: u64 = PHYS_QUERY_TAG | 0x13;
+/// Marks a ray-parameters handle; the low bits are its registry key.
+const RAY_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x1000;
+
+/// One `PhysicsRayQueryParameters2D`.
+#[derive(Debug, Clone)]
+struct RayParams2D {
+    from: gdcore::math::Vector2,
+    to: gdcore::math::Vector2,
+    /// Node ids to skip — Godot's `exclude`, which takes RIDs but which scripts
+    /// populate from `get_rid()`/node references.
+    exclude: Vec<u64>,
+    /// Godot defaults this to all layers. ⚠️ A mask of 0 hits **nothing** here,
+    /// matching `RayQuery2D` (and Godot) rather than `raycast_filtered`, which
+    /// reads 0 as "every layer".
+    collision_mask: u32,
+}
+
+thread_local! {
+    static RAY_PARAMS: std::cell::RefCell<HashMap<u64, RayParams2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_RAY_PARAMS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// `true` when `raw` names anything in the physics-query family.
+fn is_phys_query_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == PHYS_QUERY_TAG
+}
+
+/// Mints a ray-parameters handle (`PhysicsRayQueryParameters2D.create`).
+fn new_ray_params_handle(from: gdcore::math::Vector2, to: gdcore::math::Vector2) -> u64 {
+    let seq = NEXT_RAY_PARAMS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = RAY_PARAMS_BASE | seq;
+    RAY_PARAMS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            RayParams2D {
+                from,
+                to,
+                exclude: Vec::new(),
+                collision_mask: u32::MAX,
+            },
+        )
+    });
+    raw
+}
+
+/// Reads back a ray-parameters handle's state.
+fn ray_params(raw: u64) -> Option<RayParams2D> {
+    RAY_PARAMS.with(|m| m.borrow().get(&raw).cloned())
+}
+
+/// Marks a shape-resource handle (`CircleShape2D` / `RectangleShape2D`).
+const SHAPE_BASE: u64 = PHYS_QUERY_TAG | 0x2000;
+/// Marks a `PhysicsShapeQueryParameters2D` handle.
+const SHAPE_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x3000;
+
+/// One `PhysicsShapeQueryParameters2D`.
+///
+/// `shape` is the *handle* rather than the shape itself: Godot's script assigns
+/// a shape resource (`params.shape = circle`) and may keep mutating it
+/// afterwards, so the query has to read the shape's state at query time rather
+/// than snapshot it at assignment.
+#[derive(Debug, Clone)]
+struct ShapeParams2D {
+    shape: u64,
+    transform: gdcore::math::Transform2D,
+    /// Godot's `motion`, read only by `cast_motion`.
+    motion: gdcore::math::Vector2,
+    exclude: Vec<u64>,
+    collision_mask: u32,
+}
+
+thread_local! {
+    static SHAPES: std::cell::RefCell<HashMap<u64, gdphysics2d::shape::Shape2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_SHAPE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static SHAPE_PARAMS: std::cell::RefCell<HashMap<u64, ShapeParams2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_SHAPE_PARAMS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Mints a shape-resource handle (`CircleShape2D.new()` / `RectangleShape2D.new()`).
+fn new_shape_handle(shape: gdphysics2d::shape::Shape2D) -> u64 {
+    let seq = NEXT_SHAPE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = SHAPE_BASE | seq;
+    SHAPES.with(|m| m.borrow_mut().insert(raw, shape));
+    raw
+}
+
+/// Mints a `PhysicsShapeQueryParameters2D` handle with Godot's defaults.
+fn new_shape_params_handle() -> u64 {
+    let seq = NEXT_SHAPE_PARAMS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = SHAPE_PARAMS_BASE | seq;
+    SHAPE_PARAMS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            ShapeParams2D {
+                shape: 0,
+                transform: gdcore::math::Transform2D::IDENTITY,
+                motion: gdcore::math::Vector2::ZERO,
+                exclude: Vec::new(),
+                collision_mask: u32::MAX,
+            },
+        )
+    });
+    raw
+}
+
+fn shape_for(raw: u64) -> Option<gdphysics2d::shape::Shape2D> {
+    SHAPES.with(|m| m.borrow().get(&raw).copied())
+}
+
+/// The inverse of `physics_server`'s shape reader: a solver `Shape2D` turned
+/// back into the resource a `CollisionShape2D.shape` property holds.
+///
+/// ⚠️ This exists so the SCRIPT path and the SCENE path leave the SAME thing on
+/// the node (pat-s3rrv.188). A `.tscn` stores `shape` as a sub-resource and
+/// `physics_server` reads the geometry out of that resource's properties, but a
+/// script builds shapes as HANDLES — so assigning one stored a `Variant::ObjectId`
+/// the physics reader could not interpret, and `col.shape` read back as an
+/// ObjectId rather than the Resource Godot promises.
+///
+/// Every arm MUST mirror the reader in `physics_server.rs` exactly, because the
+/// two now describe one wire format. Both of its documented traps are reproduced
+/// here deliberately: `RectangleShape2D.size` is the FULL size while the solver
+/// stores HALF extents, and a concave polygon's points travel under `segments`
+/// rather than `points`.
+fn shape_resource_ref(shape: &gdphysics2d::shape::Shape2D) -> gdvariant::ResourceRef {
+    use gdphysics2d::shape::Shape2D as S;
+    let mut properties: HashMap<String, Variant> = HashMap::new();
+    let class_name = match shape {
+        S::Circle { radius } => {
+            properties.insert("radius".to_string(), Variant::Float(*radius as f64));
+            "CircleShape2D"
+        }
+        S::Rectangle { half_extents } => {
+            // FULL size, not the stored half extents.
+            properties.insert(
+                "size".to_string(),
+                Variant::Vector2(gdcore::math::Vector2::new(
+                    half_extents.x * 2.0,
+                    half_extents.y * 2.0,
+                )),
+            );
+            "RectangleShape2D"
+        }
+        S::Capsule { radius, height } => {
+            properties.insert("radius".to_string(), Variant::Float(*radius as f64));
+            properties.insert("height".to_string(), Variant::Float(*height as f64));
+            "CapsuleShape2D"
+        }
+        S::Segment { a, b } => {
+            properties.insert("a".to_string(), Variant::Vector2(*a));
+            properties.insert("b".to_string(), Variant::Vector2(*b));
+            "SegmentShape2D"
+        }
+        S::ConvexPolygon { points, count } => {
+            properties.insert(
+                "points".to_string(),
+                Variant::PackedVector2Array(points[..*count as usize].to_vec()),
+            );
+            "ConvexPolygonShape2D"
+        }
+        S::ConcavePolygon { points, count } => {
+            // ⚠️ `segments`, not `points` — Godot stores concave collision as a
+            // flat array of point PAIRS, and the reader looks for that key.
+            properties.insert(
+                "segments".to_string(),
+                Variant::PackedVector2Array(points[..*count as usize].to_vec()),
+            );
+            "ConcavePolygonShape2D"
+        }
+        S::WorldBoundary { normal, distance } => {
+            properties.insert("normal".to_string(), Variant::Vector2(*normal));
+            properties.insert("distance".to_string(), Variant::Float(*distance as f64));
+            "WorldBoundaryShape2D"
+        }
+        S::SeparationRay { length } => {
+            properties.insert("length".to_string(), Variant::Float(*length as f64));
+            "SeparationRayShape2D"
+        }
+    };
+    // `path` is empty on purpose: a script-built resource has no `res://` file
+    // until something saves it, which is what Godot's empty `resource_path` means.
+    gdvariant::ResourceRef {
+        path: String::new(),
+        class_name: class_name.to_string(),
+        properties,
+    }
+}
+
+/// Reads one script-visible property off a shape resource.
+///
+/// ⚠️ Every arm here MUST agree with the matching setter in
+/// `set_node_property`, because a script round-trips through both:
+/// `r.size = Vector2(20, 10)` followed by `r.size` has to give back what was
+/// written. The `size` pair is where that is easy to get wrong — Godot's
+/// `RectangleShape2D.size` is the FULL size while the solver stores half
+/// extents, so the setter halves and this doubles. Returning the stored field
+/// unchanged would read back half of every assignment.
+fn shape_property(shape: &gdphysics2d::shape::Shape2D, prop: &str) -> Option<Variant> {
+    use gdphysics2d::shape::Shape2D as S;
+    let pack = |points: &[gdcore::math::Vector2; gdphysics2d::shape::MAX_POLY_VERTS], count: u8| {
+        Variant::PackedVector2Array(points[..count as usize].to_vec())
+    };
+    Some(match (shape, prop) {
+        (S::Circle { radius }, "radius") => Variant::Float(*radius as f64),
+        (S::Rectangle { half_extents }, "size") => Variant::Vector2(gdcore::math::Vector2::new(
+            half_extents.x * 2.0,
+            half_extents.y * 2.0,
+        )),
+        (S::Segment { a, .. }, "a") => Variant::Vector2(*a),
+        (S::Segment { b, .. }, "b") => Variant::Vector2(*b),
+        (S::Capsule { radius, .. }, "radius") => Variant::Float(*radius as f64),
+        (S::Capsule { height, .. }, "height") => Variant::Float(*height as f64),
+        // Derived, never stored — which is why the docs give it no default.
+        (S::Capsule { radius, height }, "mid_height") => {
+            Variant::Float((height - radius * 2.0) as f64)
+        }
+        (S::ConvexPolygon { points, count }, "points") => pack(points, *count),
+        (S::ConcavePolygon { points, count }, "segments") => pack(points, *count),
+        (S::WorldBoundary { normal, .. }, "normal") => Variant::Vector2(*normal),
+        (S::WorldBoundary { distance, .. }, "distance") => Variant::Float(*distance as f64),
+        (S::SeparationRay { length }, "length") => Variant::Float(*length as f64),
+        _ => return None,
+    })
+}
+
+fn shape_mut<F: FnOnce(&mut gdphysics2d::shape::Shape2D)>(raw: u64, f: F) -> bool {
+    SHAPES.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(s) => {
+            f(s);
+            true
+        }
+        None => false,
+    })
+}
+
+/// The per-tick contact list `PhysicsServer::publish_body_contacts` leaves on a
+/// monitoring body (pat-s3rrv.100).
+///
+/// ⚠️ EMPTY unless the body opted in with `contact_monitor = true` AND
+/// `max_contacts_reported > 0` — the publisher applies Godot's own gate, so a
+/// body visibly resting on the floor still reports nothing until it asks to
+/// monitor. That is parity, not a missing read.
+fn body_contacts(tree: &SceneTree, nid: NodeId) -> Vec<Variant> {
+    match tree.get_node(nid).map(|n| n.get_property("_body_contacts")) {
+        Some(Variant::Array(items)) => items.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn shape_params(raw: u64) -> Option<ShapeParams2D> {
+    SHAPE_PARAMS.with(|m| m.borrow().get(&raw).cloned())
+}
+
+fn shape_params_mut<F: FnOnce(&mut ShapeParams2D)>(raw: u64, f: F) -> bool {
+    SHAPE_PARAMS.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(p) => {
+            f(p);
+            true
+        }
+        None => false,
+    })
+}
+
+/// Mutates a ray-parameters handle in place (the `exclude` / `collision_mask`
+/// setters a script assigns before running the query).
+fn ray_params_mut<F: FnOnce(&mut RayParams2D)>(raw: u64, f: F) -> bool {
+    RAY_PARAMS.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(p) => {
+            f(p);
+            true
+        }
+        None => false,
+    })
+}
+
+/// The handle naming `(node, sm_name)`, minting one on first use.
+fn playback_handle_for(node: u64, sm_name: &str) -> u64 {
+    PLAYBACK_HANDLES.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some((raw, _)) = map
+            .iter()
+            .find(|(_, (n, name))| *n == node && name == sm_name)
+        {
+            return *raw;
+        }
+        let seq = NEXT_PLAYBACK_HANDLE.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
+        let raw = PLAYBACK_HANDLE_TAG | seq;
+        map.insert(raw, (node, sm_name.to_string()));
+        raw
+    })
+}
+
+/// The `(node, sm_name)` a handle names, or `None` when it names no playback.
+fn playback_handle_target(raw: u64) -> Option<(u64, String)> {
+    if !is_playback_handle(raw) {
+        return None;
+    }
+    PLAYBACK_HANDLES.with(|m| m.borrow().get(&raw).cloned())
+}
+
+/// Splits a Godot playback parameter path into the graph-node name it
+/// addresses: `parameters/playback` -> `Some("")` (the graph root) and
+/// `parameters/Foo/playback` -> `Some("Foo")` (a nested machine). `None` when
+/// `path` is not a playback path at all.
+fn playback_param_name(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("parameters/")?;
+    match rest {
+        "playback" => Some(""),
+        _ => rest.strip_suffix("/playback"),
+    }
+}
+
+/// The HTTPRequest settings as authored on the NODE (pat-s3rrv.78).
+///
+/// ⚠️ Read from the node properties, not from a copy on `HttpRequestNode`.
+/// ClassDB registers `timeout` and `max_redirects` on HTTPRequest with Godot's
+/// defaults, so a `.tscn` writing `timeout = 5.0` and a script writing
+/// `r.timeout = 5.0` both land here — and Godot treats `r.timeout = 5.0` and
+/// `r.set_timeout(5.0)` as the same operation. A second copy on the node struct
+/// would make those two disagree, with whichever one the transport happened to
+/// read winning silently.
+fn http_settings(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::RequestSettings {
+    let node = tree.get_node(node_id);
+    crate::http_request_node::RequestSettings {
+        timeout: match node.map(|n| n.get_property("timeout")) {
+            Some(Variant::Float(f)) => f,
+            Some(Variant::Int(i)) => i as f64,
+            _ => crate::http_request_node::DEFAULT_TIMEOUT,
+        },
+        max_redirects: match node.map(|n| n.get_property("max_redirects")) {
+            Some(Variant::Int(i)) => i,
+            _ => crate::http_request_node::DEFAULT_MAX_REDIRECTS,
+        },
+        // ⚠️ Absent means `true`, the Godot default — not `false`.
+        accept_gzip: match node.map(|n| n.get_property("accept_gzip")) {
+            Some(Variant::Bool(b)) => b,
+            _ => crate::http_request_node::DEFAULT_ACCEPT_GZIP,
+        },
+    }
+}
+
+/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
+/// The HTTPRequest DELIVERY settings as authored on the node (pat-s3rrv.78).
+///
+/// Delegates rather than re-reading the properties, so the getters here and the
+/// emit path in `SceneTree::process_http_requests` cannot drift apart.
+fn http_delivery(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::DeliverySettings {
+    tree.get_node(node_id)
+        .map(crate::http_request_node::delivery_settings)
+        .unwrap_or_default()
+}
+
+/// The HTTPRequest PROXY settings as authored on the node (pat-s3rrv.78).
+///
+/// Delegates like `http_delivery` does, so the setter arms below and the
+/// request arms cannot drift apart on the "unset" rule.
+fn http_proxies(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::ProxySettings {
+    tree.get_node(node_id)
+        .map(crate::http_request_node::proxy_settings)
+        .unwrap_or_default()
+}
+
+/// Godot's `custom_headers` argument: a `PackedStringArray` of `"Name: Value"`.
+///
+/// ⚠️ An untyped `Array` of strings is accepted too — GDScript array literals
+/// produce one, so `r.request(url, ["X: 1"])` is what a project actually writes
+/// and a PackedStringArray-only reader would silently drop every header.
+fn custom_headers_arg(args: &[Variant]) -> Vec<String> {
+    match args.get(1) {
+        Some(Variant::PackedStringArray(h)) => h.clone(),
+        Some(Variant::Array(a)) => a
+            .to_vec()
+            .iter()
+            .filter_map(|v| match v {
+                Variant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
+fn is_http_request(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "HTTPRequest")
+        .unwrap_or(false)
+}
+
+/// Whether `node_id` is a `RichTextLabel` (pat-s3rrv.74).
+fn is_rich_text_label(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "RichTextLabel")
+        .unwrap_or(false)
+}
+
+/// The label's current BBCode source, matching what the draw arm reads.
+///
+/// `bbcode_text` wins when set, else plain `text` — so a script appending to a
+/// label authored with plain `text` extends that text rather than silently
+/// starting a second, empty string beside it.
+fn richtext_src(tree: &SceneTree, node_id: NodeId) -> String {
+    let string_prop = |key: &str| match tree.get_node(node_id).map(|n| n.get_property(key)) {
+        Some(Variant::String(s)) => Some(s),
+        _ => None,
+    };
+    // Same precedence, expressed the same way, as `control_render::richtext_source`.
+    string_prop("bbcode_text")
+        .filter(|s| !s.is_empty())
+        .or_else(|| string_prop("text"))
+        .unwrap_or_default()
+}
+
+/// Writes the label's source back.
+///
+/// Both properties are set: `bbcode_text` is what the draw arm prefers, and
+/// leaving a stale `text` behind would resurrect the old string the moment
+/// something cleared the bbcode one.
+/// The node property holding a `RichTextLabel`'s open tag stack.
+///
+/// Godot's push/pop API is a STACK of open tags — `push_color(); push_bold();
+/// pop()` closes the bold, not the colour — so `pop` has to know what the last
+/// `push` opened. The label itself carries that state, which keeps it alive
+/// across frames and dies with the node.
+/// Godot `Error::OK`, returned by a successful `Object.connect`
+/// (`core/error/error_list.h`). Patina returned `Nil` before pat-mgixk.98.
+const CONNECT_OK: i64 = 0;
+/// Godot `Error::ERR_INVALID_PARAMETER` — what `Object::connect` answers both
+/// for a signal the object does not have and for an already-connected
+/// `(target, method)` pair (`core/object/object.cpp:1638`, `:1646-1666`).
+const CONNECT_ERR_INVALID_PARAMETER: i64 = 31;
+
+const RICHTEXT_TAG_STACK: &str = "__richtext_tag_stack__";
+
+/// Reads the open-tag stack (outermost first).
+///
+/// Stored newline-joined because a BBCode close tag never contains a newline,
+/// so the round trip is lossless without a second escaping scheme.
+fn richtext_tag_stack(tree: &SceneTree, node_id: NodeId) -> Vec<String> {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property(RICHTEXT_TAG_STACK))
+    {
+        Some(Variant::String(s)) if !s.is_empty() => s.split('\n').map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_richtext_tag_stack(tree: &mut SceneTree, node_id: NodeId, stack: &[String]) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(RICHTEXT_TAG_STACK, Variant::String(stack.join("\n")));
+    }
+}
+
+/// Godot's `push_*`: append `open` to the BBCode source and remember `close`.
+///
+/// ⚠️ ONLY emit tags `parse_bbcode` actually understands. A tag it does not
+/// recognise is stripped, so an unsupported push would appear to work — the
+/// call succeeds, the text still renders — while silently doing nothing. That
+/// is why there is no `push_bold`/`push_italics` here: `[b]`/`[i]` are not
+/// parsed, and the built-in 5x7 bitmap font has no weight or slant variants to
+/// render them with even if they were.
+fn richtext_push(tree: &mut SceneTree, node_id: NodeId, open: &str, close: &str) {
+    let joined = format!("{}{}", richtext_src(tree, node_id), open);
+    set_richtext(tree, node_id, joined);
+    let mut stack = richtext_tag_stack(tree, node_id);
+    stack.push(close.to_string());
+    set_richtext_tag_stack(tree, node_id, &stack);
+}
+
+/// Godot's `pop`: close the most recently pushed tag. `false` when nothing is open.
+fn richtext_pop(tree: &mut SceneTree, node_id: NodeId) -> bool {
+    let mut stack = richtext_tag_stack(tree, node_id);
+    let Some(close) = stack.pop() else {
+        return false;
+    };
+    let joined = format!("{}{}", richtext_src(tree, node_id), close);
+    set_richtext(tree, node_id, joined);
+    set_richtext_tag_stack(tree, node_id, &stack);
+    true
+}
+
+/// A `Color` as the `#rrggbbaa` BBCode `parse_bbcode_color` reads back.
+fn richtext_color_hex(c: Color) -> String {
+    let byte = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        byte(c.r),
+        byte(c.g),
+        byte(c.b),
+        byte(c.a)
+    )
+}
+
+fn set_richtext(tree: &mut SceneTree, node_id: NodeId, value: String) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("bbcode_text", Variant::String(value.clone()));
+        node.set_property("text", Variant::String(value));
+    }
+}
+
+/// `AnimationPlayer` / `AnimationMixer` methods a script can call
+/// (pat-mgixk.79).
+///
+/// Returns `None` for a node with no attached player, so the generic node table
+/// stays reachable — the same decline-and-fall-through contract the
+/// NavigationAgent, Timer and Camera3D handlers use.
+///
+/// Every arm forwards to an `AnimationPlayer` API that already existed and had
+/// no script caller: a quoted-name grep found **0** dispatch hits for
+/// `get_queue`, `clear_queue`, `animation_set_next`, `set_blend_time`,
+/// `get_current_animation_length` and `advance`, while `AnimationPlayer`
+/// implements all of them.
+fn animation_player_method(
+    tree: &mut crate::scene_tree::SceneTree,
+    nid: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    // A node of class `AnimationPlayer` with no player struct gets one here,
+    // on first use (pat-mgixk.79).
+    //
+    // In Godot the node IS the mixer, so a player always has its state; in
+    // Patina the struct is a side table that only the `.tscn` loader populated
+    // (`animation_tscn.rs:562` was its sole non-test caller). So
+    // `AnimationPlayer.new()` + `add_child` produced a node of the right class
+    // that every method below declined — and declining means the dispatcher
+    // falls through to `UndefinedFunction`, which **aborts the calling frame**.
+    // Measured: a script that printed its node's class and then called
+    // `get_animation_list()` printed the class and nothing after it.
+    //
+    // ⚠️ Gated on the class name, so this cannot attach a player to an
+    // unrelated node and shadow a later table — the comment at the call site
+    // ("declines every node without a player, so the table below stays
+    // reachable") still holds for everything that is not an AnimationPlayer.
+    //
+    // ⚠️ Restoring an invariant, not a side effect: an idle player is inert
+    // (`AnimationPlayer::advance` returns early when `!playing`) and the one
+    // thing `process_animations` then writes each frame is
+    // `current_animation = ""`, which is exactly what Godot reports for a player
+    // with nothing playing.
+    if tree.get_animation_player(nid).is_none()
+        && tree
+            .get_node(nid)
+            .map(|n| n.class_name() == "AnimationPlayer")
+            .unwrap_or(false)
+    {
+        let _ = tree.attach_animation_player(nid, crate::animation::AnimationPlayer::new());
+    }
+
+    // `advance` needs the tree (it runs the whole apply pass), so it is handled
+    // before the player borrow below.
+    if method == "advance" {
+        let delta = match args.first() {
+            Some(Variant::Float(f)) => *f,
+            Some(Variant::Int(i)) => *i as f64,
+            // Godot's `advance` takes a required delta; a malformed call is a
+            // no-op rather than a zero-advance that looks like success.
+            _ => return Some(Variant::Nil),
+        };
+        return tree
+            .advance_animation_player(nid, delta)
+            .then_some(Variant::Nil);
+    }
+
+    let text = |i: usize| -> Option<String> {
+        match args.get(i) {
+            Some(Variant::String(s)) => Some(s.clone()),
+            Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+            _ => None,
+        }
+    };
+    let num = |i: usize| -> Option<f64> {
+        match args.get(i) {
+            Some(Variant::Float(f)) => Some(*f),
+            Some(Variant::Int(n)) => Some(*n as f64),
+            _ => None,
+        }
+    };
+
+    let player = tree.get_animation_player_mut(nid)?;
+    match method {
+        "get_queue" => Some(Variant::PackedStringArray(player.get_queue())),
+        "clear_queue" => {
+            player.clear_queue();
+            Some(Variant::Nil)
+        }
+        "animation_set_next" => {
+            let (anim, next) = (text(0)?, text(1)?);
+            player.animation_set_next(anim, next);
+            Some(Variant::Nil)
+        }
+        "set_blend_time" => {
+            let (from, to, secs) = (text(0)?, text(1)?, num(2)?);
+            player.set_blend_time(from, to, secs);
+            Some(Variant::Nil)
+        }
+        "get_current_animation_length" => {
+            // Godot answers 0.0 when nothing is assigned, not null.
+            let len = player
+                .current_animation()
+                .and_then(|name| player.animations.get(name))
+                .map(|anim| anim.length)
+                .unwrap_or(0.0);
+            Some(Variant::Float(len))
+        }
+        "set_current_animation" => {
+            // Godot's setter STARTS the clip, which is why this cannot be a
+            // plain property write into the bag.
+            let name = text(0)?;
+            player.play(&name);
+            Some(Variant::Nil)
+        }
+        "get_assigned_animation" | "get_current_animation" => Some(Variant::String(
+            player.current_animation().unwrap_or("").to_string(),
+        )),
+
+        // -- root motion (pat-mgixk.78) ---------------------------------------
+        //
+        // Godot's `AnimationMixer` never moves the node: it cancels the
+        // root-motion track from the visual pose and publishes the motion here,
+        // leaving the user to apply it — the canonical shape being
+        // `velocity = mixer.get_root_motion_position() / delta`
+        // (`AnimationMixer.xml:323-326`).
+        //
+        // 🔑 All nine arms land together on purpose. Declining a method in this
+        // table does NOT yield Nil — it falls through to `UndefinedFunction`,
+        // which aborts the calling frame (see this function's own note). A
+        // script that called a missing one would stop mid-function with nothing
+        // reported at the call site, so a partial set is worse than none.
+        //
+        // The values come from the `RootMotionState` the animation step fills
+        // each frame from all three track kinds, so "in the same frame" holds:
+        // `process_animations` records before the script runs.
+        "get_root_motion_position" => Some(Variant::Vector3(player.root_motion().position_delta)),
+        "get_root_motion_rotation" => {
+            Some(Variant::Quaternion(player.root_motion().rotation_delta))
+        }
+        "get_root_motion_scale" => Some(Variant::Vector3(player.root_motion().scale_delta)),
+        "get_root_motion_position_accumulator" => {
+            Some(Variant::Vector3(player.root_motion().position_accumulator))
+        }
+        "get_root_motion_rotation_accumulator" => Some(Variant::Quaternion(
+            player.root_motion().rotation_accumulator,
+        )),
+        "get_root_motion_scale_accumulator" => {
+            Some(Variant::Vector3(player.root_motion().scale_accumulator))
+        }
+        // ⚠️ A NodePath, not a String. ClassDB declares the property as
+        // `Variant::NodePath` (`class_db.rs:5422`), and a String would compare
+        // false against a NodePath on the script side.
+        "get_root_motion_track" => Some(Variant::NodePath(gdcore::node_path::NodePath::new(
+            player.root_motion_track.as_deref().unwrap_or(""),
+        ))),
+        "set_root_motion_track" => {
+            let path = text(0)?;
+            // An empty path CLEARS the track, which is how Godot turns root
+            // motion off. Storing `Some("")` instead would leave
+            // `consume_root_motion` hunting for a track named "".
+            player.root_motion_track = if path.is_empty() { None } else { Some(path) };
+            Some(Variant::Nil)
+        }
+        "is_root_motion_local" => Some(Variant::Bool(player.root_motion().local)),
+        "set_root_motion_local" => {
+            // No bool helper in this table (only `text` and `num`), so the arg
+            // is matched directly.
+            let on = matches!(args.first(), Some(Variant::Bool(true)));
+            player.set_root_motion_local(on);
+            Some(Variant::Nil)
+        }
+        _ => None,
     }
 }
 
@@ -296,6 +2598,105 @@ impl SceneAccess for SceneTreeAccessor {
             .map(|pid| pid.raw())
     }
 
+    // ---------------------------------------------------------------------
+    // Object API surface (pat-mgixk.99). Each one forwards to the SceneTree
+    // method of the same name; the trait defaults decline for every non-scene
+    // backend.
+    // ---------------------------------------------------------------------
+
+    fn add_user_signal(&mut self, node: u64, name: &str, args: &[Variant]) {
+        // ⚠️ `args` is Godot's parameter list for the signal, which it surfaces
+        // through `get_signal_list`. `SignalStore` has nowhere to put a
+        // parameter list, so the list is accepted and NOT yet reflected there —
+        // recorded as partial on the bead rather than silently dropped. Emission
+        // and connection are unaffected: Godot does not type-check signal
+        // arguments at emit time either.
+        let _ = args;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().add_user_signal(nid, name);
+    }
+
+    fn has_user_signal(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().has_user_signal(nid, name)
+    }
+
+    fn remove_user_signal(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let had = self.tree().has_user_signal(nid, name);
+        self.tree_mut().remove_user_signal(nid, name);
+        had
+    }
+
+    fn set_block_signals(&mut self, node: u64, blocked: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_block_signals(nid, blocked);
+    }
+
+    fn is_blocking_signals(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_blocking_signals(nid)
+    }
+
+    fn is_queued_for_deletion(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_queued_for_deletion(nid)
+    }
+
+    fn cancel_free(&mut self, node: u64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().cancel_free(nid);
+    }
+
+    fn set_object_script(&mut self, node: u64, script_path: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Same two steps the scene-load path uses (`attach_pending_scripts`
+        // above): read the source through `FileAccess`, which resolves `res://`,
+        // then build an instance bound to this node.
+        let Ok(source) = gdcore::file_access::FileAccess::read_file_string(script_path) else {
+            return false;
+        };
+        let Ok(instance) = GDScriptNodeInstance::from_source(&source, nid) else {
+            return false;
+        };
+        self.tree_mut().attach_script(nid, Box::new(instance));
+        // Godot emits `script_changed` on the object after the swap; it is a
+        // registered Object signal (`class_db.rs:1097`).
+        self.tree_mut().emit_signal(nid, "script_changed", &[]);
+        true
+    }
+
+    fn notify_object(&mut self, node: u64, what: i64, reversed: bool) {
+        // Godot's `reversed` walks the class chain from the base down. This
+        // engine dispatches `_notification` to the one attached script rather
+        // than to a chain of native classes, so there is no ordering to
+        // reverse and the flag cannot change the outcome. Accepted and ignored
+        // deliberately — see the bead.
+        let _ = reversed;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().notify_script(nid, what);
+    }
+
+    fn set_message_translation(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_message_translation(nid, enabled);
+    }
+
+    fn can_translate_messages(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().can_translate_messages(nid)
+    }
+
+    fn set_translation_domain(&mut self, node: u64, domain: &str) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_translation_domain(nid, domain);
+    }
+
+    fn get_translation_domain(&self, node: u64) -> String {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_translation_domain(nid)
+    }
+
     fn get_children(&self, node: u64) -> Vec<u64> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree()
@@ -305,7 +2706,151 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn get_node_property(&self, node: u64, prop: &str) -> Variant {
+        // `get_tree().paused` / `.current_scene` / `.root`, and the SceneTree
+        // signals (pat-mgixk.59). Answered before anything resolves `node` as a
+        // NodeId, for the same reason the physics-query branch below is:
+        // the handle names no node, so the scene route would read back `Nil`
+        // and `var t = get_tree(); t.paused` would be silently empty.
+        if is_scene_tree_handle(node) {
+            // 🔑 Every SceneTree signal is emitted on the tree ROOT
+            // (`main_loop.rs` emits `process_frame`/`physics_frame` on
+            // `tree.root_id()`), so the Signal value has to name the root. Bound
+            // anywhere else, `.connect` would land where nothing emits and
+            // `await get_tree().process_frame` would hang forever.
+            if SCENE_TREE_SIGNALS.contains(&prop) {
+                return Variant::Signal {
+                    object_id: self.tree().root_id().raw(),
+                    name: prop.to_string(),
+                };
+            }
+            return match prop {
+                "paused" => Variant::Bool(self.tree().paused()),
+                "root" => Variant::ObjectId(self.tree().root_id().object_id()),
+                // Godot answers null before a scene is set, not the root.
+                "current_scene" => match self.tree().current_scene() {
+                    Some(id) => Variant::ObjectId(id.object_id()),
+                    None => Variant::Nil,
+                },
+                _ => Variant::Nil,
+            };
+        }
+        // `World2D.direct_space_state` (pat-s3rrv.26). Answered before the node
+        // lookup below because the receiver is a physics-query handle, not a
+        // node — `NodeId::from_object_id` on it would name nothing and the
+        // property would read back `Nil`, which is what made the documented
+        // `get_world_2d().direct_space_state.intersect_ray(..)` chain
+        // unreachable even once `World2D` had the property registered.
+        if is_phys_query_handle(node) {
+            if node == WORLD_3D_HANDLE && prop == "direct_space_state" {
+                return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE));
+            }
+            // `World3D.space` (pat-v3co1), the property `get_space()` reads.
+            if node == WORLD_3D_HANDLE && prop == "space" {
+                return Variant::Rid(gdcore::id::Rid::from_raw(SPACE_3D_RID));
+            }
+            if node == WORLD_2D_HANDLE && prop == "direct_space_state" {
+                return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE));
+            }
+            // Shape resources answer their own properties (pat-s3rrv.98).
+            //
+            // ⚠️ Until this existed every one of these read back `Nil`, so a
+            // shape was write-only from script: `c.radius = 20` stuck, but
+            // `c.radius` gave nothing back. The damage is not just the read —
+            // it is that `c.radius += 5` desugars to a read, and the
+            // interpreter's "is this a property?" gate treats a `Nil` read as
+            // "no such property", so the compound assignment died mid-frame
+            // exactly the way an unset `CharacterBody2D.velocity` used to.
+            if let Some(shape) = shape_for(node) {
+                if let Some(v) = shape_property(&shape, prop) {
+                    return v;
+                }
+                return Variant::Nil;
+            }
+            // `PhysicsShapeQueryParameters2D` reads back what was assigned, so
+            // a script can hand the same params object around and inspect it.
+            if let Some(params) = shape_params(node) {
+                return match prop {
+                    "shape" => {
+                        if params.shape == 0 {
+                            Variant::Nil
+                        } else {
+                            Variant::ObjectId(ObjectId::from_raw(params.shape))
+                        }
+                    }
+                    "transform" => Variant::Transform2D(params.transform),
+                    "motion" => Variant::Vector2(params.motion),
+                    "collision_mask" => Variant::Int(params.collision_mask as i64),
+                    "exclude" => Variant::Array(
+                        params
+                            .exclude
+                            .iter()
+                            .map(|raw| Variant::ObjectId(ObjectId::from_raw(*raw)))
+                            .collect(),
+                    ),
+                    _ => Variant::Nil,
+                };
+            }
+            return Variant::Nil;
+        }
+        // A SubViewport's World2D handle (pat-8mb8y): physics is one world, so
+        // its space state is the same singleton `get_world_2d()` hands out.
+        if is_viewport_world_2d_handle(node) {
+            return match prop {
+                "direct_space_state" => {
+                    Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE))
+                }
+                _ => Variant::Nil,
+            };
+        }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `SubViewport.world_2d` (pat-8mb8y): a handle naming the viewport whose
+        // World2D this one draws — its own unless a script shared another's.
+        // `viewport_2.world_2d = viewport_1.world_2d` is how Godot's split
+        // screen puts one level in two views.
+        if prop == "world_2d" && crate::behavioral_2d::is_sub_viewport(self.tree(), nid) {
+            let owner = match self
+                .tree()
+                .get_node(nid)
+                .map(|n| n.get_property(crate::canvas_render::WORLD_2D_OWNER_PROP))
+            {
+                Some(Variant::Int(0)) => {
+                    return Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))
+                }
+                Some(Variant::Int(raw)) if raw > 0 => raw as u64,
+                _ => node,
+            };
+            return Variant::ObjectId(ObjectId::from_raw(viewport_world_2d_handle(owner)));
+        }
+        // `Control.layout_mode` is computed from the parent on every read
+        // (control.cpp:938) — see `control::layout_mode`.
+        if prop == "layout_mode" && crate::control::node_is_control(self.tree(), nid) {
+            return Variant::Int(crate::control::layout_mode(self.tree(), nid));
+        }
+        // An AnimationTree's `parameters/...` values live on the attached graph,
+        // which evaluation reads and writes — so report those rather than the
+        // node's stored copy, mirroring Godot's `AnimationTree.get()`
+        // (pat-0q2kx.2).
+        if prop.starts_with("parameters/") {
+            if let Some(anim_tree) = self.tree().get_animation_tree(nid) {
+                // `parameters/playback` is an object, not a stored value: it is
+                // how every Godot state-machine game steers the graph
+                // (`get("parameters/playback").travel("run")`). Answer with a
+                // handle the interpreter routes back through
+                // `animation_tree_playback_call` (pat-s3rrv.1). Checked before
+                // the params map so a scene that happens to have written that
+                // key cannot shadow the object.
+                if let Some(sm_name) = playback_param_name(prop) {
+                    if anim_tree.state_machine(sm_name).is_some() {
+                        return Variant::ObjectId(ObjectId::from_raw(playback_handle_for(
+                            node, sm_name,
+                        )));
+                    }
+                }
+                if let Some(value) = anim_tree.get_parameter(prop) {
+                    return value;
+                }
+            }
+        }
         // Try script property first
         if let Some(script) = self.tree().get_script(nid) {
             if let Some(val) = script.get_property(prop) {
@@ -314,23 +2859,5252 @@ impl SceneAccess for SceneTreeAccessor {
         }
         // Then try node property
         if let Some(n) = self.tree().get_node(nid) {
-            return n.get_property(prop);
+            // `Node.name` is a real property in Godot (`StringName name`), but
+            // Patina keeps a node's name in its own field rather than in the
+            // property bag, so `$Child.name` read back `Nil` — which is why the
+            // most ordinary thing a script does with a node reference did not
+            // work (pat-mgixk.20).
+            //
+            // ⚠️ Answered INSIDE the node-exists block on purpose. `print`ing a
+            // name is not the only caller: `is_instance_id_valid` probes
+            // existence by reading `"name"` and treating `Nil` as "no such
+            // node" (interpreter.rs, `is_instance_id_valid`). Since nothing
+            // answered `name`, that predicate was false for EVERY id; answering
+            // it here repairs that, and a missing node still falls through to
+            // `Nil` because `get_node` returned `None`.
+            if prop == "name" {
+                return Variant::String(n.name().to_string());
+            }
+            // Node3D's COMPUTED properties — `global_position`,
+            // `global_transform`, `global_basis`, `global_rotation(_degrees)`,
+            // `basis`, `quaternion`, `rotation_degrees` (pat-mgixk.30).
+            //
+            // Ahead of the raw-bag read below because none of them is stored:
+            // a Node3D keeps `transform`/`position`/`rotation`/`scale`, so
+            // `self.global_position` fell through to `builtin_property_default`
+            // and read back Nil. The reader itself declines any node that is
+            // not a Node3D, so the 2D `global_position` served elsewhere is
+            // untouched.
+            if let Some(value) = crate::node3d::get_derived_property(self.tree(), nid, prop) {
+                return value;
+            }
+            if let Some(value) = crate::node2d::get_derived_property(self.tree(), nid, prop) {
+                return value;
+            }
+            let value = n.get_property(prop);
+            // An inline `SubResource` reads as the resource object, a view of
+            // the node companions every consumer reads (pat-nyn3w).
+            if matches!(&value, Variant::String(s) if s.starts_with("SubResource")) {
+                if let Some(resource) =
+                    crate::script_subresource::script_resource_value(self.tree(), nid, prop)
+                {
+                    return resource;
+                }
+            }
+            if !value.is_nil() {
+                return value;
+            }
+            // A Godot class property exists with its default even when nothing
+            // ever assigned it; `Node` stores only what was set, so an unset
+            // built-in read back `Nil`. That killed the most ordinary script in
+            // Godot: `velocity.y += gravity * delta` on a fresh CharacterBody2D
+            // found `Nil`, so the interpreter's "is this a node property?" gate
+            // said no and the read-modify-write died with "cannot assign member
+            // 'y' on Nil" mid-frame — the body never fell (pat-0q2kx.33).
+            if let Some(default) = builtin_property_default(n.class_name(), prop) {
+                return default;
+            }
+            // A built-in signal read as a value — `body_entered.connect(..)`,
+            // `$Button.pressed.connect(..)` — names this node's signal, as the
+            // SceneTree branch above already does for the tree's own signals.
+            // It read back Nil, so the canonical Godot 4 connect idiom failed
+            // with "undefined variable: 'body_entered'".
+            if gdobject::class_db::class_has_signal(n.class_name(), prop) {
+                return Variant::Signal {
+                    object_id: nid.raw(),
+                    name: prop.to_string(),
+                };
+            }
+            return Variant::Nil;
         }
         Variant::Nil
     }
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
-        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
-        // Try script property first
-        if let Some(script) = self.tree_mut().get_script_mut(nid) {
-            if script.set_property(prop, value.clone()) {
+        // `a.shape = b.shape` with a scene-bound sub-resource (pat-nyn3w): `a`
+        // becomes another HOLDER of that sub-resource — its reference text and
+        // companions copied from `b` — so the two share it as in Godot, and the
+        // renderers and saver read a valid `SubResource` on `a`.
+        if let Variant::Resource(r) = &value {
+            if let Some(binding) = gdscript_interop::bindings::resource_binding(r) {
+                let binding = binding.to_string();
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                if crate::script_subresource::adopt(self.tree_mut(), nid, prop, &binding) {
+                    return;
+                }
+            }
+        }
+        // `viewport_2.world_2d = viewport_1.world_2d` (pat-8mb8y). Recorded as
+        // the OWNER of the shared world, which the Play frame reads to draw
+        // Viewport1's level in Viewport2 too. The root's `get_world_2d()`
+        // singleton means the root window's world (owner 0).
+        {
+            let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+            if prop == "world_2d" && crate::behavioral_2d::is_sub_viewport(self.tree(), nid) {
+                let owner = match &value {
+                    Variant::ObjectId(h) if is_viewport_world_2d_handle(h.raw()) => {
+                        Some(h.raw() & !VIEWPORT_WORLD_2D_TAG)
+                    }
+                    Variant::ObjectId(h) if h.raw() == WORLD_2D_HANDLE => Some(0),
+                    _ => None,
+                };
+                if let (Some(owner), Some(n)) = (owner, self.tree_mut().get_node_mut(nid)) {
+                    if owner == node {
+                        // Its own world again.
+                        n.remove_property(crate::canvas_render::WORLD_2D_OWNER_PROP);
+                    } else {
+                        n.set_property(
+                            crate::canvas_render::WORLD_2D_OWNER_PROP,
+                            Variant::Int(owner as i64),
+                        );
+                    }
+                }
                 return;
             }
         }
-        // Then try node property
-        if let Some(n) = self.tree_mut().get_node_mut(nid) {
-            n.set_property(prop, value);
+        // `get_tree().paused = true` — the pause-menu idiom (pat-mgixk.59).
+        // Before the node resolution below: the handle names no node, so the
+        // write would land on nothing and the tree would keep running.
+        if is_scene_tree_handle(node) {
+            if prop == "paused" {
+                let paused = match value {
+                    Variant::Bool(b) => b,
+                    Variant::Int(i) => i != 0,
+                    // A malformed value is a no-op rather than an un-pause: the
+                    // same rule `set_process` follows.
+                    _ => return,
+                };
+                self.tree_mut().set_paused(paused);
+            }
+            // Every other SceneTree property is read-only from a script, and an
+            // unknown name is dropped rather than creating a bag entry on a
+            // handle that has no node to carry it.
+            return;
         }
+        // pat-s3rrv.26 — assignments onto a `PhysicsRayQueryParameters2D`
+        // handle: `params.exclude = [body]`, `params.collision_mask = 2`.
+        //
+        // ⚠️ Checked before anything resolves `node` as a NodeId. These handles
+        // are tagged ids, not nodes, so the lookup below would miss (or land on
+        // an unrelated node) and the assignment would vanish silently — the
+        // query would then run with the DEFAULT filter and look like the filter
+        // was ignored, rather than like the setter was never wired.
+        if is_phys_query_handle(node) {
+            match prop {
+                // Godot's `exclude` takes RIDs. Patina has no RID, so a script
+                // passes the node objects themselves. Non-object entries are
+                // dropped rather than silently excluding body 0.
+                "exclude" => {
+                    let ids: Vec<u64> = match &value {
+                        Variant::Array(items) => items
+                            .to_vec()
+                            .iter()
+                            .filter_map(|v| match v {
+                                Variant::ObjectId(id) => Some(id.raw()),
+                                // `CollisionObject2D.get_rid()` (pat-b4zhq):
+                                // the RID carries the node's object id, so it
+                                // lands in the same NODE-id list.
+                                Variant::Rid(rid) => Some(rid.id()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    // The same list serves both parameter kinds; only the one
+                    // whose registry holds this handle actually takes it.
+                    ray_params_mut(node, |p| p.exclude = ids.clone());
+                    shape_params_mut(node, |p| p.exclude = ids);
+                }
+                "collision_mask" => {
+                    if let Variant::Int(m) = &value {
+                        let mask = *m as u32;
+                        ray_params_mut(node, |p| p.collision_mask = mask);
+                        shape_params_mut(node, |p| p.collision_mask = mask);
+                    }
+                }
+                // -- shape resources: `circle.radius = 16`, `rect.size = v` ---
+                //
+                // Godot's `RectangleShape2D.size` is the FULL extent while
+                // `Shape2D::Rectangle` stores half-extents, so this halves it.
+                // Getting that backwards doubles every rectangle query and the
+                // overlap still "works", just against the wrong box.
+                // ⚠️ `radius` must PRESERVE the shape kind, not rebuild a
+                // circle. `CapsuleShape2D` also has a radius, so the old
+                // unconditional `*s = Circle { .. }` silently turned a capsule
+                // into a circle the moment a script set its radius — a shape
+                // that still collides, just as the wrong one (pat-s3rrv.98,
+                // introduced the moment capsules became constructible).
+                "radius" => {
+                    if let Some(r) = variant_number(&value) {
+                        let r = r as f32;
+                        // Godot rejects a negative radius outright rather than
+                        // storing it (`ERR_FAIL_COND_MSG`), leaving the shape
+                        // untouched.
+                        if r < 0.0 {
+                            return;
+                        }
+                        shape_mut(node, |s| match *s {
+                            gdphysics2d::shape::Shape2D::Capsule { height, .. } => {
+                                // ⚠️ A capsule must satisfy `height >= 2 * radius`
+                                // or it is no longer a capsule. Godot repairs the
+                                // pair rather than refusing, and the two setters
+                                // repair it in OPPOSITE directions: setting the
+                                // radius GROWS the height, while setting the
+                                // height SHRINKS the radius. Clamping both the
+                                // same way would silently disagree with Godot on
+                                // whichever half was written second.
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius: r,
+                                    height: height.max(r * 2.0),
+                                }
+                            }
+                            _ => *s = gdphysics2d::shape::Shape2D::Circle { radius: r },
+                        });
+                    }
+                }
+                // `CapsuleShape2D.height` is the TOTAL height in Godot; the
+                // solver stores the same, so no mid-height conversion here.
+                "height" => {
+                    if let Some(h) = variant_number(&value) {
+                        let h = h as f32;
+                        if h < 0.0 {
+                            return;
+                        }
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::Capsule { radius, .. } = *s {
+                                // The opposite repair from `radius` above: a
+                                // height too small for the current radius shrinks
+                                // the radius to `height / 2`.
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius: radius.min(h * 0.5),
+                                    height: h,
+                                }
+                            }
+                        });
+                    }
+                }
+                // `mid_height` is the straight middle section only, excluding
+                // the two semicircular caps — a wrapper over `height`, which is
+                // why the docs give it no default. It needs no invariant repair:
+                // `height = mid_height + 2 * radius` already satisfies
+                // `height >= 2 * radius` for any non-negative mid-height.
+                "mid_height" => {
+                    if let Some(m) = variant_number(&value) {
+                        let m = m as f32;
+                        if m < 0.0 {
+                            return;
+                        }
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::Capsule { radius, .. } = *s {
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius,
+                                    height: m + radius * 2.0,
+                                }
+                            }
+                        });
+                    }
+                }
+                // `SegmentShape2D.a` / `.b`, each preserving the other end.
+                "a" | "b" => {
+                    if let Variant::Vector2(v) = &value {
+                        let (v, is_a) = (*v, prop == "a");
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::Segment { a, b } = *s {
+                                *s = if is_a {
+                                    gdphysics2d::shape::Shape2D::Segment { a: v, b }
+                                } else {
+                                    gdphysics2d::shape::Shape2D::Segment { a, b: v }
+                                }
+                            }
+                        });
+                    }
+                }
+                // ⚠️ `points` builds a CONVEX hull and `segments` a segment
+                // soup — Godot's two polygon shapes take different array
+                // meanings under different property names, so they are not one
+                // arm with a shared body.
+                "points" => {
+                    if let Variant::PackedVector2Array(pts) = &value {
+                        let pts = pts.clone();
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::convex_polygon(&pts)
+                        });
+                    }
+                }
+                "segments" => {
+                    if let Variant::PackedVector2Array(pts) = &value {
+                        let pts = pts.clone();
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::concave_polygon(&pts)
+                        });
+                    }
+                }
+                "normal" => {
+                    if let Variant::Vector2(v) = &value {
+                        let v = *v;
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::WorldBoundary { distance, .. } = *s
+                            {
+                                *s = gdphysics2d::shape::Shape2D::world_boundary(v, distance)
+                            }
+                        });
+                    }
+                }
+                "distance" => {
+                    if let Some(d) = variant_number(&value) {
+                        let d = d as f32;
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::WorldBoundary { normal, .. } = *s {
+                                *s = gdphysics2d::shape::Shape2D::world_boundary(normal, d)
+                            }
+                        });
+                    }
+                }
+                "length" => {
+                    if let Some(l) = variant_number(&value) {
+                        let l = l as f32;
+                        shape_mut(node, |s| {
+                            if matches!(*s, gdphysics2d::shape::Shape2D::SeparationRay { .. }) {
+                                *s = gdphysics2d::shape::Shape2D::SeparationRay { length: l }
+                            }
+                        });
+                    }
+                }
+                "size" => {
+                    if let Variant::Vector2(v) = &value {
+                        let half = gdcore::math::Vector2::new(v.x * 0.5, v.y * 0.5);
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::Rectangle { half_extents: half }
+                        });
+                    }
+                }
+                // -- PhysicsShapeQueryParameters2D --------------------------
+                "shape" => {
+                    if let Variant::ObjectId(id) = &value {
+                        let raw = id.raw();
+                        shape_params_mut(node, |p| p.shape = raw);
+                    }
+                }
+                "transform" => {
+                    if let Variant::Transform2D(t) = &value {
+                        let t = *t;
+                        shape_params_mut(node, |p| p.transform = t);
+                    }
+                }
+                "motion" => {
+                    if let Variant::Vector2(v) = &value {
+                        let v = *v;
+                        shape_params_mut(node, |p| p.motion = v);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `camera.current = true` — Godot's `Camera3D::set_current(true)` is
+        // `make_current()`: the viewport holds ONE current camera, so the
+        // previous one is cleared. A plain bag write left both flagged, and the
+        // renderer (first `current` camera in tree order) kept showing the OLD
+        // one — the standard camera-switch idiom did nothing visible.
+        if prop == "current"
+            && self
+                .tree()
+                .get_node(nid)
+                .is_some_and(|n| n.is_class("Camera3D"))
+        {
+            match value {
+                Variant::Bool(true) => crate::camera3d::make_current(self.tree_mut(), nid),
+                Variant::Bool(false) => crate::camera3d::clear_current(self.tree_mut(), nid),
+                _ => {}
+            }
+            return;
+        }
+        // pat-mgixk.64 — `node.name = "x"`, Godot's documented spelling for a
+        // rename. Measured before this change: it was a complete NO-OP. The
+        // generic `set_property` below stored a `name` entry in the node's
+        // property bag, which nothing reads — `Node::name` is a struct field,
+        // not a bag entry — so `get_name()` still answered the old name and
+        // `renamed` never fired. The `set_name()` METHOD spelling worked, so the
+        // two spellings of one operation disagreed.
+        //
+        // ⚠️ Routed through `SceneTree::set_node_name` rather than
+        // `Node::set_name`, which is what makes the signal fire: the tree-level
+        // function is the only place that emits `renamed` on the node (and
+        // `node_renamed` on the root). Writing the field directly would rename
+        // the node and still leave every `renamed` listener silent.
+        //
+        // ⚠️ A non-string value is dropped rather than stringified. Godot's
+        // `name` is a `StringName`, and coercing e.g. an int here would let
+        // `node.name = 7` quietly produce a node called "7" that no authored
+        // path can address.
+        if prop == "name" {
+            if let Variant::String(new_name) = &value {
+                self.tree_mut().set_node_name(nid, new_name.clone());
+            }
+            return;
+        }
+        // pat-s3rrv.188 — `col.shape = WorldBoundaryShape2D.new()`.
+        //
+        // A script builds a shape as a HANDLE (a `Variant::ObjectId` into
+        // `SHAPES`), but a `.tscn` leaves a `Variant::Resource` on this property
+        // and `physics_server` reads the geometry out of THAT. Storing the bare
+        // handle left the two authoring paths disagreeing: the body kept its
+        // default shape, and `col.shape` read back as an ObjectId rather than the
+        // Resource Godot promises for a `Shape2D`.
+        //
+        // Assignment is the right moment to convert, not construction: a script
+        // mutates the shape through the handle (`s.normal = ...`) BEFORE handing
+        // it over, so converting here captures the final geometry. Converting in
+        // `new()` would freeze the defaults and silently drop every later edit.
+        //
+        // Only a live handle is converted. Any other `ObjectId` falls through
+        // untouched, so `PhysicsShapeQueryParameters2D.shape`, which really does
+        // take an id, keeps its existing meaning.
+        if prop == "shape" {
+            if let Variant::ObjectId(id) = &value {
+                if let Some(shape) = shape_for(id.raw()) {
+                    let as_resource = Variant::Resource(Box::new(shape_resource_ref(&shape)));
+                    if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                        n.set_property(prop, as_resource);
+                    }
+                    return;
+                }
+            }
+        }
+        // Route an AnimationTree's own properties into the attached graph so a
+        // script driving it (`tree.set("parameters/conditions/run", true)`,
+        // `tree.active = false`) affects the next frame's evaluation, as Godot's
+        // `AnimationTree.set()` does. The value is mirrored onto the node so the
+        // inspector and a scene save still see it (pat-0q2kx.2).
+        if prop.starts_with("parameters/") || prop == "active" {
+            let routed = match self.tree_mut().get_animation_tree_mut(nid) {
+                Some(anim_tree) => {
+                    if prop == "active" {
+                        anim_tree.active = match &value {
+                            Variant::Bool(b) => *b,
+                            Variant::Int(i) => *i != 0,
+                            _ => anim_tree.active,
+                        };
+                    } else {
+                        anim_tree.set_parameter(prop, value.clone());
+                    }
+                    true
+                }
+                None => false,
+            };
+            if routed {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(prop, value);
+                }
+                return;
+            }
+        }
+        // The same routing for an AnimationPlayer's own properties
+        // (pat-mgixk.79). `set_node_property` reached the player for NOTHING
+        // before this, so `$AP.speed_scale = 2.0` and
+        // `$AP.current_animation = "run"` were silent no-ops: the write landed
+        // in the node's property bag, which the player never reads.
+        //
+        // ⚠️ Guarded on the node actually HAVING a player, which is what keeps
+        // `speed_scale` from colliding with `AnimatedSprite2D.speed_scale` — a
+        // different property on a different node type, handled elsewhere in
+        // this file. No player means `routed` stays false and the write falls
+        // through untouched.
+        if prop == "speed_scale" || prop == "current_animation" || prop == "assigned_animation" {
+            let routed = match self.tree_mut().get_animation_player_mut(nid) {
+                Some(player) => {
+                    if prop == "speed_scale" {
+                        match &value {
+                            Variant::Float(f) => player.speed_scale = *f,
+                            Variant::Int(i) => player.speed_scale = *i as f64,
+                            // A malformed value leaves the rate alone rather
+                            // than freezing playback at 0.
+                            _ => {}
+                        }
+                    } else if let Variant::String(name) = &value {
+                        // Godot's `current_animation` setter STARTS the clip —
+                        // it is not a label. That is the whole reason this
+                        // cannot be a plain bag write.
+                        player.play(name);
+                    }
+                    true
+                }
+                None => false,
+            };
+            if routed {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(prop, value);
+                }
+                return;
+            }
+        }
+        // Route a Node3D transform component through the canonical
+        // local-transform setters so a script write is visible to rendering and
+        // physics (pat-0q2kx.29). A plain `set_property` here writes only the
+        // component key, and `get_local_transform` prefers an explicit
+        // `transform` — so on any node loaded from a `.tscn` with a
+        // `transform =` line, `self.position = ...` silently changed nothing.
+        //
+        // Checked before the script-property path because these are engine
+        // properties of the node, not script variables.
+        // The `Vector3` payload is itself the 2D/3D discriminator: a Node2D
+        // writes `position` as a `Vector2`, so it falls through untouched. That
+        // avoids consulting ClassDB here, which is not guaranteed to be
+        // populated in every runtime/test context and would silently disable
+        // this routing when it isn't.
+        // One shared funnel with the animation player, the tween apply and root
+        // motion (pat-mgixk.29). It keeps the Vector3-payload discriminator this
+        // comment describes — and widens the surface the three arms here covered:
+        // `quaternion`, `basis`, `rotation_degrees`, `transform` and sub-paths
+        // like `position:x` now route through the canonical transform too, where
+        // before they fell to the raw `set_property` below and were ignored on
+        // read.
+        if let Some(node) = self.tree_mut().get_node_mut(nid) {
+            if crate::node3d::set_transform_component(node, prop, &value) {
+                return;
+            }
+        }
+        // Node3D's GLOBAL property writes — `global_position`,
+        // `global_transform`, `global_basis`, `global_rotation(_degrees)`
+        // (pat-mgixk.30). Each is converted into the local transform the node
+        // actually stores by composing against the parent's global.
+        //
+        // ⚠️ Placed AFTER `set_transform_component` on purpose, not before.
+        // That function already owns every LOCAL transform property —
+        // `position`, `rotation`, `rotation_degrees`, `scale`, `quaternion`,
+        // `basis`, `transform` and the `position:x` sub-paths — and running
+        // ahead of it would shadow a tested implementation rather than fill a
+        // gap. Only the `global_*` names reach here, which it does not serve.
+        if crate::node3d::set_derived_property(self.tree_mut(), nid, prop, &value) {
+            return;
+        }
+        if crate::node2d::set_derived_property(self.tree_mut(), nid, prop, &value) {
+            return;
+        }
+        // Try script property first — with scene access installed, so a
+        // `set = fn` setter can reach the tree (pat-ivcj2).
+        if self
+            .tree_mut()
+            .set_script_property_with_access(nid, prop, value.clone())
+            == Some(true)
+        {
+            return;
+        }
+        // Then try node property
+        let path_follow = match self.tree_mut().get_node_mut(nid) {
+            Some(n) => {
+                n.set_property(prop, value);
+                matches!(n.class_name(), "PathFollow2D" | "PathFollow3D")
+            }
+            None => false,
+        };
+        // Godot's `PathFollow2D::set_progress` (and `set_progress_ratio`, which
+        // calls it) runs `_update_transform()` AT ONCE, so the very next line
+        // of the script reads the new `position` (pat-y2ylj: Dodge the Creeps
+        // places each mob at `mob_spawn_location.position` right after setting
+        // `progress_ratio = randf()`, and every mob spawned at the previous
+        // spawn's point).
+        if path_follow && (prop == "progress" || prop == "progress_ratio") {
+            crate::main_loop::process_path_follows_in(self.tree_mut(), 0.0, Some(nid));
+        }
+    }
+
+    // -- Object virtual chain (pat-0q2kx.82) --------------------------------
+
+    fn object_to_string(&mut self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().call_script_method(nid, "_to_string", &[])? {
+            Variant::String(s) => Some(s),
+            Variant::StringName(s) => Some(s.as_str().to_string()),
+            // Godot logs "Wrong type for _to_string, must be a String" and uses
+            // the default representation; silently falling back matches the
+            // observable behaviour.
+            _ => None,
+        }
+    }
+
+    fn object_get_virtual(&mut self, node: u64, property: &str) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().call_script_method(
+            nid,
+            "_get",
+            &[Variant::String(property.to_string())],
+        )? {
+            // Godot treats a `null` return as "this property is not mine",
+            // which is why a script must `return` nothing for names it does not
+            // handle rather than falling off the end with a value.
+            Variant::Nil => None,
+            value => Some(value),
+        }
+    }
+
+    fn object_set_virtual(&mut self, node: u64, property: &str, value: &Variant) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let args = [Variant::String(property.to_string()), value.clone()];
+        // `_set` reports whether it consumed the write; only an explicit `true`
+        // stops the engine from storing the value itself.
+        matches!(
+            self.tree_mut().call_script_method(nid, "_set", &args),
+            Some(Variant::Bool(true))
+        )
+    }
+
+    fn object_property_list_virtual(&mut self, node: u64) -> Vec<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self
+            .tree_mut()
+            .call_script_method(nid, "_get_property_list", &[])
+        {
+            Some(Variant::Array(entries)) => entries.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    // -- Cross-object script calls (pat-0q2kx.8) ----------------------------
+
+    fn call_script_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Asked BEFORE the call: the tree answers `None` both for "no such
+        // script method" and for "the method raised".
+        let declared = self.tree().script_declares_method(nid, method);
+        let result = self.tree_mut().call_script_method(nid, method, args);
+        if result.is_none() && declared {
+            // 🔑 The callee raised. Godot aborts the CALLEE, logs the error and
+            // hands the caller `null` — the caller keeps running. Answering
+            // `None` here made the interpreter fall through to the native table
+            // and fail the CALLER too ("Native method 'Node3D.setup' is
+            // registered in ClassDB but not implemented"): truck_town's
+            // `car_select.gd` `_load_scene` died at `town.setup(...)` because
+            // one line inside `setup` failed, so the town was never added.
+            // The callee's error is already in the tree's script-error log.
+            return Some(Variant::Nil);
+        }
+        result
+    }
+
+    fn node_has_method(&self, node: u64, method: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().node_has_method(nid, method)
+    }
+
+    fn node_has_property(&self, node: u64, prop: &str) -> Option<bool> {
+        // Handles that name no node (SceneTree, tweens, query params, …) are
+        // not judged: each has its own property surface.
+        if is_scene_tree_handle(node) || is_phys_query_handle(node) {
+            return None;
+        }
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree();
+        let n = tree.get_node(nid)?;
+        // Carried: authored in the .tscn, seeded from ClassDB, synced from the
+        // script, or written at runtime.
+        if n.has_property(prop) {
+            return Some(true);
+        }
+        let class = n.class_name().to_string();
+        if gdobject::class_db::class_has_property(&class, prop)
+            || gdobject::class_db::class_get_integer_constant(&class, prop).is_some()
+            // `Object.script` is a property in Godot but no class documents it.
+            || prop == "script"
+        {
+            return Some(true);
+        }
+        // The script's members / constants / enums, whether it is in the arena
+        // or checked out and running.
+        let in_script = match tree.get_script(nid) {
+            Some(script) => {
+                script.get_property(prop).is_some()
+                    || script.list_properties().iter().any(|p| p.name == prop)
+            }
+            None => crate::scene_tree::running_script_has_property(nid, prop).unwrap_or(false),
+        };
+        if in_script {
+            return Some(true);
+        }
+        // Finally Godot's own documented properties for the class. A class
+        // Godot does not document answers `None`: it cannot be judged.
+        gdobject::class_db::godot_class_has_property(&class, prop)
+    }
+
+    fn node_method_argument_count(&self, node: u64, method: &str) -> Option<i64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().node_method_argument_count(nid, method)
+    }
+
+    // -- Native node method dispatch (pat-0q2kx.16) -------------------------
+    //
+    // The second half of Godot's `Object::callp`: after the script instance
+    // declines, the engine's own method for the class runs. Before this the
+    // interpreter's ObjectId match was a hand-coded list whose fallback threw
+    // `UndefinedFunction`, so `body.move_and_slide()` and `other.add_to_group()`
+    // errored out of a running script.
+    //
+    // `None` = "not a native method", so the caller keeps its own error path.
+
+    fn call_node_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // NavigationAgent2D/3D answer their own method surface (pat-s3rrv.20).
+        // First, so an agent getter cannot be shadowed by a generic node arm;
+        // it returns `None` for every non-agent node, so the table below is
+        // reached unchanged.
+        if let Some(value) =
+            crate::navigation_agents::call_agent_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // ShapeCast2D answers its own surface (pat-s3rrv.87), and must do so
+        // BEFORE the generic table below: that table's `is_colliding` /
+        // `get_collider` / `get_collision_point` arms read RayCast2D's SINGULAR
+        // `_hit_point` / `_hit_collider` keys, which a shape cast never writes —
+        // it publishes indexed arrays. Left to the table, a ShapeCast2D would
+        // read a raycast's empty results and report `false` forever. The handler
+        // declines every non-ShapeCast2D node, so the table stays reachable.
+        // A slide-collision handle answers its own getters, and must do so
+        // BEFORE the table below for the same reason ShapeCast2D does: that
+        // table's `get_collider` / `get_normal` / `get_position` arms read
+        // RayCast2D's `_hit_*` keys, which a collision handle never writes.
+        // Left to the table it would read a raycast's empty results and report
+        // nothing (pat-s3rrv.95). Declines every non-handle receiver.
+        if let Some(value) = kinematic_collision_call(self.tree(), node, method, args) {
+            return Some(value);
+        }
+        // XRNode3D and its subclasses answer their own surface (pat-s3rrv.219).
+        // Declines every non-XR node, so the table below stays reachable.
+        if let Some(value) = crate::xr_nodes::call_xr_node_method(self.tree(), nid, method, args) {
+            return Some(value);
+        }
+        // Timer's own surface (pat-s3rrv.121); declines every non-Timer node.
+        if let Some(value) = timer_node_call(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // Camera3D's own surface (pat-nzgdu); declines every non-Camera3D node.
+        //
+        // ⚠️ Camera3D registers 19 methods in ClassDB and had NO arm here, so
+        // `node_has_method` said true and every call returned `Nil` silently.
+        // Only the four needing no viewport are served; the projection family
+        // waits on a viewport size reaching this layer. See
+        // `camera3d::call_camera3d_method`.
+        if let Some(value) =
+            crate::camera3d::call_camera3d_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
+        // AnimationPlayer's own method surface (pat-mgixk.79). Declines every
+        // node without a player, so the table below stays reachable.
+        //
+        // ⚠️ Registered HERE and not in the interpreter: `call_method_on` falls
+        // back to this table for names it does not know, so one registration
+        // serves BOTH `$AP.get_queue()` and the bare `get_queue()` a script on
+        // the player itself would write. The sole exception is `play`, which the
+        // interpreter claims first to disambiguate `AnimationPlayer.play(clip)`
+        // from `AudioStreamPlayer.play(seek)` — that arm forwards all four of
+        // Godot's arguments rather than duplicating this table.
+        if let Some(value) = animation_player_method(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // VehicleWheel3D's script surface (pat-s3rrv.194); declines every other
+        // node.
+        //
+        // ⚠️ Wired HERE and nowhere else on purpose. `call_method_on` in the
+        // interpreter falls back to this table for names it does not know
+        // (`interpreter.rs:14281`), so one registration serves BOTH
+        // `$Wheel.is_in_contact()` and the bare `is_in_contact()` a script on
+        // the wheel itself would write. Adding it to the interpreter instead
+        // would cover only the first spelling.
+        //
+        // The values are read off node properties the physics server published
+        // in `sync_from_physics` — by the time a script runs it has the tree and
+        // nothing else, so the simulated state has to travel on the node.
+        let is_wheel = self
+            .tree()
+            .get_node(nid)
+            .map(|n| n.class_name() == "VehicleWheel3D")
+            .unwrap_or(false);
+        if is_wheel {
+            match method {
+                "is_in_contact" => {
+                    let touching = matches!(
+                        self.tree()
+                            .get_node(nid)
+                            .map(|n| n.get_property("_wheel_in_contact")),
+                        Some(Variant::Bool(true))
+                    );
+                    return Some(Variant::Bool(touching));
+                }
+                // `m_skidInfo` / `m_rpm` from the vehicle's friction pass
+                // (pat-qg3nu). Skid is 1.0 at full grip and falls toward 0 as
+                // the tire slides; Godot's initial value is 0 before the first
+                // tick.
+                "get_skidinfo" | "get_rpm" => {
+                    let key = if method == "get_rpm" {
+                        "_wheel_rpm"
+                    } else {
+                        "_wheel_skidinfo"
+                    };
+                    let v = match self.tree().get_node(nid).map(|n| n.get_property(key)) {
+                        Some(Variant::Float(f)) => f,
+                        Some(Variant::Int(i)) => i as f64,
+                        _ => 0.0,
+                    };
+                    return Some(Variant::Float(v));
+                }
+                "get_contact_normal" => {
+                    let p = match self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property("_wheel_contact_normal"))
+                    {
+                        Some(Variant::Vector3(v)) => v,
+                        _ => gdcore::math::Vector3::ZERO,
+                    };
+                    return Some(Variant::Vector3(p));
+                }
+                "get_contact_point" => {
+                    let p = match self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property("_wheel_contact_point"))
+                    {
+                        Some(Variant::Vector3(v)) => v,
+                        _ => gdcore::math::Vector3::ZERO,
+                    };
+                    return Some(Variant::Vector3(p));
+                }
+                _ => {}
+            }
+        }
+
+        // AnimatedSprite2D/3D's playback surface (pat-s3rrv.182); declines every
+        // other node.
+        //
+        // ⚠️ These MUST be wired here as well as in
+        // `interpreter.rs::call_method_on`. The two tables serve different
+        // spellings: `$Sprite.play_backwards("walk")` goes through
+        // `call_method_on`, but a **bare** `play_backwards("walk")` — the form a
+        // script attached to the sprite itself uses, and the form Godot's own
+        // documentation shows — resolves through `call_self_func_or_native` into
+        // THIS table. Wiring only the interpreter side ships a surface that
+        // works from one spelling and raises `UndefinedFunction` from the one
+        // people actually write.
+        //
+        // The failure is also silent in a deceptive way: `UndefinedFunction`
+        // aborts the whole handler at the first unknown name, so every later
+        // statement in `_ready` quietly does not run and the symptom shows up on
+        // some unrelated property being left unset.
+        let is_animated_sprite = self
+            .tree()
+            .get_node(nid)
+            .map(|n| matches!(n.class_name(), "AnimatedSprite2D" | "AnimatedSprite3D"))
+            .unwrap_or(false);
+        if is_animated_sprite {
+            let clip = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                Some(Variant::StringName(s)) => s.as_str().to_string(),
+                _ => String::new(),
+            };
+            match method {
+                "play" => {
+                    // Godot's default `custom_speed` is 1.0, and its SIGN is what
+                    // runs the clip backwards; `from_end` only picks the starting
+                    // frame. They are independent arguments.
+                    let custom_speed = match args.get(1) {
+                        Some(Variant::Float(f)) => *f,
+                        Some(Variant::Int(i)) => *i as f64,
+                        _ => 1.0,
+                    };
+                    let from_end = matches!(args.get(2), Some(Variant::Bool(true)));
+                    self.animated_sprite_play(node, &clip, custom_speed, from_end);
+                    return Some(Variant::Nil);
+                }
+                "play_backwards" => {
+                    self.animated_sprite_play_backwards(node, &clip);
+                    return Some(Variant::Nil);
+                }
+                "pause" => {
+                    self.animated_sprite_pause(node);
+                    return Some(Variant::Nil);
+                }
+                "stop" => {
+                    self.animated_sprite_stop(node);
+                    return Some(Variant::Nil);
+                }
+                "set_frame_and_progress" => {
+                    let frame = match args.first() {
+                        Some(Variant::Int(i)) => *i,
+                        Some(Variant::Float(f)) => *f as i64,
+                        _ => 0,
+                    };
+                    let progress = match args.get(1) {
+                        Some(Variant::Float(f)) => *f,
+                        Some(Variant::Int(i)) => *i as f64,
+                        _ => 0.0,
+                    };
+                    self.animated_sprite_set_frame_and_progress(node, frame, progress);
+                    return Some(Variant::Nil);
+                }
+                "get_playing_speed" => {
+                    return Some(Variant::Float(self.animated_sprite_playing_speed(node)));
+                }
+                _ => {}
+            }
+        }
+
+        // Node2D's global-transform surface (pat-s3rrv.184); declines every
+        // other node. The 2D side had no script method surface at all — this
+        // file grew a Node3D block (`look_at`, `rotate`, `to_global`) and
+        // nothing equivalent for 2D — so `sprite.get_global_position()` raised
+        // UndefinedFunction while `node2d::get_global_position` was computing
+        // the right answer one layer down.
+        if let Some(value) = crate::node2d::call_node2d_method(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // Node3D's global/basis/quaternion method surface (pat-mgixk.30);
+        // declines every other node.
+        //
+        // ⚠️ Carries ONLY names with no arm anywhere else, for the same reason
+        // the block below spells out: this runs BEFORE the table, so an
+        // implementation of a name the table already serves would SHADOW it.
+        // `hide` / `show` / `set_visible` / `is_visible` are therefore absent
+        // from it — the table dispatches those already. Before this, only seven
+        // Node3D methods were reachable from script (`look_at`, `translate`,
+        // `rotate`, `rotate_x..z`, `to_global`, `to_local`); ClassDB registered
+        // the rest, so a call returned Nil silently on another node and
+        // UndefinedFunction on `self`.
+        if let Some(value) = crate::node3d::call_node3d_method(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // The core Node / CanvasItem / Node3D / Viewport method surface
+        // (pat-mgixk.8); declines every name it does not serve, so the table
+        // below is reached unchanged.
+        //
+        // ⚠️ Deliberately does NOT carry `hide` / `show` / `set_visible` /
+        // `is_visible` / `find_child`: this runs BEFORE the table, so a second
+        // implementation of a name the table already serves would SHADOW it
+        // rather than fill a gap. Only names with no arm anywhere live there.
+        if let Some(value) =
+            crate::core_node_methods::call_core_node_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
+        // NavigationRegion3D's runtime bake (pat-s3rrv.180); declines every
+        // other node. A 3D baker has existed in `gdserver3d` since the port
+        // began with no caller able to reach it — this arm is what lets a script
+        // rebake a region and have the next `process_navigation` path over it.
+        if let Some(value) =
+            crate::nav_bake::call_nav_region_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
+        // ColorPicker's preset surface (pat-s3rrv.172). Declines every other
+        // node, INCLUDING ColorPickerButton: upstream gives the button only
+        // `get_picker`/`get_popup` (`doc/classes/ColorPickerButton.xml`), so
+        // forwarding the preset methods to it would invent API a real project
+        // cannot call. Answered here rather than by a generic property arm,
+        // which would hand back the raw `presets` Variant — Nil for a picker
+        // that has never had one set, instead of an empty PackedColorArray.
+        if let Some(value) =
+            crate::color_picker::call_color_picker_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
+        if method == "force_shapecast_update" {
+            // Inlined rather than factored into a helper method: this block is
+            // inside `impl SceneAccess`, which may only contain that trait's own
+            // members, so a helper here would mean widening the trait in
+            // gdscript-interop for one caller.
+            //
+            // Godot re-runs the sweep immediately so the SAME frame observes the
+            // result; the per-tick pass runs before the script phase, so this is
+            // what lets a script re-query after moving the cast mid-frame.
+            let addr = self.tree().script_physics_addr();
+            if addr != 0 {
+                // SAFETY: identical contract to `force_raycast_update_2d` —
+                // `set_script_physics_server` stored the address of a live
+                // `PhysicsServer` that `MainLoop` clears before the server can
+                // move or drop, and the server is a sibling of the tree, never
+                // stored inside it, so this shared borrow cannot alias the
+                // `&mut SceneTree` taken on the next line.
+                // SAFETY: (summary) live, non-aliasing server — see above.
+                let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+                crate::shapecast2d::force_shapecast_update(self.tree_mut(), physics, nid);
+            }
+            return Some(Variant::Nil);
+        }
+        if let Some(value) =
+            crate::shapecast2d::call_shapecast_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // TileMapLayer's cell/coordinate API (pat-s3rrv.88). Every operation had
+        // a Rust implementation and no binding at all, so a running game could
+        // not touch its tilemap — procedural generation, the node's dominant
+        // use, was impossible. Declines every non-tilemap node.
+        if let Some(value) = crate::tilemap::call_tilemap_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // GridMap's cell API and MeshInstance3D's material / blend-shape /
+        // collision API (pat-mgixk.93). Same shape and same reason as the
+        // tilemap arm above: ClassDB already carried every one of these method
+        // names, so `class_has_method` opened the gate onto nothing and each
+        // call returned Nil while `has_method` answered true. Both decline every
+        // other class, so the generic table below is reached unchanged.
+        if let Some(value) =
+            crate::grid_map::call_gridmap_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        if let Some(value) =
+            crate::mesh_instance3d::call_mesh_instance_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // Skeleton3D's bone API (pat-s3rrv.23). Same shape and same reason as
+        // the agent arm above: it answers `None` for every non-skeleton node,
+        // so the generic table below is reached unchanged.
+        //
+        // ClassDB had already been taught these method names, which opened the
+        // `class_has_method` dispatch gate onto nothing — the 38 working
+        // functions in `skeleton3d` still had no script-facing binding.
+        if let Some(value) =
+            crate::skeleton3d::call_skeleton_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // The `Range` value model (pat-s3rrv.73). Same shape and same reason as
+        // the two arms above: it answers `None` for every non-range node and for
+        // every method it does not implement, so the generic table below is
+        // reached unchanged.
+        //
+        // ⚠️ Without this a script cannot move a slider at all. `class_has_method`
+        // consults declared `MethodInfo` only, and `Range` registers its value
+        // model as PROPERTIES — so `set_value` is not merely inert, it does not
+        // resolve. Both spellings land here: `$Bar.set_value(50)` through
+        // `interpreter.rs::call_method_on`'s fallback, and a bare `set_value(50)`
+        // through `call_self_func_or_native`.
+        if let Some(value) =
+            crate::range_controls::call_range_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // String-ish first argument, shared by the group/child/signal calls.
+        let arg_str = |i: usize| -> Option<String> {
+            match args.get(i) {
+                Some(Variant::String(s)) => Some(s.clone()),
+                Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+                Some(Variant::NodePath(p)) => Some(p.to_string()),
+                _ => None,
+            }
+        };
+        let bool_prop = |tree: &SceneTree, key: &str| -> bool {
+            tree.get_node(nid)
+                .map(|n| matches!(n.get_property(key), Variant::Bool(true)))
+                .unwrap_or(false)
+        };
+        // Godot's Vector2 getters return `Vector2.ZERO`, never null, so a script
+        // can chain `.length()` on the result before the first physics tick has
+        // published anything (pat-0q2kx.33).
+        let vec2_prop = |tree: &SceneTree, key: &str| -> gdcore::math::Vector2 {
+            match tree.get_node(nid).map(|n| n.get_property(key)) {
+                Some(Variant::Vector2(v)) => v,
+                _ => gdcore::math::Vector2::ZERO,
+            }
+        };
+        // The velocity getters are shared by CharacterBody2D and
+        // CharacterBody3D, so they must answer in the BODY'S OWN dimension
+        // (pat-s3rrv.103).
+        //
+        // ⚠️ `vec2_prop` above matches `Variant::Vector2` and falls through to
+        // ZERO for anything else — so on a CharacterBody3D, whose solver
+        // publishes `Vector3`, it did not merely return the wrong TYPE, it
+        // returned a zero VALUE. A 3D script polling `get_platform_velocity()`
+        // read (0, 0) off a body riding a moving platform, which reads as "the
+        // platform is not moving" rather than as a type error.
+        let vel_prop = |tree: &SceneTree, key: &str| -> Variant {
+            match tree.get_node(nid).map(|n| n.get_property(key)) {
+                Some(v @ (Variant::Vector2(_) | Variant::Vector3(_))) => v,
+                // Nothing published yet — before the first physics tick, or on
+                // a body that never moved. Godot still answers a zero vector
+                // rather than null, so a script may chain `.length()` on it;
+                // it has to be the zero of the RIGHT dimension, or the very
+                // first read of a 3D body is a Vector2 again.
+                _ => {
+                    if tree
+                        .get_node(nid)
+                        .is_some_and(|n| n.class_name() == "CharacterBody3D")
+                    {
+                        Variant::Vector3(gdcore::math::Vector3::ZERO)
+                    } else {
+                        Variant::Vector2(gdcore::math::Vector2::ZERO)
+                    }
+                }
+            }
+        };
+
+        match method {
+            // -- Signal-targetable native methods (pat-mgixk.9) --------------
+            //
+            // `timer.timeout.connect(enemy.queue_free)` and
+            // `$Button.pressed.connect($Label.hide)` are core Godot idioms, and
+            // in Godot they work because `Object::emit_signalp` ends at
+            // `Object::callp`, which tries the script instance and then the
+            // ClassDB method bind. Patina's emission path had no second half at
+            // all, so these connected fine and did nothing. They are wired HERE
+            // rather than in `SceneTree::emit_signal` so the SAME arm serves a
+            // signal target, a `.tscn` `[connection]`, and a plain
+            // `$Label.hide()` written in a script.
+            //
+            // ⚠️ `hide`/`show` had no arm in ANY table before this, and
+            // `queue_free` had one only in the interpreter's own ObjectId match
+            // — which emission never reaches.
+            //
+            // ⚠️⚠️ THIS TABLE OWNS `hide`/`show`/`set_visible`/`is_visible`.
+            // `core_node_methods::call_core_node_method` (pat-mgixk.8) runs
+            // EARLIER in this same function, so an implementation there would
+            // shadow these rather than fill a gap — its own comment says it
+            // deliberately omits these four names for exactly that reason. Do
+            // not "deduplicate" by deleting them here: I did, on the assumption
+            // that module still carried them, and `hide` became implemented
+            // NOWHERE — a signal-driven `$Label.hide` silently stopped hiding
+            // and the acceptance test caught it.
+            "queue_free" => {
+                self.tree_mut().queue_free(nid);
+                Some(Variant::Nil)
+            }
+            "free" => {
+                // Godot `Object.free()`: immediate, unlike `queue_free`.
+                // `remove_node` fires EXIT_TREE/UNPARENTED and drops the
+                // subtree from the arena; the root cannot be freed this way, so
+                // the error is discarded exactly as `free_object` does.
+                let _ = self.tree_mut().remove_node(nid);
+                Some(Variant::Nil)
+            }
+            "hide" | "show" | "set_visible" => {
+                // Godot: `hide()` is `set_visible(false)`, `show()` is
+                // `set_visible(true)` (`canvas_item.cpp`, `node_3d.cpp`).
+                let visible = match method {
+                    "hide" => false,
+                    "show" => true,
+                    // A malformed `set_visible` argument is a no-op rather than
+                    // a hide: reading a missing argument as `false` would blank
+                    // the node, the opposite of what a bad call should do.
+                    _ => match args.first() {
+                        Some(Variant::Bool(b)) => *b,
+                        Some(Variant::Int(i)) => *i != 0,
+                        _ => return Some(Variant::Nil),
+                    },
+                };
+                // `node2d::set_visible` and `node3d::set_visible` are both
+                // exactly this one property write, so there is nothing to gain
+                // by branching on the node's dimension here.
+                if let Some(target) = self.tree_mut().get_node_mut(nid) {
+                    target.set_property("visible", Variant::Bool(visible));
+                }
+                Some(Variant::Nil)
+            }
+            "is_visible" => Some(Variant::Bool(
+                // Godot's default is visible, so an unset property reads true;
+                // only an explicit `false` hides.
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| !matches!(n.get_property("visible"), Variant::Bool(false)))
+                    .unwrap_or(false),
+            )),
+            // -- Node/Object core API (pat-mgixk.6) --------------------------
+            //
+            // Every name in this block is registered in ClassDB
+            // (`gdobject/src/class_db.rs`: `notification`, then
+            // `get_node_or_null` / `remove_child` / `get_child` /
+            // `is_inside_tree` / `set_process` / `is_processing` /
+            // `set_physics_process` / `is_physics_processing`) and had NO
+            // dispatch arm in ANY table. That combination is the worst one:
+            // `node_has_method` answers true off the registration, so
+            // `call_object_method` takes its `responds` branch and returns the
+            // `Variant::Nil` placeholder (`interpreter.rs`). `$X.get_child(0)`
+            // read as null, `n.is_inside_tree()` as null, and
+            // `other.set_process(false)` did nothing at all — silently, with no
+            // script error to notice.
+            //
+            // Wired HERE and nowhere else on purpose: `call_object_method` and
+            // `call_self_func_or_native` both fall back to this table, so one
+            // arm serves both `$X.m()` and the bare `m()` a script on the node
+            // itself writes. Adding them to the interpreter's own ObjectId match
+            // would cover only the first spelling.
+            //
+            // Answered for ANY node, like the authority arms below: in Godot
+            // these are `Node`/`Object` members, so no subclass table may shadow
+            // them.
+            "get_child" => {
+                // Godot `get_child(idx, include_internal = false)`: a negative
+                // index counts back from the end, and out of range is null.
+                let idx = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                let children = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.children().to_vec())
+                    .unwrap_or_default();
+                let len = children.len() as i64;
+                // ⚠️ Wrap BEFORE the bounds test. A raw `-1` satisfies
+                // `idx < len`, so testing first and wrapping after would index
+                // with a negative number instead of returning the last child.
+                let resolved = if idx < 0 { idx + len } else { idx };
+                if resolved < 0 || resolved >= len {
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(children[resolved as usize].object_id()))
+            }
+            "get_node_or_null" => {
+                let Some(path) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                // The null-returning twin of `get_node`, which raises instead.
+                // Reuses this impl's own resolver so both spellings agree on
+                // what a path means (relative lookup, then child/sibling name).
+                match SceneAccess::get_node(self, node, &path) {
+                    Some(found) => Some(Variant::ObjectId(ObjectId::from_raw(found))),
+                    None => Some(Variant::Nil),
+                }
+            }
+            // ⚠️ `add_child` had NO arm here, which made
+            // `get_parent().call_deferred("add_child", n)` — the single most
+            // common deferred idiom in Godot — a silent no-op (pat-mgixk.10).
+            //
+            // The direct spellings were never broken: the bare form
+            // (`interpreter.rs:7014`) and `$X.add_child(n)`
+            // (`interpreter.rs:12897`) both call `SceneAccess::add_child`
+            // themselves. Only the DEFERRED route came through here, because a
+            // queued call is replayed as `SceneTree::process_deferred_calls` ->
+            // `call_object_method` -> `call_script_method`, then this table. So
+            // the method worked everywhere except through the queue, and
+            // pat-mgixk.9 removing the queue's `scripts.contains_key` gate was
+            // necessary but not sufficient to fix it.
+            //
+            // Delegates to the trait's own `add_child`, which already handles
+            // both shapes a child can arrive in: detached (`take_node` +
+            // `add_child`) or already parented, e.g. straight out of
+            // `instantiate_packed_scene` (`reparent`). Spelled
+            // `SceneAccess::add_child` to name the trait explicitly, as the
+            // `get_node` call in this table does.
+            "add_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot's second argument is `force_readable_name`, and the
+                // third is `internal`; neither changes where the child lands,
+                // so both are accepted and ignored rather than rejected.
+                SceneAccess::add_child(self, node, child);
+                Some(Variant::Nil)
+            }
+            // `Node.duplicate(flags = 15)` (pat-b4zhq). Godot returns a copy of
+            // the subtree that is NOT in the tree — the caller `add_child`s it,
+            // as the 3D platformer's `stage.gd` does with its sun under
+            // Compatibility. There was no arm, so the call raised "registered in
+            // ClassDB but not implemented" and the rest of `_ready` never ran.
+            //
+            // Built detached (`insert_detached` + `add_child` under a detached
+            // parent runs no lifecycle) so the copy enters the tree, and gets
+            // `_ready`, only when the script parents it. Properties are copied
+            // verbatim; DUPLICATE_GROUPS (2) copies groups and DUPLICATE_SCRIPTS
+            // (4) gives each copy a fresh instance of its script from
+            // `_script_path`. DUPLICATE_SIGNALS is not carried: connections
+            // live on the tree, keyed by the node, and a detached copy has none
+            // to inherit until it is added.
+            "duplicate" => {
+                let flags = match args.first() {
+                    Some(Variant::Int(f)) => *f,
+                    _ => 15,
+                };
+                let copy = duplicate_node_detached(self.tree_mut(), nid, flags & 2 != 0)?;
+                if flags & 4 != 0 {
+                    attach_subtree_scripts_from_res(self.tree_mut(), copy);
+                }
+                Some(Variant::ObjectId(copy.object_id()))
+            }
+            "remove_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let child_nid = NodeId::from_object_id(ObjectId::from_raw(child));
+                // Detaches and fires `_exit_tree`; the node stays alive as an
+                // orphan, so `add_child` can re-home it. See
+                // `SceneTree::remove_child` for why this is not `remove_node`.
+                let _ = self.tree_mut().remove_child(nid, child_nid);
+                Some(Variant::Nil)
+            }
+            "is_inside_tree" => Some(Variant::Bool(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.is_inside_tree())
+                    .unwrap_or(false),
+            )),
+            // ── pat-mgixk.60: Node's hierarchy / query API ──────────────────
+            //
+            // Every name below is a `Node` member in Godot
+            // (`scene/main/node.cpp` `_bind_methods`) and every one is already
+            // registered in our ClassDB — with NO arm anywhere. That
+            // combination is the silent failure, not an error: `node_has_method`
+            // answers true, so `call_object_method` skips straight to its
+            // `if responds` branch and hands the script a `Nil` placeholder. A
+            // script calling `get_path_to(n)` got null with no hint why.
+            //
+            // Wired in THIS table for the reason the comment above `get_child`
+            // gives: `call_object_method` and `call_self_func_or_native` both
+            // fall back here, so one arm serves `$B.m()`, the bare `m()` a
+            // script on the node itself writes, AND `obj.call("m")`. The
+            // interpreter's own ObjectId match would cover only the first.
+            //
+            // Each delegates to the `SceneTree` implementation that already
+            // existed; the work here is reaching them, not reimplementing them.
+            "has_node" => {
+                let Some(path) = arg_str(0) else {
+                    return Some(Variant::Bool(false));
+                };
+                // 🔑 Deliberately built on the SAME resolver as
+                // `get_node_or_null` above, rather than a second path walk: a
+                // `has_node` that answered true where `get_node` returns null
+                // would be worse than either being wrong on its own, and
+                // `if has_node(p): get_node(p)` is the idiom this exists for.
+                Some(Variant::Bool(
+                    SceneAccess::get_node(self, node, &path).is_some(),
+                ))
+            }
+            "get_index" => Some(Variant::Int(
+                // Godot answers -1 for a node with no parent.
+                self.tree().get_index(nid).map(|i| i as i64).unwrap_or(-1),
+            )),
+            "is_ancestor_of" => {
+                let Some(other) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Bool(false));
+                };
+                Some(Variant::Bool(self.tree().is_ancestor_of(
+                    nid,
+                    NodeId::from_object_id(ObjectId::from_raw(other)),
+                )))
+            }
+            "get_path_to" => {
+                let Some(other) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let other_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+                // ⚠️ Godot returns a NodePath here, not a String, and the
+                // documented comparison is `get_path_to(n) == NodePath("B/A")`.
+                // A `Variant::String` would print identically and compare
+                // FALSE, so the type is the whole point of this arm.
+                match self.tree().get_path_to(nid, other_nid) {
+                    Some(path) => Some(Variant::NodePath(gdcore::node_path::NodePath::new(&path))),
+                    None => Some(Variant::Nil),
+                }
+            }
+            "move_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let Some(to_index) = args.get(1).and_then(|v| match v {
+                    Variant::Int(i) => Some(*i),
+                    Variant::Float(f) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot lets a negative index count back from the end.
+                //
+                // ⚠️ The negative guard is not cosmetic: `SceneTree::move_child`
+                // takes a `usize`, so a still-negative value would cast to an
+                // enormous index. It clamps a too-LARGE index itself
+                // (`to_index.min(len - 1)`) and rejects a non-child, so only the
+                // sign has to be handled here.
+                let len = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.children().len())
+                    .unwrap_or(0) as i64;
+                let resolved = if to_index < 0 {
+                    to_index + len
+                } else {
+                    to_index
+                };
+                if resolved < 0 {
+                    return Some(Variant::Nil);
+                }
+                let child_nid = NodeId::from_object_id(ObjectId::from_raw(child));
+                let _ = self
+                    .tree_mut()
+                    .move_child(nid, child_nid, resolved as usize);
+                Some(Variant::Nil)
+            }
+            "find_parent" => {
+                let Some(pattern) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                match self.tree().find_parent(nid, &pattern) {
+                    Some(found) => Some(Variant::ObjectId(found.object_id())),
+                    None => Some(Variant::Nil),
+                }
+            }
+            "find_children" => {
+                let Some(pattern) = arg_str(0) else {
+                    return Some(Variant::Array(Default::default()));
+                };
+                // Godot: `find_children(pattern, type = "", recursive = true,
+                // owned = true)`. An empty type means "any class", which is
+                // `None` to the implementation — passing `Some("")` would match
+                // nothing.
+                let type_name = arg_str(1).filter(|t| !t.is_empty());
+                // Both default to TRUE in Godot, so the test is for an explicit
+                // `false` rather than for a present `true` — a missing or
+                // malformed argument must keep the documented default, not fall
+                // through to `false` and silently narrow the search.
+                let recursive = !matches!(args.get(2), Some(Variant::Bool(false)));
+                let owned = !matches!(args.get(3), Some(Variant::Bool(false)));
+                let found =
+                    self.tree()
+                        .find_children(nid, &pattern, type_name.as_deref(), recursive);
+                // 🔑 The `owned` filter is applied HERE rather than by changing
+                // `SceneTree::find_children`'s signature. Godot's default
+                // `owned = true` matches only nodes whose `owner` is set, which
+                // excludes anything `add_child`ed at runtime. Adding the
+                // parameter upstream would change the arity of a function called
+                // from several crates and their tests — a crate-wide break for a
+                // predicate that is one line over the result.
+                let items: Vec<Variant> = found
+                    .into_iter()
+                    .filter(|id| {
+                        !owned || self.tree().get_node(*id).and_then(|n| n.owner()).is_some()
+                    })
+                    .map(|id| Variant::ObjectId(id.object_id()))
+                    .collect();
+                Some(Variant::Array(items.into()))
+            }
+            "get_groups" => Some(Variant::Array(
+                self.tree()
+                    .node_groups(nid)
+                    .into_iter()
+                    .map(Variant::String)
+                    .collect::<Vec<Variant>>()
+                    .into(),
+            )),
+            "get_owner" => match self.tree().get_node(nid).and_then(|n| n.owner()) {
+                Some(owner) => Some(Variant::ObjectId(owner.object_id())),
+                None => Some(Variant::Nil),
+            },
+            "set_owner" => {
+                // A missing or non-object argument clears the owner, which is
+                // Godot's `set_owner(null)`.
+                let owner = args
+                    .first()
+                    .and_then(variant_object_raw)
+                    .map(|raw| NodeId::from_object_id(ObjectId::from_raw(raw)));
+                if let Some(target) = self.tree_mut().get_node_mut(nid) {
+                    target.set_owner(owner);
+                }
+                Some(Variant::Nil)
+            }
+            "is_node_ready" => Some(Variant::Bool(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.is_ready())
+                    .unwrap_or(false),
+            )),
+            "request_ready" => {
+                self.tree_mut().request_node_ready(nid);
+                Some(Variant::Nil)
+            }
+            "propagate_notification" => {
+                let Some(what) = args.first().and_then(|v| match v {
+                    Variant::Int(i) => Some(*i),
+                    Variant::Float(f) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut().propagate_notification(nid, what);
+                Some(Variant::Nil)
+            }
+            "replace_by" => {
+                let Some(new_raw) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot's second argument is `keep_groups`, defaulting to false.
+                let keep_groups = matches!(args.get(1), Some(Variant::Bool(true)));
+                let new_nid = NodeId::from_object_id(ObjectId::from_raw(new_raw));
+                self.tree_mut().replace_by(nid, new_nid, keep_groups);
+                Some(Variant::Nil)
+            }
+            // pat-mgixk.64: `Node.set_name`. ⚠️ This had NO arm, and the gap was
+            // wider than a missing signal: `Node::set_name` is reached from
+            // exactly one place in the crate (`SceneTree::set_node_name`), and
+            // that in turn had exactly one caller — a test. So a script could
+            // not rename a node by ANY spelling, and `renamed` was unreachable
+            // no matter where it was emitted.
+            //
+            // Routed through `SceneTree::set_node_name` rather than touching the
+            // node directly, because that is where the rename signals live: the
+            // tree-level `node_renamed` on the root and `renamed` on the node
+            // itself. Writing `Node::set_name` straight would rename the node and
+            // emit neither.
+            "set_name" => {
+                let Some(name) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut().set_node_name(nid, name);
+                Some(Variant::Nil)
+            }
+            "get_tree_string" => Some(Variant::String(self.tree().get_tree_string(nid))),
+            "print_tree" => {
+                // Godot prints to stdout and returns nothing; the string form is
+                // `get_tree_string` above, which this reuses so the two can
+                // never drift.
+                println!("{}", self.tree().get_tree_string(nid));
+                Some(Variant::Nil)
+            }
+            "set_process" | "set_physics_process" => {
+                // A malformed argument is a no-op, not a disable: reading a
+                // missing argument as `false` would silently stop the node's
+                // callbacks, the opposite of what a bad call should do.
+                let enabled = match args.first() {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    Some(Variant::Float(f)) => *f != 0.0,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                if method == "set_process" {
+                    tree.set_node_process(nid, enabled);
+                } else {
+                    tree.set_node_physics_process(nid, enabled);
+                }
+                Some(Variant::Nil)
+            }
+            "is_processing" => Some(Variant::Bool(self.tree().is_node_processing(nid))),
+            "is_physics_processing" => {
+                Some(Variant::Bool(self.tree().is_node_physics_processing(nid)))
+            }
+            // -- the rest of Node's process surface (pat-mgixk.57) ----------
+            //
+            // `set_process` / `set_physics_process` / `is_processing` /
+            // `is_physics_processing` above were wired by pat-mgixk.6; the
+            // remaining names in Godot's `Node` process block had no arm in ANY
+            // table, so a script calling `set_process_input(false)` or
+            // `get_process_delta_time()` died on `UndefinedFunction`.
+            //
+            // Wired HERE for the reason the VehicleWheel3D block below states:
+            // `call_self_func_or_native` falls back to this table for a bare
+            // `set_process_input(false)` on self, and `call_object_method` for
+            // `$Child.set_process_input(false)`, so one registration serves
+            // both spellings.
+            "set_process_input"
+            | "set_process_unhandled_input"
+            | "set_process_unhandled_key_input"
+            | "set_process_shortcut_input" => {
+                // A malformed argument is a no-op, not a disable — same reason
+                // `set_process` above refuses to read a missing argument as
+                // `false`.
+                let enabled = match args.first() {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    Some(Variant::Float(f)) => *f != 0.0,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                match method {
+                    "set_process_input" => tree.set_node_process_input(nid, enabled),
+                    "set_process_unhandled_input" => {
+                        tree.set_node_process_unhandled_input(nid, enabled)
+                    }
+                    "set_process_unhandled_key_input" => {
+                        tree.set_node_process_unhandled_key_input(nid, enabled)
+                    }
+                    _ => tree.set_node_process_shortcut_input(nid, enabled),
+                };
+                Some(Variant::Nil)
+            }
+            "is_processing_input" => Some(Variant::Bool(self.tree().is_node_processing_input(nid))),
+            "is_processing_unhandled_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_unhandled_input(nid),
+            )),
+            "is_processing_unhandled_key_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_unhandled_key_input(nid),
+            )),
+            "is_processing_shortcut_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_shortcut_input(nid),
+            )),
+            "set_process_priority" | "set_physics_process_priority" => {
+                // Godot's priorities are ints; a non-numeric argument is a
+                // no-op rather than a reset to 0, which would silently reorder
+                // the node.
+                let priority = match args.first() {
+                    Some(Variant::Int(i)) => *i as i32,
+                    Some(Variant::Float(f)) => *f as i32,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                if method == "set_process_priority" {
+                    tree.set_node_process_priority(nid, priority);
+                } else {
+                    tree.set_node_physics_process_priority(nid, priority);
+                }
+                Some(Variant::Nil)
+            }
+            "get_process_priority" => {
+                Some(Variant::Int(self.tree().node_process_priority(nid) as i64))
+            }
+            "get_physics_process_priority" => Some(Variant::Int(
+                self.tree().node_physics_process_priority(nid) as i64,
+            )),
+            // Godot's `Node.reset_physics_interpolation()` (pat-ghw2s). The
+            // platformer's Player calls it after teleporting back to its spawn
+            // point; without an arm every such frame raised "method not found"
+            // and the respawn streaked across the level.
+            "reset_physics_interpolation" => {
+                self.tree_mut().request_physics_interpolation_reset(nid);
+                Some(Variant::Nil)
+            }
+            "can_process" => {
+                // Godot's `Node.can_process()` is the pause question only — it
+                // reports whether `process_mode` lets the node run under the
+                // tree's current pause state, NOT whether `set_process(false)`
+                // was called. Folding `is_processing` in here would make
+                // `can_process()` false for a node that still receives input
+                // and physics.
+                Some(Variant::Bool(self.tree().should_process_node(nid)))
+            }
+            "get_process_delta_time" => Some(Variant::Float(self.tree().script_process_delta())),
+            "get_physics_process_delta_time" => {
+                Some(Variant::Float(self.tree().script_physics_delta_time()))
+            }
+            // -- Viewport / Window surface (pat-mgixk.59) --------------------
+            //
+            // `get_viewport()` returns a REAL node — Patina's tree root is a
+            // `Window`, and ClassDB registers `Window` with `.parent("Viewport")`
+            // — so these belong in this table rather than behind a handle, and
+            // one registration serves both `get_viewport().m()` and
+            // `$SomeViewport.m()`.
+            //
+            // The class guard is satisfiable by construction for anything
+            // `get_viewport()` hands back, and keeps a same-named method on an
+            // unrelated node from being answered with the root window's state.
+            "get_visible_rect"
+            | "set_input_as_handled"
+            | "is_input_handled"
+            | "gui_get_focus_owner"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("Viewport")) =>
+            {
+                match method {
+                    // Godot answers the focused Control, or null when nothing
+                    // holds focus — not an error (pat-mgixk.59).
+                    "gui_get_focus_owner" => Some(match self.tree().focus_owner() {
+                        Some(owner) => Variant::ObjectId(owner.object_id()),
+                        None => Variant::Nil,
+                    }),
+                    "get_visible_rect" => {
+                        // Godot's visible rect starts at the origin; only the
+                        // SIZE varies with the stretch settings.
+                        let size = self.tree().root_window().visible_size();
+                        Some(Variant::Rect2(Rect2 {
+                            position: Vector2::ZERO,
+                            size,
+                        }))
+                    }
+                    "set_input_as_handled" => {
+                        self.tree_mut().set_input_as_handled();
+                        Some(Variant::Nil)
+                    }
+                    _ => Some(Variant::Bool(self.tree().is_input_handled())),
+                }
+            }
+            "notification" => {
+                let what = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // Godot `Object.notification(what, reversed = false)` delivers
+                // to THIS object only — the recursive form is
+                // `Node.propagate_notification`. Recorded on the node as well as
+                // handed to the script so `notification_log` sees the same
+                // delivery an engine-side notification makes.
+                let tree = self.tree_mut();
+                if let Some(target) = tree.get_node_mut(nid) {
+                    target.receive_notification(gdobject::notification::Notification::new(
+                        what as i32,
+                    ));
+                }
+                tree.notify_script(nid, what);
+                Some(Variant::Nil)
+            }
+            // -- Multiplayer authority (pat-s3rrv.17) ------------------------
+            //
+            // Answered for ANY node: in Godot authority is a `Node` property,
+            // not something only the replication nodes carry. Placed first so a
+            // node class that happens to declare a same-named method cannot
+            // shadow the engine rule.
+            "get_multiplayer_authority" => {
+                Some(Variant::Int(self.tree().get_multiplayer_authority(nid)))
+            }
+            "is_multiplayer_authority" => {
+                Some(Variant::Bool(self.tree().is_multiplayer_authority(nid)))
+            }
+            "set_multiplayer_authority" => {
+                let Some(authority) = (match args.first() {
+                    Some(Variant::Int(i)) => Some(*i),
+                    Some(Variant::Float(f)) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    // Godot requires an int id; a bad argument leaves authority
+                    // untouched rather than resetting it to the server, which
+                    // would silently hand the node back to the host.
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Godot's second argument DEFAULTS TO TRUE. Reading a missing
+                // argument as `false` would set authority on the node alone and
+                // leave every child inheriting the server — the subtle half-
+                // transfer this API exists to avoid.
+                let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
+                self.tree_mut()
+                    .set_multiplayer_authority(nid, authority, recursive);
+                Some(Variant::Nil)
+            }
+            // -- MultiplayerSynchronizer visibility (pat-s3rrv.17) -----------
+            //
+            // Both halves of this feature already existed and could not meet:
+            // the per-peer state lives on the synchronizer and `poll_outbound`
+            // already refuses to send to a peer it is hidden from, but no script
+            // could reach either one.
+            "set_visibility_for" => {
+                let peer = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // ⚠️ `visible` is required. Reading a missing or non-bool second
+                // argument as `false` would HIDE the node — the opposite of the
+                // no-op a malformed call should be.
+                let Some(Variant::Bool(visible)) = args.get(1) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_set_visibility_for(nid, peer, *visible);
+                Some(Variant::Nil)
+            }
+            "is_visible_to" => {
+                let peer = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // Reads the cached filter verdict plus the stored per-peer
+                // state; it never runs a filter, so `tree()` suffices.
+                Some(Variant::Bool(
+                    self.tree().synchronizer_is_visible_to(nid, peer),
+                ))
+            }
+            "add_visibility_filter" => {
+                // The Callable is stored, not called here: it is evaluated once
+                // per peer during the outbound replication pass, which is the
+                // only place the peer list exists.
+                let Some(filter) = args.first().cloned() else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_add_visibility_filter(nid, filter);
+                Some(Variant::Nil)
+            }
+            // Godot `remove_visibility_filter(callable)` — void, and silent
+            // about a filter that was never added (`HashSet::erase`,
+            // `multiplayer_synchronizer.cpp:216`). Without this arm a script
+            // could install a filter and never take it back: the only way to
+            // stop filtering was to free the synchronizer.
+            "remove_visibility_filter" => {
+                let Some(filter) = args.first().cloned() else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_remove_visibility_filter(nid, filter);
+                Some(Variant::Nil)
+            }
+            // -- Physics 2D space queries (pat-s3rrv.26) ---------------------
+            //
+            // `get_world_2d()` is answered for any node: Patina has one
+            // `PhysicsWorld2D` per tree, so the handle is a singleton rather
+            // than something keyed on the caller.
+            // -- CharacterBody2D slide contacts (pat-s3rrv.95) ------------
+            //
+            // `physics_server` publishes each tick's contacts as
+            // `_slide_collisions`; these turn them into the objects Godot's
+            // idiom indexes. Names are specific enough not to shadow anything,
+            // so they sit in the table rather than needing to precede it.
+            "get_slide_collision_count" => {
+                Some(Variant::Int(slide_collision_count(self.tree(), nid) as i64))
+            }
+            // Godot returns null for an out-of-range index rather than raising,
+            // so a `for i in count` loop that races a tick degrades quietly.
+            "get_slide_collision" => {
+                let idx = match args.first() {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                    _ => return Some(Variant::Nil),
+                };
+                if idx >= slide_collision_count(self.tree(), nid) {
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    kinematic_collision_handle_for(node, idx),
+                )))
+            }
+            // Godot's `move_and_collide(motion)`: sweep and STOP at the first
+            // contact, returning a `KinematicCollision2D` or null
+            // (pat-s3rrv.97). The sweep itself lives on the physics server,
+            // which owns the world; this arm only bridges to it.
+            "move_and_collide" => {
+                let motion = match args.first() {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return Some(Variant::Nil),
+                };
+                let addr = self.tree().script_physics_addr();
+                if addr == 0 {
+                    return Some(Variant::Nil);
+                }
+                // SAFETY: identical contract to `force_shapecast_update` above —
+                // the address is of a live `PhysicsServer` that outlives this
+                // call and is a sibling of the tree, never inside it, so this
+                // shared borrow cannot alias the `&mut` tree borrow below.
+                let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+                if !physics.script_move_and_collide(self.tree_mut(), nid, motion) {
+                    // Godot returns null when nothing was hit, and scripts test
+                    // exactly that; handing back an object with zeroed fields
+                    // would make `if collision:` true after a clean move.
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    kinematic_collision_handle_for(node, MOVE_AND_COLLIDE_INDEX),
+                )))
+            }
+            "get_last_slide_collision" => {
+                match slide_collision_count(self.tree(), nid).checked_sub(1) {
+                    Some(last) => Some(Variant::ObjectId(ObjectId::from_raw(
+                        kinematic_collision_handle_for(node, last),
+                    ))),
+                    // No contacts this tick — Godot returns null, not an object
+                    // describing a collision that did not happen.
+                    None => Some(Variant::Nil),
+                }
+            }
+            "get_world_2d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))),
+            // The 3D twin (pat-s3rrv.107). Like `World2D`, `World3D` and its
+            // space state are fixed singletons — one `PhysicsWorld3D` per tree —
+            // so they are constant handles rather than registry entries.
+            "get_world_3d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_3D_HANDLE))),
+            // `World3D.space` / `get_space()` and its method spelling of
+            // `direct_space_state` (pat-v3co1). The official 3D platformer's
+            // camera writes the server form,
+            // `PhysicsServer3D.space_get_direct_state(get_world_3d().get_space())`,
+            // which raised "method not found" every physics frame.
+            "get_space" if node == WORLD_3D_HANDLE => {
+                Some(Variant::Rid(gdcore::id::Rid::from_raw(SPACE_3D_RID)))
+            }
+            "get_direct_space_state" if node == WORLD_3D_HANDLE => {
+                Some(Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE)))
+            }
+            // `CollisionObject3D.get_rid()` (pat-v3co1) — the handle a script
+            // passes in a ray query's `exclude` so the ray ignores its own body
+            // (the 3D platformer's follow camera excludes the player this way).
+            // A body's server RID is opaque in Godot; here it is the node's own
+            // object id, which is stable before the body is first synced and
+            // which `intersect_ray` resolves back to the body.
+            //
+            // `CollisionObject2D.get_rid()` (pat-b4zhq) answers the same way:
+            // the 2D ray and shape queries' `exclude` resolve a `Rid` entry
+            // back to the node exactly as they resolve the node object itself.
+            "get_rid"
+                if self.tree().get_node(nid).is_some_and(|n| {
+                    n.is_class("CollisionObject3D") || n.is_class("CollisionObject2D")
+                }) =>
+            {
+                Some(Variant::Rid(gdcore::id::Rid::from_raw(node)))
+            }
+            // Queries on the space-state handle. Guarded on the receiver being
+            // that handle so these names cannot shadow a same-named script or
+            // node method on an ordinary node.
+            // 3D ray query (pat-s3rrv.107).
+            //
+            // ⚠️ Reads the parameters off a `Variant::Resource` rather than a
+            // handle registry, which is where the 2D path keeps them. That is
+            // deliberate: `PhysicsRayQueryParameters3D` is a RefCounted class
+            // that already constructs from script and carries its own property
+            // map, so a second registry would be duplicate state that could
+            // disagree with the object the script is holding.
+            // 3D point query (pat-s3rrv.107): every body containing a point.
+            //
+            // ⚠️ `collision_mask` is set ON THE QUERY rather than pre-filtering
+            // the body iterator, because `intersect_bodies` already honours the
+            // mask, `exclude` and `max_results` itself. Filtering here as well
+            // would apply the mask twice — harmless today, but it would silently
+            // diverge the moment the library's own rule changes.
+            "intersect_point" if node == SPACE_STATE_3D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::Resource(r)) => r,
+                    _ => return None,
+                };
+                let position = match params.properties.get("position") {
+                    Some(Variant::Vector3(v)) => *v,
+                    // No point to test: Godot answers an empty Array.
+                    _ => return Some(Variant::Array(Default::default())),
+                };
+                let mut query = gdphysics3d::query::PhysicsPointQuery3D::new(position);
+                if let Some(Variant::Int(m)) = params.properties.get("collision_mask") {
+                    query.collision_mask = *m as u32;
+                }
+                let server = self.physics_3d()?;
+                let ids = query.intersect_bodies(server.world().bodies());
+                let out: Vec<Variant> = ids
+                    .into_iter()
+                    .map(|body_id| {
+                        let mut d = gdvariant::Dictionary::new();
+                        if let Some(nid) = server.node_for_body(body_id) {
+                            d.insert("collider", Variant::ObjectId(nid.object_id()));
+                        }
+                        Variant::Dictionary(d.into())
+                    })
+                    .collect();
+                Some(Variant::Array(out.into()))
+            }
+            // The shape-based 3D queries (pat-s3rrv.107). All four decode
+            // their parameters through `shape_query_3d_from_params`, so the
+            // extent conversion and mask handling cannot drift between them.
+            //
+            // A params object with no usable shape yields Godot's empty answer
+            // for each — an Array, a full-travel `[1, 1]`, or an empty
+            // Dictionary — rather than a guessed shape, which would report
+            // contacts that do not exist.
+            "intersect_shape" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return Some(Variant::Array(Default::default()));
+                };
+                let server = self.physics_3d()?;
+                let hits = query.intersect(server.world().bodies());
+                let out: Vec<Variant> = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let mut d = gdvariant::Dictionary::new();
+                        if let Some(nid) = server.node_for_body(hit.body_id) {
+                            d.insert("collider", Variant::ObjectId(nid.object_id()));
+                        }
+                        Variant::Dictionary(d.into())
+                    })
+                    .collect();
+                Some(Variant::Array(out.into()))
+            }
+            // `cast_motion(params)` — `[safe, unsafe]` fractions of the
+            // params' `motion`, which is Godot's return shape.
+            "cast_motion" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let unobstructed = || {
+                    // Godot answers `[1, 1]` when nothing blocks the motion —
+                    // NOT an empty array, so `result[0]` is always indexable.
+                    Some(Variant::Array(
+                        vec![Variant::Float(1.0), Variant::Float(1.0)].into(),
+                    ))
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return unobstructed();
+                };
+                let server = self.physics_3d()?;
+                let (safe, unsafe_) = query.cast_motion(server.world().bodies());
+                Some(Variant::Array(
+                    (vec![Variant::Float(safe as f64), Variant::Float(unsafe_ as f64)]).into(),
+                ))
+            }
+            // `collide_shape(params)` — contact points as PAIRS, flattened into
+            // one Array exactly as Godot returns them (own point, then the
+            // other body's, per contact).
+            "collide_shape" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return Some(Variant::Array(Default::default()));
+                };
+                let server = self.physics_3d()?;
+                let pairs = query.collide_shape(server.world().bodies());
+                let mut out: Vec<Variant> = Vec::with_capacity(pairs.len() * 2);
+                for [a, b] in pairs {
+                    out.push(Variant::Vector3(a));
+                    out.push(Variant::Vector3(b));
+                }
+                Some(Variant::Array(out.into()))
+            }
+            // `get_rest_info(params)` — the NEAREST contact as a Dictionary,
+            // empty on a miss so `if info:` works unguarded.
+            "get_rest_info" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let empty = || Some(Variant::Dictionary(gdvariant::Dictionary::new().into()));
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return empty();
+                };
+                let server = self.physics_3d()?;
+                let Some(info) = query.get_rest_info(server.world().bodies()) else {
+                    return empty();
+                };
+                let mut d = gdvariant::Dictionary::new();
+                d.insert("point", Variant::Vector3(info.point));
+                d.insert("normal", Variant::Vector3(info.normal));
+                d.insert("linear_velocity", Variant::Vector3(info.linear_velocity));
+                if let Some(nid) = server.node_for_body(info.collider) {
+                    d.insert("collider", Variant::ObjectId(nid.object_id()));
+                }
+                Some(Variant::Dictionary(d.into()))
+            }
+            "intersect_ray" if node == SPACE_STATE_3D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::Resource(r)) => r,
+                    // Godot only accepts the parameters object.
+                    _ => return None,
+                };
+                let v3 = |key: &str| match params.properties.get(key) {
+                    Some(Variant::Vector3(v)) => Some(*v),
+                    _ => None,
+                };
+                let (from, to) = match (v3("from"), v3("to")) {
+                    (Some(f), Some(t)) => (f, t),
+                    // Without both endpoints there is no ray. Godot answers an
+                    // empty Dictionary rather than erroring, so `if result:`
+                    // works unguarded.
+                    _ => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
+                };
+                let mask = match params.properties.get("collision_mask") {
+                    Some(Variant::Int(m)) => *m as u32,
+                    // Godot's default mask is all layers.
+                    _ => u32::MAX,
+                };
+                let server = self.physics_3d()?;
+                // `exclude` (pat-v3co1): bodies the ray must not see, as the
+                // RIDs `CollisionObject3D.get_rid()` hands out (a node's object
+                // id). It used to be ignored, so a ray cast from inside the
+                // caster's own body — the 3D platformer's follow camera, whose
+                // rays start at the player — could report the caster.
+                let excluded: std::collections::HashSet<gdphysics3d::body::BodyId3D> =
+                    match params.properties.get("exclude") {
+                        Some(Variant::Array(items)) => items
+                            .to_vec()
+                            .iter()
+                            .filter_map(|v| match v {
+                                Variant::Rid(rid) => Some(rid.id()),
+                                Variant::ObjectId(oid) => Some(oid.raw()),
+                                _ => None,
+                            })
+                            .filter_map(|raw| {
+                                server
+                                    .body_for_node(NodeId::from_object_id(ObjectId::from_raw(raw)))
+                            })
+                            .collect(),
+                        _ => Default::default(),
+                    };
+                let world = server.world();
+                let query = gdphysics3d::query::PhysicsRayQuery3D::new(from, to);
+                let hit = match query.intersect(world.bodies().filter(|b| {
+                    // `collision_mask` selects which layers the ray sees.
+                    (b.collision_layer & mask) != 0 && !excluded.contains(&b.id)
+                })) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
+                };
+                let mut d = gdvariant::Dictionary::new();
+                d.insert("position", Variant::Vector3(hit.point));
+                d.insert("normal", Variant::Vector3(hit.normal));
+                if let Some(nid) = self.physics_3d()?.node_for_body(hit.body_id) {
+                    d.insert("collider", Variant::ObjectId(nid.object_id()));
+                }
+                Some(Variant::Dictionary(d.into()))
+            }
+            "intersect_ray" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => ray_params(id.raw())?,
+                    // Godot only accepts the parameters object.
+                    _ => return None,
+                };
+                // `exclude` carries NODE ids — that is what a script holds —
+                // while the world filters by `BodyId`, so map through the same
+                // registry `collider` uses in reverse. A node with no
+                // registered body drops out of the list instead of becoming
+                // body 0 and excluding an unrelated body.
+                //
+                // Bound before `world` so the two immutable borrows of `self`
+                // do not have to overlap a closure capture.
+                let exclude: Vec<_> = {
+                    let phys = self.physics()?;
+                    params
+                        .exclude
+                        .iter()
+                        .filter_map(|raw| {
+                            phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                        })
+                        .collect()
+                };
+                let world = self.physics()?.world();
+                // ⚠️ Built through the builder, not a struct literal:
+                // `RayQuery2D` derives no `Default`, and its
+                // `collide_with_bodies` / `hit_from_inside` defaults are part of
+                // Godot's semantics — `new` sets them, a literal would force me
+                // to restate them and drift.
+                let query = gdphysics2d::world::RayQuery2D::new(params.from, params.to)
+                    .with_collision_mask(params.collision_mask)
+                    .with_exclude(exclude);
+                // Godot answers an EMPTY Dictionary on a miss, never null, so a
+                // script can test `if result:` and index it without a guard.
+                let hit = match world.intersect_ray(&query) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
+                };
+                // `collider` is the hit NODE, which is what a script actually
+                // uses (`result.collider.queue_free()`). `node_for_body` is the
+                // same reverse map `RayCast2D.get_collider` already relies on
+                // (physics_server.rs:895), so the two agree by construction.
+                let collider = self.physics().and_then(|p| p.node_for_body(hit.body_id));
+                let mut dict = gdvariant::Dictionary::new();
+                dict.insert(
+                    Variant::String("position".to_string()),
+                    Variant::Vector2(hit.point),
+                );
+                dict.insert(
+                    Variant::String("normal".to_string()),
+                    Variant::Vector2(hit.normal),
+                );
+                if let Some(node_id) = collider {
+                    dict.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                }
+                Some(Variant::Dictionary(dict.into()))
+            }
+            // `intersect_shape(params, max_results)` — every body overlapping
+            // the parameters' shape at its transform, as an ARRAY of
+            // Dictionaries (empty when nothing overlaps).
+            //
+            // The narrowphase behind this (`PhysicsWorld2D::shape_cast`) was
+            // already correct and unit-tested; what was missing was any way for
+            // a script to name a shape at all, which is why the shape-resource
+            // constructors land in the same bead.
+            "intersect_shape" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                // A parameters object with no shape assigned overlaps nothing,
+                // rather than defaulting to some shape the script never chose.
+                let shape = shape_for(params.shape)?;
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let exclude: Vec<_> = {
+                    let phys = self.physics()?;
+                    params
+                        .exclude
+                        .iter()
+                        .filter_map(|raw| {
+                            phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                        })
+                        .collect()
+                };
+                let hits = self.physics()?.world().shape_cast(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                );
+                let mut out: Vec<Variant> = Vec::new();
+                for hit in hits.into_iter().take(max_results) {
+                    let Some(node_id) = self.physics().and_then(|p| p.node_for_body(hit.body_id))
+                    else {
+                        continue;
+                    };
+                    let mut entry = gdvariant::Dictionary::new();
+                    entry.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                    // Godot reports which shape OF THE COLLIDER was hit; Patina
+                    // registers one shape per body, so it is always index 0.
+                    entry.insert(Variant::String("shape".to_string()), Variant::Int(0));
+                    out.push(Variant::Dictionary(entry.into()));
+                }
+                Some(Variant::Array(out.into()))
+            }
+            // `collide_shape(params, max_results)` — contact points as PAIRS
+            // (first on the query shape, second on the collider), per
+            // doc/classes/PhysicsDirectSpaceState2D.xml. `max_results` counts
+            // Godot's *results*, i.e. pairs, so the returned array is twice it.
+            "collide_shape" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let exclude = self.shape_query_exclude(&params)?;
+                let points = self.physics()?.world().collide_shape(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                    max_results,
+                );
+                Some(Variant::Array(
+                    points.into_iter().map(Variant::Vector2).collect(),
+                ))
+            }
+            // `cast_motion(params)` — `[safe, unsafe]` fractions of
+            // `params.motion`. Godot returns a PackedFloat32Array; Patina has no
+            // packed-float Variant, so it surfaces as a 2-element Array, which
+            // indexes identically from script (`result[0]`).
+            "cast_motion" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let exclude = self.shape_query_exclude(&params)?;
+                let fractions = self.physics()?.world().cast_motion(
+                    &shape,
+                    params.transform,
+                    params.motion,
+                    &exclude,
+                    params.collision_mask,
+                );
+                Some(Variant::Array(
+                    (vec![
+                        Variant::Float(fractions[0] as f64),
+                        Variant::Float(fractions[1] as f64),
+                    ])
+                    .into(),
+                ))
+            }
+            // `get_rest_info(params)` — the NEAREST contact, as a Dictionary.
+            // Godot answers an EMPTY Dictionary when nothing overlaps, the same
+            // contract `intersect_ray` uses, so `if info:` works unguarded.
+            "get_rest_info" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let exclude = self.shape_query_exclude(&params)?;
+                let hit = match self.physics()?.world().shape_rest_info(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                ) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
+                };
+                let mut dict = gdvariant::Dictionary::new();
+                dict.insert(
+                    Variant::String("point".to_string()),
+                    Variant::Vector2(hit.point),
+                );
+                dict.insert(
+                    Variant::String("normal".to_string()),
+                    Variant::Vector2(hit.normal),
+                );
+                // Godot documents `linear_velocity` as the colliding object's
+                // velocity — (0,0) for a static body, which falls out naturally.
+                let velocity = self
+                    .physics()
+                    .and_then(|p| p.world().get_body(hit.body_id).map(|b| b.linear_velocity))
+                    .unwrap_or(gdcore::math::Vector2::ZERO);
+                dict.insert(
+                    Variant::String("linear_velocity".to_string()),
+                    Variant::Vector2(velocity),
+                );
+                if let Some(node_id) = self.physics().and_then(|p| p.node_for_body(hit.body_id)) {
+                    dict.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                }
+                dict.insert(Variant::String("shape".to_string()), Variant::Int(0));
+                Some(Variant::Dictionary(dict.into()))
+            }
+            // `intersect_point(params, max_results)` — Godot answers an ARRAY of
+            // Dictionaries (one per overlapping body), not a single hit, and an
+            // empty array when nothing is under the point.
+            "intersect_point" if node == SPACE_STATE_2D_HANDLE => {
+                let point = match args.first() {
+                    // Godot takes a PhysicsPointQueryParameters2D; a bare
+                    // Vector2 is accepted too so a script can query a position
+                    // without constructing a parameters object for it.
+                    Some(Variant::Vector2(v)) => *v,
+                    Some(Variant::ObjectId(id)) => ray_params(id.raw())?.from,
+                    _ => return None,
+                };
+                // Godot's `max_results` defaults to 32.
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let bodies = self.physics()?.world().point_query(point);
+                let mut out: Vec<Variant> = Vec::new();
+                for body_id in bodies.into_iter().take(max_results) {
+                    let Some(node_id) = self.physics().and_then(|p| p.node_for_body(body_id))
+                    else {
+                        continue;
+                    };
+                    let mut entry = gdvariant::Dictionary::new();
+                    entry.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                    out.push(Variant::Dictionary(entry.into()));
+                }
+                Some(Variant::Array(out.into()))
+            }
+            // -- Node3D transform API (pat-s3rrv.24) -------------------------
+            //
+            // `gdscene::node3d` already implements all of this correctly; it was
+            // simply unreachable. `class_has_method` now answers true for these
+            // (the registration half of this bead), but registration only makes
+            // a method *reflectable* — a script call still has to land on an
+            // arm here, and there was none: `grep '"look_at"'` over both
+            // interpreter.rs and this file returned 0.
+            //
+            // Godot signatures from doc/classes/Node3D.xml. A malformed
+            // argument yields `None` (= "not handled") rather than a panic,
+            // matching how the 2D/3D force arms decline a call meant for the
+            // other dimension.
+            "look_at" => {
+                let target = vec3_arg(args, 0)?;
+                // `up` is optional in Godot and defaults to Vector3.UP.
+                match vec3_arg(args, 1) {
+                    Some(up) => crate::node3d::look_at(self.tree_mut(), nid, target, up),
+                    None => crate::node3d::look_at_default_up(self.tree_mut(), nid, target),
+                }
+                Some(Variant::Nil)
+            }
+            "translate" if !args.is_empty() && vec3_arg(args, 0).is_some() => {
+                // ⚠️ Guarded on a Vector3 first argument: `translate` is also
+                // Godot's *i18n* call (`Object.tr`-adjacent), which takes a
+                // String. Without the guard this arm would swallow every
+                // localisation call made on a node.
+                let offset = vec3_arg(args, 0)?;
+                crate::node3d::translate(self.tree_mut(), nid, offset);
+                Some(Variant::Nil)
+            }
+            "rotate" => {
+                let axis = vec3_arg(args, 0)?;
+                let angle = arg_f32(args, 1)?;
+                crate::node3d::rotate(self.tree_mut(), nid, axis, angle);
+                Some(Variant::Nil)
+            }
+            "rotate_x" | "rotate_y" | "rotate_z" => {
+                let angle = arg_f32(args, 0)?;
+                let axis = match method {
+                    "rotate_x" => gdcore::math::Vector3::new(1.0, 0.0, 0.0),
+                    "rotate_y" => gdcore::math::Vector3::new(0.0, 1.0, 0.0),
+                    _ => gdcore::math::Vector3::new(0.0, 0.0, 1.0),
+                };
+                crate::node3d::rotate(self.tree_mut(), nid, axis, angle);
+                Some(Variant::Nil)
+            }
+            "to_global" => {
+                let local = vec3_arg(args, 0)?;
+                Some(Variant::Vector3(crate::node3d::to_global(
+                    self.tree(),
+                    nid,
+                    local,
+                )))
+            }
+            "to_local" => {
+                let global = vec3_arg(args, 0)?;
+                Some(Variant::Vector3(crate::node3d::to_local(
+                    self.tree(),
+                    nid,
+                    global,
+                )))
+            }
+            // -- CharacterBody2D motion --------------------------------------
+            //
+            // Godot's `move_and_slide()` moves the body inside the call. Patina
+            // runs the character step in the physics phase, which is *before*
+            // the script phase in the same tick (main_loop.rs), so the request
+            // is recorded here and applied on the next physics tick. The
+            // observable contract — "a body whose script calls move_and_slide
+            // moves, one that never calls it does not" — holds either way; only
+            // the timing differs by one tick.
+            // -- GraphEdit connection model (pat-0q2kx.244) --
+            //
+            // `graph_edit.rs` is a complete 732-line model — port typing,
+            // duplicate rejection, validity rules — that had NO owner, so a
+            // script could not reach any of it. These three route to the
+            // per-node model now stored on the tree.
+            //
+            // Godot returns an Error code (OK == 0) from connect_node, not a
+            // bool, so a script can `if err != OK`. Mapping the model's
+            // Result onto that is the whole translation.
+            "connect_node" | "disconnect_node" => {
+                let from = arg_str(0)?;
+                let from_port = match args.get(1) {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as u32,
+                    // ERR_INVALID_PARAMETER (core/error/error_list.h).
+                    _ => return Some(Variant::Int(31)),
+                };
+                let to = arg_str(2)?;
+                let to_port = match args.get(3) {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as u32,
+                    // ERR_INVALID_PARAMETER (core/error/error_list.h).
+                    _ => return Some(Variant::Int(31)),
+                };
+                let graph = self.tree_mut().graph_edit_mut(nid);
+                let res = if method == "connect_node" {
+                    graph.connect_node(&from, from_port, &to, to_port)
+                } else {
+                    graph.disconnect_node(&from, from_port, &to, to_port)
+                };
+                // OK == 0, ERR_INVALID_PARAMETER == 31 (core/error/error_list.h).
+                Some(Variant::Int(if res.is_ok() { 0 } else { 31 }))
+            }
+            "get_connection_list" => {
+                // Godot yields an Array of Dictionaries keyed
+                // from_node/from_port/to_node/to_port. Reading through
+                // `get_graph_edit` rather than `graph_edit_mut` so a pure query
+                // does not allocate a model for a node that has none.
+                let list = match self.tree().get_graph_edit(nid) {
+                    Some(g) => g
+                        .get_connection_list()
+                        .iter()
+                        .map(|c| {
+                            let mut d = gdvariant::Dictionary::new();
+                            d.insert(
+                                Variant::String("from_node".into()),
+                                Variant::String(c.from_node.clone()),
+                            );
+                            d.insert(
+                                Variant::String("from_port".into()),
+                                Variant::Int(c.from_port as i64),
+                            );
+                            d.insert(
+                                Variant::String("to_node".into()),
+                                Variant::String(c.to_node.clone()),
+                            );
+                            d.insert(
+                                Variant::String("to_port".into()),
+                                Variant::Int(c.to_port as i64),
+                            );
+                            Variant::Dictionary(d.into())
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                Some(Variant::Array(list.into()))
+            }
+            // `CharacterBody3D.apply_floor_snap()` (pat-s3rrv.103). Godot
+            // exposes the snap as its own method, not only as an internal phase
+            // of `move_and_slide`.
+            //
+            // Deferred through a node flag exactly like `move_and_slide` above,
+            // rather than reaching for the live world: the snap casts against
+            // every other body, and the physics server already owns that walk.
+            // A direct bridge would need a second copy of the obstacle
+            // gathering, which is the sort of duplicate that drifts.
+            //
+            // ⚠️ Answers `Nil` because Godot's `apply_floor_snap()` returns
+            // void. Inventing a bool would make `if body.apply_floor_snap():`
+            // a script that works here and breaks there.
+            "apply_floor_snap" => {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("_apply_floor_snap_requested", Variant::Bool(true));
+                }
+                Some(Variant::Nil)
+            }
+            // `move_and_slide()` — the whole slide happens BEFORE this returns,
+            // as in Godot (`CharacterBody2D::move_and_slide`,
+            // `scene/2d/physics/character_body_2d.cpp`), so the next line of the
+            // same `_physics_process` reads the new position, velocity, flags
+            // and normals (pat-mgixk.37).
+            //
+            // This used to set `_move_and_slide_requested` and let the physics
+            // phase do the real work AFTER every script had run, which made
+            // four things wrong at once: everything read back was one tick
+            // stale, `move_and_slide(); velocity = Vector2.ZERO` moved by the
+            // ZEROED velocity, two calls in a tick moved once, and the return
+            // value was the PREVIOUS tick's flags.
+            "move_and_slide" => {
+                // Try the synchronous slide first. `None` means the 2D server
+                // does not own this node — a scripted CharacterBody3D arrives
+                // here too, because this dispatch table answers the method for
+                // every node — and the 3D server is tried next, also
+                // synchronously (pat-hwhbj). Only when neither is bound does
+                // the deferred request below remain, consumed by
+                // `character3d::process_character_movement`.
+                let addr = self.tree().script_physics_addr();
+                let slid = if addr == 0 {
+                    // No server bound for this script phase, so there is
+                    // nothing to slide through at all. A host that drives
+                    // scripts without binding the bridge keeps the old
+                    // behaviour rather than silently refusing to move.
+                    None
+                } else {
+                    // Godot's `move_and_slide()` always moves by the PHYSICS
+                    // tick (`get_physics_process_delta_time()`), whichever
+                    // callback calls it, which is what the tree records.
+                    let dt = self.tree().script_physics_delta() as f32;
+                    // SAFETY: same contract as `physics()` above, with one
+                    // addition. `set_script_physics_server` stored the address
+                    // of a live `PhysicsServer` and `MainLoop` clears it before
+                    // that server can move or drop, so a non-zero address
+                    // points at a live server; the server is a sibling of the
+                    // tree, never inside it, so this cannot alias the `&mut`
+                    // tree borrow passed in.
+                    //
+                    // ⚠️ `&mut` rather than the shared borrow `physics()` hands
+                    // out, because the slide mutates the world body. That makes
+                    // this borrow EXCLUSIVE, so nothing else may call
+                    // `self.physics()` while it is live — and nothing does.
+                    // SAFETY: (summary) live server, exclusive for this call — see above.
+                    let physics =
+                        unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) };
+                    physics.script_move_and_slide(self.tree_mut(), nid, dt)
+                };
+                // Not a 2D character: try the 3D server, synchronously too
+                // (pat-hwhbj). Same SAFETY contract as `physics_3d()`; the
+                // shared borrow of the server is disjoint from the tree.
+                let slid = slid.or_else(|| {
+                    let addr3 = self.tree().script_physics_3d_addr();
+                    if addr3 == 0 {
+                        return None;
+                    }
+                    let dt = self.tree().script_physics_delta() as f32;
+                    // SAFETY: see `physics_3d()` — non-zero addr = live server,
+                    // a sibling of the tree, so no aliasing with `tree_mut()`.
+                    let physics3 =
+                        unsafe { &*(addr3 as *const crate::physics_server_3d::PhysicsServer3D) };
+                    crate::character3d::script_move_and_slide_3d(self.tree_mut(), physics3, nid, dt)
+                });
+
+                match slid {
+                    Some(collided) => {
+                        // Raised AND consumed inside this call, so the deferred
+                        // pass must not slide the body a second time this tick.
+                        //
+                        // Written as an explicit `false` rather than left
+                        // unset: `process_character_movement`'s gate reads it,
+                        // and `characterbody2d_move_and_slide_script_dispatch`
+                        // link 2 (plus the same assertion in
+                        // `cross_node_and_native_method_dispatch_test`) checks
+                        // this property is `Bool(false)` after the tick that
+                        // raised it. An unset property reads `Nil` and would
+                        // fail those for a reason unrelated to their subject.
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("_move_and_slide_requested", Variant::Bool(false));
+                        }
+                        Some(Variant::Bool(collided))
+                    }
+                    None => {
+                        // The pre-pat-mgixk.37 path, kept for the 3D character
+                        // and for an unbound server: raise the one-shot request
+                        // and answer with the flags as they stand.
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("_move_and_slide_requested", Variant::Bool(true));
+                        }
+                        let tree = self.tree();
+                        let collided = bool_prop(tree, "is_on_floor")
+                            || bool_prop(tree, "is_on_wall")
+                            || bool_prop(tree, "is_on_ceiling");
+                        Some(Variant::Bool(collided))
+                    }
+                }
+            }
+            // `ResourcePreloader` accessors (pat-0q2kx.218). The preloaded set
+            // lives in the node's `resources` Dictionary, which is how a `.tscn`
+            // authors it; `gdscene::resource_preloader::ResourcePreloader` models
+            // the same mapping but nothing instantiated one per node, so these
+            // read the authored property directly rather than duplicating state
+            // that could drift from it.
+            //
+            // Gated on the class name rather than `is_class`, because ClassDB is
+            // only populated by an explicit `register_*_classes()` and these must
+            // work in a bare tree — and ungated they would answer `get_resource`
+            // for every node in the scene.
+            "get_resource" | "has_resource" | "get_resource_list"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "ResourcePreloader") =>
+            {
+                let dict = match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("resources"))
+                {
+                    Some(Variant::Dictionary(d)) => d,
+                    // No authored `resources`: an empty preloader, not an error.
+                    _ => Default::default(),
+                };
+                match method {
+                    "get_resource" => {
+                        let name = arg_str(0)?;
+                        Some(dict.get(Variant::String(name)).unwrap_or(Variant::Nil))
+                    }
+                    "has_resource" => {
+                        let name = arg_str(0)?;
+                        Some(Variant::Bool(dict.contains_key(Variant::String(name))))
+                    }
+                    // Godot returns a PackedStringArray of the resource names.
+                    _ => Some(Variant::PackedStringArray(
+                        dict.to_dict()
+                            .keys()
+                            .map(|k| match k {
+                                Variant::String(s) => s.clone(),
+                                other => format!("{other:?}"),
+                            })
+                            .collect(),
+                    )),
+                }
+            }
+            // `AudioListener2D/3D` current-listener control (pat-mgixk.94).
+            // Registered (`is_current` at class_db.rs:1669/:13960) with no
+            // dispatch arm, so the standard "switch the ear to this node" idiom
+            // did nothing and reported nothing.
+            //
+            // 🔑 This is the state the FRAME LOOP reads:
+            // `AudioServerBridge::resolve_listener_3d` picks the listener via
+            // `current_node_of_class`, which scans tree order for the first node
+            // of the class whose `current` is `true`
+            // (`audio_server_bridge.rs:664-671`). So writing that flag changes
+            // which node the next mix pans against, not a bookkeeping bit.
+            //
+            // Godot keeps ONE active listener per viewport
+            // (`AudioListener3D::make_current` hands itself to the viewport,
+            // `audio_listener_3d.cpp:116-124`), and `is_current` answers
+            // "*am I* the viewport's listener", not "is my flag set"
+            // (`:138-144`). Patina has no viewport-held pointer, so the faithful
+            // port is: `make_current` clears every sibling of the same class, and
+            // `is_current` compares against the same tree-order scan the bridge
+            // uses. Without the clearing, two nodes could both report `true`
+            // while the bridge could only ever pick the earlier one.
+            //
+            // `clear_current` needs no promotion step: with no node flagged, the
+            // bridge falls back to `first_node_of_class`, which is what Godot's
+            // `_make_next_current` arrives at.
+            // `Camera2D.make_current()` / `clear_current()` / `is_current()`
+            // (pat-8mb8y). Registered in ClassDB with no arm, so the split-screen
+            // scene's `player_2.camera.make_current()` raised. Current-ness is per
+            // VIEWPORT (`behavioral_2d::current_camera2d_in`): `make_current`
+            // enables the camera and stamps it so it beats every other claimant
+            // of its viewport; it does not touch cameras of other viewports.
+            "make_current" | "clear_current" | "is_current"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "Camera2D") =>
+            {
+                use crate::behavioral_2d::{camera2d_viewport, current_camera2d_in};
+                match method {
+                    "make_current" => {
+                        thread_local! {
+                            static STAMP: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+                        }
+                        let stamp = STAMP.with(|s| {
+                            s.set(s.get() + 1);
+                            s.get()
+                        });
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("enabled", Variant::Bool(true));
+                            n.set_property(
+                                crate::behavioral_2d::CAMERA2D_CURRENT_STAMP,
+                                Variant::Int(stamp),
+                            );
+                        }
+                    }
+                    "clear_current" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.remove_property(crate::behavioral_2d::CAMERA2D_CURRENT_STAMP);
+                            n.set_property("enabled", Variant::Bool(false));
+                        }
+                    }
+                    _ => {
+                        let vp = camera2d_viewport(self.tree(), nid);
+                        return Some(Variant::Bool(
+                            current_camera2d_in(self.tree(), vp) == Some(nid),
+                        ));
+                    }
+                }
+                Some(Variant::Nil)
+            }
+            "make_current" | "clear_current" | "is_current"
+                if self.tree().get_node(nid).is_some_and(|n| {
+                    n.class_name() == "AudioListener2D" || n.class_name() == "AudioListener3D"
+                }) =>
+            {
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())?;
+                let siblings: Vec<NodeId> = self
+                    .tree()
+                    .all_nodes_in_tree_order()
+                    .into_iter()
+                    .filter(|&id| {
+                        self.tree()
+                            .get_node(id)
+                            .is_some_and(|n| n.class_name() == class)
+                    })
+                    .collect();
+                match method {
+                    "make_current" => {
+                        for id in siblings {
+                            let on = id == nid;
+                            if let Some(n) = self.tree_mut().get_node_mut(id) {
+                                n.set_property("current", Variant::Bool(on));
+                            }
+                        }
+                        Some(Variant::Nil)
+                    }
+                    "clear_current" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("current", Variant::Bool(false));
+                        }
+                        Some(Variant::Nil)
+                    }
+                    // The bridge's own rule, so the answer cannot disagree with
+                    // the listener the next mix actually uses.
+                    _ => {
+                        let active = siblings.into_iter().find(|&id| {
+                            self.tree().get_node(id).is_some_and(|n| {
+                                matches!(n.get_property("current"), Variant::Bool(true))
+                            })
+                        });
+                        Some(Variant::Bool(active == Some(nid)))
+                    }
+                }
+            }
+            // `ResourcePreloader` MUTATORS (pat-mgixk.94). Registered in the
+            // ClassDB (`add_resource` at class_db.rs:8891) with no dispatch arm,
+            // so they answered Nil while `has_method` said yes.
+            //
+            // 🔑 These write the node's `resources` Dictionary — the SAME state
+            // the readers above consult — NOT a
+            // `gdscene::resource_preloader::ResourcePreloader`. That struct
+            // models the identical mapping, but as the comment above records,
+            // *nothing instantiates one per node*: wiring these to it would
+            // store the resource somewhere no reader can see, which looks like
+            // a working call and changes nothing a frame reads.
+            //
+            // `SharedDictionary` is `Arc<RwLock<..>>`, so `insert`/`remove`
+            // through `&self` are visible to the node already. The
+            // `set_property` write-back is for the other case: a preloader whose
+            // `.tscn` authored no `resources` at all, where the dictionary is
+            // freshly made here and the node has never seen it.
+            "add_resource" | "remove_resource" | "rename_resource"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "ResourcePreloader") =>
+            {
+                let dict = match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("resources"))
+                {
+                    Some(Variant::Dictionary(d)) => d,
+                    _ => Default::default(),
+                };
+                let ok = match method {
+                    "add_resource" => {
+                        let name = arg_str(0)?;
+                        // Godot's signature is `add_resource(name, resource)`;
+                        // the VALUE is stored as handed over, so `get_resource`
+                        // returns the same Variant a script passed in. No path
+                        // extraction: an authored `resources` entry is a
+                        // resource value too, and the readers above do not
+                        // interpret it.
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        dict.insert(Variant::String(name), value).is_ok()
+                    }
+                    "remove_resource" => {
+                        let name = arg_str(0)?;
+                        dict.remove(Variant::String(name)).is_ok()
+                    }
+                    _ => {
+                        let old = arg_str(0)?;
+                        let new = arg_str(1)?;
+                        // Godot's `rename_resource` is a no-op when the old name
+                        // is absent, and must not clobber an existing `new`
+                        // entry with a null — so both are checked before any
+                        // mutation rather than removing first and hoping.
+                        if !dict.contains_key(Variant::String(old.clone()))
+                            || dict.contains_key(Variant::String(new.clone()))
+                        {
+                            false
+                        } else {
+                            match dict.remove(Variant::String(old)) {
+                                Ok(Some(v)) => dict.insert(Variant::String(new), v).is_ok(),
+                                _ => false,
+                            }
+                        }
+                    }
+                };
+                if ok {
+                    if let Some(node) = self.tree_mut().get_node_mut(nid) {
+                        node.set_property("resources", Variant::Dictionary(dict));
+                    }
+                }
+                Some(Variant::Nil)
+            }
+            // `CanvasItem.get_canvas_item()` — the RID standing for this node's
+            // canvas item, which is what a script parents a RenderingServer
+            // canvas item to (pat-0q2kx.213). Allocated on first ask and stable
+            // afterwards, as Godot's is.
+            "get_canvas_item" => Some(Variant::Int(
+                gdscript_interop::canvas_server::node_canvas_item(node) as i64,
+            )),
+            // `PhysicsBody2D.test_move(motion)` — whether the motion would be
+            // blocked, without moving the body (pat-0q2kx.200). Godot's real
+            // signature leads with a transform; the motion is the argument that
+            // decides the answer, so it is read from whichever slot holds a
+            // Vector2 and a bodyless/serverless call reports "not blocked"
+            // rather than a false positive.
+            // `PhysicsBody2D.get_gravity()` (Godot 4.3+): the total gravity at
+            // the body, which a CharacterBody2D script adds to its velocity
+            // (`velocity += get_gravity() * delta`). It was missing, so every
+            // such script raised "method not found" each physics frame — the
+            // official 2D Platformer demo's enemies never fell or walked.
+            //
+            // ⚠️ PhysicsBody2D only: `Area2D.get_gravity()` is the getter of
+            // its float `gravity` property, so any other node declines and the
+            // generic accessor answers.
+            "get_gravity"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("PhysicsBody2D")) =>
+            {
+                let g = self
+                    .physics()
+                    .map(|p| p.body_total_gravity(nid))
+                    .unwrap_or(gdphysics2d::world::DEFAULT_GRAVITY_2D);
+                Some(Variant::Vector2(g))
+            }
+            // `PhysicsBody3D.get_gravity()` — the 3D twin (pat-v3co1). Was
+            // missing for 3D, so the official 3D platformer's player
+            // (CharacterBody3D) and enemies (RigidBody3D, in
+            // `_integrate_forces`) raised "method not found" every physics
+            // frame: the player never fell or moved, the enemies never walked.
+            // With no 3D server bound, Godot's built-in default
+            // (`physics/3d/default_gravity` 9.8 straight down).
+            "get_gravity"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("PhysicsBody3D")) =>
+            {
+                let g = self
+                    .physics_3d()
+                    .map(|p| p.body_total_gravity(nid))
+                    .unwrap_or(gdcore::math::Vector3::new(0.0, -9.8, 0.0));
+                Some(Variant::Vector3(g))
+            }
+            "test_move" => {
+                let motion = args
+                    .iter()
+                    .find_map(|a| match a {
+                        Variant::Vector2(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or(Vector2::ZERO);
+                Some(Variant::Bool(
+                    self.physics2d_node_test_move(node, (motion.x, motion.y)),
+                ))
+            }
+            // `PhysicsBody2D.add_collision_exception_with(body)` /
+            // `remove_collision_exception_with(body)` (pat-s3rrv.100) — how a
+            // bullet stops hitting its shooter and a rider its vehicle.
+            //
+            // ⚠️ Both return **void** in Godot, so both answer `Nil` here even
+            // when nothing was applied. The bool the accessor returns is
+            // deliberately discarded rather than surfaced: inventing a return
+            // value Godot does not have would make `if a.add_collision_exception_with(b):`
+            // a script that works in Patina and breaks in Godot.
+            //
+            // `method` is the match's own binding, so comparing it inside a
+            // shared arm is sound — the two names differ only in direction.
+            "add_collision_exception_with" | "remove_collision_exception_with" => {
+                if let Some(other) = args.iter().find_map(|a| match a {
+                    Variant::ObjectId(id) => Some(id.raw()),
+                    _ => None,
+                }) {
+                    let adding = method == "add_collision_exception_with";
+                    // 2D first, then 3D (pat-s3rrv.105). A node is registered
+                    // with exactly ONE server, so the first that resolves both
+                    // bodies is the right one and the other would be a no-op.
+                    //
+                    // ⚠️ Falling back on the 2D helper's `false` rather than
+                    // classifying the node: `PhysicsBody2D`/`3D` share this arm
+                    // and the class name is not in hand here, and a lookup that
+                    // resolves no body is exactly the signal we want anyway —
+                    // it also covers a script calling this before the first
+                    // sync has registered either body.
+                    let applied = if adding {
+                        self.physics2d_node_add_collision_exception(node, other)
+                    } else {
+                        self.physics2d_node_remove_collision_exception(node, other)
+                    };
+                    if !applied {
+                        let a = NodeId::from_object_id(ObjectId::from_raw(node));
+                        let b = NodeId::from_object_id(ObjectId::from_raw(other));
+                        if let Some(p3) = self.physics_3d_mut() {
+                            if adding {
+                                p3.node_add_collision_exception(a, b);
+                            } else {
+                                p3.node_remove_collision_exception(a, b);
+                            }
+                        }
+                    }
+                }
+                Some(Variant::Nil)
+            }
+            // `RigidBody2D.get_contact_count()` — the number of CONTACTS, not
+            // of bodies (pat-s3rrv.100).
+            //
+            // ⚠️ Godot is explicit that the two differ: "collisions between
+            // parallel edges will result in two contacts (one at each end)"
+            // (RigidBody2D.xml). So this is the raw list length, while
+            // `get_colliding_bodies` below deduplicates — returning the same
+            // number from both would be wrong for the flat-on-flat resting case
+            // that is the single most common thing a body does.
+            "get_contact_count" => Some(Variant::Int(body_contacts(self.tree(), nid).len() as i64)),
+            // `RigidBody2D.get_colliding_bodies()` — Godot returns `Node2D[]`,
+            // one entry per BODY however many points it touches at.
+            "get_colliding_bodies" => {
+                let mut seen: Vec<u64> = Vec::new();
+                let mut out: Vec<Variant> = Vec::new();
+                for rec in body_contacts(self.tree(), nid) {
+                    let Variant::Dictionary(d) = rec else {
+                        continue;
+                    };
+                    if let Some(Variant::ObjectId(id)) = d.get("collider") {
+                        // Insertion order is preserved rather than sorted: it
+                        // mirrors contact order, and a script indexing [0] gets
+                        // a stable answer across runs.
+                        if !seen.contains(&id.raw()) {
+                            seen.push(id.raw());
+                            out.push(Variant::ObjectId(id));
+                        }
+                    }
+                }
+                Some(Variant::Array(out.into()))
+            }
+            // Godot answers an Array of the excepted bodies — empty, never
+            // null, so a script can `for b in ...` it without a guard.
+            "get_collision_exceptions" => Some(Variant::Array(
+                self.physics2d_node_get_collision_exceptions(node)
+                    .into_iter()
+                    .map(|raw| Variant::ObjectId(ObjectId::from_raw(raw)))
+                    .collect(),
+            )),
+            // Collision state persisted by `process_character_movement`.
+            "is_on_floor" | "is_on_wall" | "is_on_ceiling" => {
+                Some(Variant::Bool(bool_prop(self.tree(), method)))
+            }
+            // The surface normals the slide ran into (pat-mgixk.37). The solver
+            // has tracked both all along (`CharacterBody2D::get_floor_normal`
+            // in gdphysics2d); there was no dispatch arm, so a script asking
+            // for either got Nil and `get_floor_normal().dot(...)` was
+            // unwritable — the standard way to tell a slope from a floor.
+            //
+            // Godot answers the ZERO vector when the body is not on that
+            // surface, which is what `vel_prop` gives before anything is
+            // published, so a script may chain `.dot()`/`.angle()` on the
+            // result without a guard.
+            "get_floor_normal" => Some(vel_prop(self.tree(), "floor_normal")),
+            "get_wall_normal" => Some(vel_prop(self.tree(), "wall_normal")),
+            // `get_floor_angle(up_direction = up_direction)` — the angle between
+            // the floor normal and up, in radians, so a script can compare it
+            // with `floor_max_angle` (`character_body_2d.cpp`). Zero on flat
+            // ground, and zero when not on a floor at all.
+            "get_floor_angle" => {
+                // Handles BOTH dimensions off the shared `floor_normal` key: a
+                // CharacterBody3D publishes a Vector3 there, and reading it
+                // through a Vector2-only helper would answer a confident 0.0
+                // for every 3D body instead of the real slope.
+                let normal = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("floor_normal"))
+                    .unwrap_or(Variant::Nil);
+                let up = args.first().cloned().unwrap_or(Variant::Nil);
+                let dot = match (&normal, &up) {
+                    (Variant::Vector2(n), Variant::Vector2(u)) => Some(n.dot(*u)),
+                    (Variant::Vector3(n), Variant::Vector3(u)) => Some(n.dot(*u)),
+                    // Godot defaults the argument to the body's OWN
+                    // `up_direction`, not to a hardcoded axis.
+                    (Variant::Vector2(n), _) => {
+                        let authored = vec2_prop(self.tree(), "up_direction");
+                        let u = if authored.length_squared() < 1e-12 {
+                            Vector2::new(0.0, -1.0)
+                        } else {
+                            authored
+                        };
+                        Some(n.dot(u))
+                    }
+                    (Variant::Vector3(n), _) => {
+                        match self
+                            .tree()
+                            .get_node(nid)
+                            .map(|node| node.get_property("up_direction"))
+                        {
+                            Some(Variant::Vector3(u)) => Some(n.dot(u)),
+                            _ => Some(n.dot(gdcore::math::Vector3::new(0.0, 1.0, 0.0))),
+                        }
+                    }
+                    // Nothing published yet: no slide has run, so there is no
+                    // floor and Godot's angle is zero.
+                    _ => None,
+                };
+                // `acos` of a dot product that floating-point error can push a
+                // hair outside [-1, 1], which would answer NaN.
+                let angle = dot.map(|d| d.clamp(-1.0, 1.0).acos()).unwrap_or(0.0);
+                Some(Variant::Float(angle as f64))
+            }
+            // `*_only` variants ignore the "was on X last frame" distinction
+            // Patina does not model separately; report the same state.
+            // ⚠️ The `_only` variants are NOT aliases for the plain ones —
+            // that is the bug they had (pat-s3rrv.97). Godot defines each as
+            // "this surface AND NEITHER of the other two"
+            // (`character_body_2d.cpp:456-466`):
+            //
+            //     is_on_floor_only() { return on_floor && !on_wall && !on_ceiling; }
+            //
+            // Returning the plain flag made a body that ran into a wall while
+            // standing on the ground report `is_on_floor_only() == true`, which
+            // is exactly the case the method exists to rule out — so the
+            // "am I cleanly on the ground?" test every platformer writes was
+            // always true once grounded.
+            "is_on_floor_only" | "is_on_wall_only" | "is_on_ceiling_only" => {
+                let floor = bool_prop(self.tree(), "is_on_floor");
+                let wall = bool_prop(self.tree(), "is_on_wall");
+                let ceiling = bool_prop(self.tree(), "is_on_ceiling");
+                let only = match method {
+                    "is_on_floor_only" => floor && !wall && !ceiling,
+                    "is_on_wall_only" => wall && !floor && !ceiling,
+                    _ => ceiling && !floor && !wall,
+                };
+                Some(Variant::Bool(only))
+            }
+            // Godot's `get_real_velocity()` is the motion the last move ACHIEVED.
+            //
+            // ⚠️ NOT the node's `velocity`, which is what this used to return.
+            // The two agree only while nothing obstructs the body: run into a
+            // wall and `velocity` still carries the slide velocity for the next
+            // tick while the body went nowhere along x. Reporting `velocity`
+            // therefore answered "still moving" for exactly the case the method
+            // exists to detect (pat-s3rrv.97).
+            //
+            // `process_character_movement` publishes the position delta over the
+            // tick as `_real_velocity`; ZERO before the first move, which is
+            // also what Godot reports for a body that has not moved yet.
+            "get_real_velocity" => Some(vel_prop(self.tree(), "_real_velocity")),
+            // Written by `process_character_movement` from the platform the body
+            // is standing on; ZERO until then.
+            "get_platform_velocity" => Some(vel_prop(self.tree(), "platform_velocity")),
+            // Godot's `get_position_delta` (travel over the last
+            // `move_and_slide`) and `get_last_motion` (the LAST of the several
+            // motions a slide is split into) — pat-s3rrv.103.
+            //
+            // ⚠️ Deliberately two separate published properties rather than one
+            // reused value: they coincide only when the body hit nothing, so
+            // serving both from the same source reads as correct in any fixture
+            // that never collides, which is most of them.
+            //
+            // Both exist on CharacterBody2D *and* 3D (Vector2 / Vector3), so
+            // they go through the dimension-preserving reader.
+            "get_position_delta" => Some(vel_prop(self.tree(), "_position_delta")),
+            "get_last_motion" => Some(vel_prop(self.tree(), "_last_motion")),
+            // ⚠️ 3D ONLY. Godot gives `CharacterBody3D` this method and
+            // `CharacterBody2D` none at all — 2D angular velocity is a scalar,
+            // so there is no Vector2 form to fall back to and this must not go
+            // through `vel_prop`.
+            "get_platform_angular_velocity" => Some(Variant::Vector3(
+                match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("_platform_angular_velocity"))
+                {
+                    Some(Variant::Vector3(v)) => v,
+                    _ => gdcore::math::Vector3::ZERO,
+                },
+            )),
+
+            // -- RayCast2D script API (pat-0q2kx.32) --------------------------
+            //
+            // The interpreter already carries these in `call_method_on`, but
+            // that table is only reached for a call *on another object*
+            // (`$Ray.is_colliding()`). A bare `is_colliding()` — how a script on
+            // the RayCast2D itself writes it, and what Godot's own docs show —
+            // resolves through `call_self_func_or_native`, which tries user
+            // funcs and then lands **here**. Missing from this table, those
+            // names raised `UndefinedFunction` and aborted `_physics_process` at
+            // the first getter, so nothing after it ran.
+            //
+            // Keys match what `raycast2d::store_hit` publishes.
+            "is_colliding" => Some(Variant::Bool(bool_prop(self.tree(), "_hit_colliding"))),
+            "get_collision_point" => Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_point"))),
+            "get_collision_normal" => Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_normal"))),
+            "get_collider" => Some(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("_hit_collider"))
+                    .unwrap_or(Variant::Nil),
+            ),
+            // Godot re-runs the cast immediately so the *same* frame sees the
+            // result; the per-tick pass runs after the script phase, so without
+            // this a script could never observe a hit during `_physics_process`.
+            "force_raycast_update" => {
+                self.force_raycast_update_2d(node);
+                Some(Variant::Nil)
+            }
+            // -- RayCast3D / ShapeCast3D exception list (pat-s3rrv.106) -------
+            //
+            // `add_exception(node)` excludes a body from the cast — the standard
+            // way a character stops its own raycast hitting itself. The Rust
+            // modules have carried `add_exception` / `remove_exception` /
+            // `clear_exceptions` since they landed; no script could reach them.
+            //
+            // ⚠️ Dispatched on the node's CLASS, unlike the property-backed arms
+            // above (`is_colliding` and friends read `_hit_colliding`, which
+            // both dimensions publish, so those are deliberately class-blind).
+            // The exception list is real per-module state, so sending a
+            // RayCast2D to the 3D module would silently write a list nothing
+            // reads. An unrecognised class falls through to `Nil` rather than
+            // guessing a module.
+            "add_exception" | "remove_exception" => {
+                let Some(Variant::ObjectId(oid)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let excluded = NodeId::from_object_id(*oid);
+                let adding = method == "add_exception";
+                // `node` is a raw object id here, as `force_raycast_update_2d`
+                // above also has to convert.
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())
+                    .unwrap_or_default();
+                match class.as_str() {
+                    "RayCast3D" => {
+                        if adding {
+                            crate::raycast3d::add_exception(self.tree_mut(), nid, excluded);
+                        } else {
+                            crate::raycast3d::remove_exception(self.tree_mut(), nid, excluded);
+                        }
+                    }
+                    "ShapeCast3D" => {
+                        if adding {
+                            crate::shapecast3d::add_exception(self.tree_mut(), nid, excluded);
+                        } else {
+                            crate::shapecast3d::remove_exception(self.tree_mut(), nid, excluded);
+                        }
+                    }
+                    _ => {}
+                }
+                Some(Variant::Nil)
+            }
+            "clear_exceptions" => {
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())
+                    .unwrap_or_default();
+                match class.as_str() {
+                    "RayCast3D" => crate::raycast3d::clear_exceptions(self.tree_mut(), nid),
+                    "ShapeCast3D" => crate::shapecast3d::clear_exceptions(self.tree_mut(), nid),
+                    _ => {}
+                }
+                Some(Variant::Nil)
+            }
+
+            // -- RigidBody3D force / impulse script API (pat-0q2kx.37) --------
+            //
+            // A body holds no handle on the PhysicsServer, so these accumulate
+            // onto `_pending_*` node properties that
+            // `PhysicsServer3D::sync_to_physics` drains into the world body every
+            // physics tick — the Vector3 twin of the 2D `_pending_*` bridge.
+            //
+            // The interpreter has its own arms for the `$Body.apply_*()` form,
+            // but they coerce every argument through `vec2_arg`, so a `Vector3`
+            // arrived as ZERO and every 3D force call was a silent no-op. These
+            // are reached by the bare / `self.` call form and discriminate on the
+            // argument's own type: a non-Vector3 call declines, leaving the 2D
+            // path exactly as it was.
+            "apply_central_impulse"
+            | "apply_impulse"
+            | "apply_central_force"
+            | "apply_force"
+            | "apply_torque"
+            | "apply_torque_impulse"
+            | "add_constant_central_force"
+            | "add_constant_force"
+            | "add_constant_torque" => {
+                let value = vec3_arg(args, 0)?;
+                // `linear_key` empty means the argument *is* a torque.
+                let (linear_key, torque_key): (&str, &str) = match method {
+                    "apply_central_impulse" | "apply_impulse" => {
+                        ("_pending_impulse", "_pending_torque_impulse")
+                    }
+                    "apply_central_force" | "apply_force" => ("_pending_force", "_pending_torque"),
+                    "apply_torque" => ("", "_pending_torque"),
+                    "apply_torque_impulse" => ("", "_pending_torque_impulse"),
+                    // Godot's add_constant_* accumulate onto the real
+                    // `constant_force` / `constant_torque` properties, which the
+                    // server re-reads each tick rather than draining.
+                    "add_constant_central_force" | "add_constant_force" => {
+                        ("constant_force", "constant_torque")
+                    }
+                    _ => ("", "constant_torque"),
+                };
+                if linear_key.is_empty() {
+                    accumulate_vec3_prop(self.tree_mut(), nid, torque_key, value);
+                } else {
+                    accumulate_vec3_prop(self.tree_mut(), nid, linear_key, value);
+                    // A positioned force/impulse also induces torque about the
+                    // centre of mass: τ = r × F (Godot takes `position` in global
+                    // space relative to the body's centre of mass).
+                    if let Some(offset) = vec3_arg(args, 1) {
+                        accumulate_vec3_prop(self.tree_mut(), nid, torque_key, offset.cross(value));
+                    }
+                }
+                Some(Variant::Nil)
+            }
+
+            // -- Area3D / Area2D overlap queries (pat-0q2kx.35) ---------------
+            //
+            // The physics phase leaves the current overlap set on the node as
+            // `_overlapping_bodies` (see
+            // `PhysicsServer3D::publish_overlapping_bodies`) because the script
+            // phase holds no handle on the physics server — the same bridge
+            // RayCast2D uses for `_hit_normal`. Godot returns an Array of nodes,
+            // empty (never null) when nothing overlaps.
+            // -- shape owners (pat-s3rrv.25) --
+            //
+            // Godot's `CollisionObject2D` owns a list of shape owners, each with
+            // its own transform. Patina models one collider child as one owner
+            // holding one shape, so owner id == the index picking reports as
+            // `shape_idx` and `shape_owner_get_shape_count` is always 1.
+            //
+            // Answered from the SCENE rather than the physics world: shape owners
+            // are the collider children, so this is correct even for a node that
+            // has not been registered with the server yet — and the script phase
+            // holds no physics handle anyway.
+            "get_shape_owners" => {
+                let count =
+                    crate::physics_server::collider_local_transforms(self.tree(), nid).len();
+                Some(Variant::Array(
+                    (0..count).map(|i| Variant::Int(i as i64)).collect(),
+                ))
+            }
+            "shape_owner_get_shape_count" => {
+                // One shape per owner in Patina's model. Godot allows several,
+                // so this returns 1 rather than the body's total — a script
+                // iterating `0..shape_owner_get_shape_count(id)` must see one
+                // shape per owner, not every shape on the object.
+                let owners = crate::physics_server::collider_local_transforms(self.tree(), nid);
+                let idx = arg_f32(args, 0)?.max(0.0) as usize;
+                Some(Variant::Int(if idx < owners.len() { 1 } else { 0 }))
+            }
+            "shape_owner_get_transform" => {
+                let owners = crate::physics_server::collider_local_transforms(self.tree(), nid);
+                let idx = arg_f32(args, 0)?.max(0.0) as usize;
+                Some(match owners.get(idx) {
+                    Some(tf) => Variant::Transform2D(*tf),
+                    None => Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                })
+            }
+            "get_overlapping_bodies" => Some(match self.tree().get_node(nid) {
+                Some(n) => match n.get_property("_overlapping_bodies") {
+                    Variant::Array(items) => Variant::Array(items),
+                    _ => Variant::Array(Default::default()),
+                },
+                None => Variant::Array(Default::default()),
+            }),
+            "has_overlapping_bodies" => {
+                let count = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property("_overlapping_bodies") {
+                        Variant::Array(items) => items.len(),
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                Some(Variant::Bool(count > 0))
+            }
+
+            // The area-vs-area half of the same surface (pat-0q2kx.112). Only
+            // the bodies half existed, so `get_overlapping_areas()` — Godot's
+            // usual way to ask "which triggers am I inside?" — was unreachable
+            // from script. `_overlapping_areas` is published by
+            // `PhysicsServer::publish_overlapping_areas` alongside the bodies
+            // set, so both answer from the same frame.
+            "get_overlapping_areas" => Some(match self.tree().get_node(nid) {
+                Some(n) => match n.get_property("_overlapping_areas") {
+                    Variant::Array(items) => Variant::Array(items),
+                    _ => Variant::Array(Default::default()),
+                },
+                None => Variant::Array(Default::default()),
+            }),
+            "has_overlapping_areas" => {
+                let count = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property("_overlapping_areas") {
+                        Variant::Array(items) => items.len(),
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                Some(Variant::Bool(count > 0))
+            }
+
+            // Godot's `overlaps_body(node)` / `overlaps_area(node)` answer from
+            // the same live set rather than recomputing, so these are membership
+            // tests over the published arrays. A missing or non-Object argument
+            // is `false`, as Godot returns for a node that is not overlapping.
+            "overlaps_body" | "overlaps_area" => {
+                let key = if method == "overlaps_body" {
+                    "_overlapping_bodies"
+                } else {
+                    "_overlapping_areas"
+                };
+                let target = match args.first() {
+                    Some(Variant::ObjectId(id)) => *id,
+                    _ => return Some(Variant::Bool(false)),
+                };
+                let found = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property(key) {
+                        Variant::Array(items) => items
+                            .to_vec()
+                            .iter()
+                            .any(|v| matches!(v, Variant::ObjectId(id) if *id == target)),
+                        _ => false,
+                    },
+                    None => false,
+                };
+                Some(Variant::Bool(found))
+            }
+
+            // -- Control keyboard focus (pat-0q2kx.84) ------------------------
+            // The viewport owns focus, so these are the only way a script can
+            // ask "am I focused?" or move focus itself — a UI script that calls
+            // `grab_focus()` in `_ready` is the standard Godot idiom.
+            "has_focus" => Some(Variant::Bool(self.tree().has_focus(nid))),
+            "grab_focus" => {
+                self.tree_mut().grab_focus(nid);
+                Some(Variant::Nil)
+            }
+            // Godot's `Control.release_focus` only drops focus when the caller
+            // is the one holding it; releasing from an unfocused control must
+            // not steal focus away from whoever has it.
+            "release_focus" => {
+                if self.tree().has_focus(nid) {
+                    self.tree_mut().release_focus();
+                }
+                Some(Variant::Nil)
+            }
+
+            // -- Control/Window theme overrides (pat-nyn3w) --------------------
+            // `add_theme_<kind>_override(name, value)` is the property
+            // `theme_override_<group>/<name>` the `.tscn` authors and every
+            // theme resolver reads (`control::resolve_theme_color`). truck_town's
+            // speedometer tints its label with it every frame; it was unbound.
+            m if theme_override_group(m).is_some()
+                && self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("Control") || n.is_class("Window")) =>
+            {
+                let (op, group) = theme_override_group(m)?;
+                let key = format!("theme_override_{group}/{}", arg_str(0)?);
+                match op {
+                    "add" => {
+                        let value = args.get(1)?.clone();
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property(&key, value);
+                        }
+                        Some(Variant::Nil)
+                    }
+                    "remove" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.remove_property(&key);
+                        }
+                        Some(Variant::Nil)
+                    }
+                    _ => Some(Variant::Bool(
+                        self.tree()
+                            .get_node(nid)
+                            .is_some_and(|n| !n.get_property(&key).is_nil()),
+                    )),
+                }
+            }
+
+            // -- Node groups --------------------------------------------------
+            "add_to_group" => {
+                let group = arg_str(0)?;
+                let _ = self.tree_mut().add_to_group(nid, &group);
+                Some(Variant::Nil)
+            }
+            "remove_from_group" => {
+                let group = arg_str(0)?;
+                let _ = self.tree_mut().remove_from_group(nid, &group);
+                Some(Variant::Nil)
+            }
+            "is_in_group" => {
+                let group = arg_str(0)?;
+                Some(Variant::Bool(
+                    self.tree()
+                        .get_node(nid)
+                        .map(|n| n.groups().contains(&group))
+                        .unwrap_or(false),
+                ))
+            }
+            // Godot puts this on SceneTree; accepting it on a node too costs
+            // nothing and matches how scripts reach for it.
+            "get_nodes_in_group" => {
+                let group = arg_str(0)?;
+                let ids: Vec<Variant> = self
+                    .tree()
+                    .get_nodes_in_group(&group)
+                    .into_iter()
+                    .map(|n| Variant::ObjectId(n.object_id()))
+                    .collect();
+                Some(Variant::Array(ids.into()))
+            }
+
+            // -- Node tree queries --------------------------------------------
+            "find_child" => {
+                let pattern = arg_str(0)?;
+                // Godot's signature is find_child(pattern, recursive = true, ...).
+                let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
+                // ⚠️ pat-mgixk.60 clause 2 (the `owned` filter) is deliberately
+                // NOT applied here, and the reason is a measurement, not caution:
+                // Godot's `owned = true` default returns only nodes with an
+                // `owner`, and `cross_node_and_native_method_dispatch_test.rs:96`
+                // builds its `Hitbox` with `tree.add_child(.., Node::new(..))`,
+                // which sets no owner. That test asserts at :142 that
+                // `e.find_child("Hitbox")` resolves, and it is GREEN at HEAD — so
+                // honouring the default turns a passing test red. The fixture
+                // encodes the pre-Godot behaviour; fixing it is one `set_owner`
+                // line, but it is another bead's test and runs in other beads'
+                // verify commands, so the call is not this bead's to make
+                // silently. Reported as blocked instead.
+                Some(match self.tree().find_child(nid, &pattern, recursive) {
+                    Some(found) => Variant::ObjectId(found.object_id()),
+                    None => Variant::Nil,
+                })
+            }
+            "has_signal" => {
+                let name = arg_str(0)?;
+                let declared = self
+                    .tree()
+                    .signal_store(nid)
+                    .map(|s| s.has_signal(&name))
+                    .unwrap_or(false);
+                // A signal the class declares counts even with nothing connected.
+                let on_class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| gdobject::class_db::class_has_signal(n.class_name(), &name))
+                    .unwrap_or(false);
+                // ...and a signal the attached SCRIPT declares — Godot's
+                // `Object::has_signal` asks the script first
+                // (`script->has_script_signal`). Both forms: the script calling
+                // `has_signal` on itself is out of the arena while it runs.
+                let in_script = crate::scene_tree::running_script_declares_signal(nid, &name)
+                    || self
+                        .tree()
+                        .get_script(nid)
+                        .is_some_and(|s| s.list_signals().contains(&name));
+                Some(Variant::Bool(declared || on_class || in_script))
+            }
+            // `other.emit_signal("died", 5)` — emitting on ANOTHER node.
+            //
+            // The self form is a script builtin (`try_builtin`), but nothing
+            // dispatched the cross-node form: it is not on the ObjectId method
+            // path and was not in this native table, so `$Enemy.emit_signal(..)`
+            // failed even though `$Enemy.has_signal(..)` answered (pat-0q2kx.16,
+            // whose implement list names `emit_signal via SceneTree`).
+            "emit_signal" => {
+                let name = arg_str(0)?;
+                // Godot passes everything after the signal name as arguments.
+                let signal_args: Vec<Variant> = args.iter().skip(1).cloned().collect();
+                self.tree_mut().emit_signal(nid, &name, &signal_args);
+                // Godot returns an Error code; OK is 0.
+                Some(Variant::Int(0))
+            }
+
+            // -- CanvasItem custom drawing (pat-0q2kx.82) --------------------
+            //
+            // Godot's `_draw` contract: `queue_redraw()` marks the item dirty,
+            // and the `draw_*` calls are only meaningful inside the `_draw` body
+            // that the resulting redraw invokes (canvas_item.cpp). The commands
+            // land in the tree's capture buffer, which
+            // `SceneTree::flush_pending_redraws` opens around each `_draw` — a
+            // `draw_rect` from `_process` is dropped, exactly as Godot drops it.
+            "queue_redraw" => {
+                self.tree_mut().queue_redraw(nid);
+                Some(Variant::Nil)
+            }
+            "is_queued_for_redraw" => Some(Variant::Bool(self.tree().is_queued_for_redraw(nid))),
+            // draw_rect(rect, color, filled = true, width = -1.0)
+            // draw_style_box(stylebox, rect) — CanvasItem's themed-box draw
+            // (pat-s3rrv.215).
+            //
+            // 🔑 It emits through the SAME `StyleBox::draw` the themed control
+            // path calls, so a script-drawn box and a theme-drawn one cannot
+            // diverge. Reimplementing the geometry here is the obvious shortcut
+            // and it is how the two silently drift apart.
+            //
+            // The argument arrives as a `Variant::Resource`, which is what
+            // `load("res://box.tres")` returns — it carries the file's real
+            // class name and property bag, which is exactly what
+            // `stylebox_from_props` consumes.
+            "draw_style_box" => {
+                let rect = arg_rect2(args, 1)?;
+                let commands = match args.first() {
+                    Some(Variant::Resource(res)) => {
+                        crate::stylebox::stylebox_from_props(&res.class_name, &res.properties)
+                            .map(|sb| sb.draw(rect))
+                    }
+                    _ => None,
+                };
+                // ⚠️ An unrecognised or absent resource draws NOTHING rather
+                // than falling back to a default box. Godot's `draw_style_box`
+                // with a null StyleBox is a no-op, and inventing a grey panel
+                // here would make a broken resource reference look like a
+                // deliberate one.
+                for command in commands.unwrap_or_default() {
+                    self.tree_mut().push_draw_command(command);
+                }
+                Some(Variant::Nil)
+            }
+            "draw_rect" => {
+                let rect = arg_rect2(args, 0)?;
+                let color = arg_color(args, 1).unwrap_or(Color::WHITE);
+                let filled = !matches!(args.get(2), Some(Variant::Bool(false)));
+                self.tree_mut().push_draw_command(DrawCommand::DrawRect {
+                    rect,
+                    color,
+                    filled,
+                });
+                Some(Variant::Nil)
+            }
+            // draw_line(from, to, color, width = -1.0)
+            "draw_line" => {
+                let from = arg_vec2(args, 0)?;
+                let to = arg_vec2(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                // Godot's -1 width means "thinnest line"; the rasterizer wants a
+                // positive pixel width, so a negative/absent width becomes 1.
+                let width = match arg_f32(args, 3) {
+                    Some(w) if w > 0.0 => w,
+                    _ => 1.0,
+                };
+                self.tree_mut().push_draw_command(DrawCommand::DrawLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                });
+                Some(Variant::Nil)
+            }
+            // draw_circle(position, radius, color, filled = true)
+            "draw_circle" => {
+                let center = arg_vec2(args, 0)?;
+                let radius = arg_f32(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawCircle {
+                    center,
+                    radius,
+                    color,
+                });
+                Some(Variant::Nil)
+            }
+            // -- stroke / fill family (pat-0q2kx.129) ------------------------
+            //
+            // These reach `polygon_raster`, which had the scanline fill and the
+            // capped/jointed stroke implemented and unit-tested but no caller
+            // anywhere — so a script could only ever draw rects, circles and
+            // single lines.
+            //
+            // draw_polyline(points, color, width = -1.0, antialiased = false)
+            "draw_polyline" | "draw_polyline_colors" => {
+                let points = arg_vec2_array(args, 0)?;
+                // `draw_polyline_colors` takes a PackedColorArray in slot 1;
+                // the software path has no per-vertex interpolation, so the
+                // first color applies to the whole stroke.
+                let color = arg_color(args, 1)
+                    .or_else(|| arg_first_color(args, 1))
+                    .unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawPolyline {
+                        points,
+                        color,
+                        width: positive_width(args, 2),
+                        closed: false,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_multiline(points, color, width = -1.0)
+            "draw_multiline" | "draw_multiline_colors" => {
+                let points = arg_vec2_array(args, 0)?;
+                let color = arg_color(args, 1)
+                    .or_else(|| arg_first_color(args, 1))
+                    .unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawMultiline {
+                        points,
+                        color,
+                        width: positive_width(args, 2),
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_dashed_line(from, to, color, width = -1.0, dash = 2.0)
+            "draw_dashed_line" => {
+                let from = arg_vec2(args, 0)?;
+                let to = arg_vec2(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                let dash = match arg_f32(args, 4) {
+                    Some(d) if d > 0.0 => d,
+                    _ => 2.0,
+                };
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawDashedLine {
+                        from,
+                        to,
+                        color,
+                        width: positive_width(args, 3),
+                        dash,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_arc(center, radius, start_angle, end_angle, point_count,
+            //          color, width = -1.0, antialiased = false)
+            "draw_arc" => {
+                let center = arg_vec2(args, 0)?;
+                let radius = arg_f32(args, 1)?;
+                let start_angle = arg_f32(args, 2)?;
+                let end_angle = arg_f32(args, 3)?;
+                let point_count = match args.get(4) {
+                    Some(Variant::Int(i)) if *i > 1 => *i as u32,
+                    Some(Variant::Float(f)) if *f > 1.0 => *f as u32,
+                    _ => 24,
+                };
+                let color = arg_color(args, 5).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawArc {
+                    center,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    point_count,
+                    color,
+                    width: positive_width(args, 6),
+                });
+                Some(Variant::Nil)
+            }
+            // draw_polygon(points, colors, uvs = [], texture = null)
+            // draw_colored_polygon(points, color, uvs = [], texture = null)
+            "draw_polygon" | "draw_colored_polygon" => {
+                let points = arg_vec2_array(args, 0)?;
+                // `draw_polygon` takes an array of colors, `draw_colored_polygon`
+                // a single one — accept either shape in slot 1.
+                let colors = match arg_color(args, 1) {
+                    Some(c) => vec![c],
+                    None => {
+                        let list = arg_color_array(args, 1);
+                        if list.is_empty() {
+                            vec![Color::WHITE]
+                        } else {
+                            list
+                        }
+                    }
+                };
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawPolygon { points, colors });
+                Some(Variant::Nil)
+            }
+            // draw_texture(texture, position, modulate = WHITE). Patina's
+            // DrawCommand addresses textures by path, so the `texture` argument
+            // is the resource path a script would `preload`; the destination
+            // rect is the texture's own size, which the renderer resolves, so a
+            // zero-size rect at `position` stands for "natural size".
+            "draw_texture" => {
+                let path = arg_str(0)?;
+                let position = arg_vec2(args, 1)?;
+                let modulate = arg_color(args, 2).unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawTextureRect {
+                        texture_path: path,
+                        rect: Rect2::new(position, Vector2::ZERO),
+                        modulate,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_texture_rect(texture, rect, tile, modulate = WHITE)
+            "draw_texture_rect" => {
+                let path = arg_str(0)?;
+                let rect = arg_rect2(args, 1)?;
+                let modulate = arg_color(args, 3).unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawTextureRect {
+                        texture_path: path,
+                        rect,
+                        modulate,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_string(font, pos, text, alignment, width, font_size, modulate)
+            // — the positional signature from Godot's CanvasItem. `font` and the
+            // alignment/width layout arguments have no representation in
+            // `DrawCommand::DrawString`, so they are accepted and ignored rather
+            // than making the call fail.
+            "draw_string" => {
+                let position = arg_vec2(args, 1)?;
+                let text = match args.get(2) {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                    _ => return Some(Variant::Nil),
+                };
+                let font_size = match args.get(5) {
+                    Some(Variant::Int(n)) if *n > 0 => *n as u32,
+                    // Godot's default `font_size` is 16.
+                    _ => 16,
+                };
+                let color = arg_color(args, 6).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawString {
+                    text,
+                    position,
+                    color,
+                    font_size,
+                });
+                Some(Variant::Nil)
+            }
+
+            // -- HTTPRequest (pat-s3rrv.78) ----------------------------------
+            //
+            // ⚠️ `HTTPRequest` was registered in ClassDB with a 602-line
+            // transport behind it and NO route from a script to either. A
+            // `.tscn` node of that type loaded, answered `get_class()`
+            // correctly, and did nothing — which is worse than being absent,
+            // because everything except the behaviour says it works.
+            "request" if is_http_request(self.tree(), nid) => {
+                let url = arg_str(0)?;
+                // Godot: request(url, custom_headers, method, request_data).
+                // The method ordinal is argument 2 (`http_client.h:118-126`).
+                let method_ord = match args.get(2) {
+                    Some(Variant::Int(m)) => *m,
+                    _ => 0,
+                };
+                let Some(method) = crate::http_request_node::method_from_int(method_ord) else {
+                    // ERR_UNAVAILABLE. OPTIONS/TRACE/CONNECT have no transport
+                    // variant, and silently substituting GET would look like a
+                    // successful request while doing something else entirely.
+                    return Some(Variant::Int(2));
+                };
+                let body = match args.get(3) {
+                    Some(Variant::String(s)) => s.clone().into_bytes(),
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    _ => Vec::new(),
+                };
+                // ⚠️ Resolved BEFORE the mutable borrow below; reading the
+                // tree inside the `http_request_for` call is E0502. The proxies
+                // are read here for exactly the same reason.
+                let settings = http_settings(self.tree(), nid);
+                let proxies = http_proxies(self.tree(), nid);
+                let headers = custom_headers_arg(args);
+                let code = self
+                    .tree_mut()
+                    .http_request_for(nid)
+                    .request_with_proxies(&url, method, body, &headers, settings, &proxies);
+                Some(Variant::Int(code as i64))
+            }
+            // `request_raw` differs only in taking the body as bytes, which the
+            // arm above already accepts.
+            "request_raw" if is_http_request(self.tree(), nid) => {
+                let url = arg_str(0)?;
+                let method_ord = match args.get(2) {
+                    Some(Variant::Int(m)) => *m,
+                    _ => 0,
+                };
+                let Some(method) = crate::http_request_node::method_from_int(method_ord) else {
+                    return Some(Variant::Int(2));
+                };
+                let body = match args.get(3) {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.clone().into_bytes(),
+                    _ => Vec::new(),
+                };
+                // ⚠️ Resolved BEFORE the mutable borrow below; reading the
+                // tree inside the `http_request_for` call is E0502. The proxies
+                // are read here for exactly the same reason.
+                let settings = http_settings(self.tree(), nid);
+                let proxies = http_proxies(self.tree(), nid);
+                let headers = custom_headers_arg(args);
+                let code = self
+                    .tree_mut()
+                    .http_request_for(nid)
+                    .request_with_proxies(&url, method, body, &headers, settings, &proxies);
+                Some(Variant::Int(code as i64))
+            }
+            // ⚠️ `cancel_request` returns VOID and emits nothing. The
+            // capability has existed on the node the whole time
+            // (`HttpRequestNode::cancel`, which consumes the transport's
+            // recorded failure so no late `request_completed` fires, matching
+            // `http_request.cpp:186-210`) with no route from a script to reach
+            // it — a cancel button in a game could not cancel anything.
+            // 🔑 Registered in ClassDB but, until now, with no arm here — so
+            // `has_method` reported true and the call returned `Nil`. A script
+            // comparing the result against `HTTPClient.STATUS_DISCONNECTED` got
+            // `false` even while idle, which is the failure mode this bead exists
+            // to remove: it looks supported and quietly is not.
+            //
+            // ⚠️ Only two of the ten statuses are reachable, and that is the
+            // transport's shape rather than a shortcut here — see
+            // `http_request_node::STATUS_REQUESTING`. Both values reported are
+            // ones Godot really produces, and both are correct at their endpoint.
+            "get_http_client_status" if is_http_request(self.tree(), nid) => {
+                // ⚠️ Guarded on `has_http_request` so a GETTER does not lazily
+                // create per-node transport state. `http_request_for` is
+                // `entry().or_default()`, so calling it unguarded would allocate
+                // an HttpRequestNode for every node a script merely polls.
+                let requesting = if self.tree().has_http_request(nid) {
+                    self.tree_mut().http_request_for(nid).is_requesting()
+                } else {
+                    false
+                };
+                Some(Variant::Int(if requesting {
+                    crate::http_request_node::STATUS_REQUESTING
+                } else {
+                    crate::http_request_node::STATUS_DISCONNECTED
+                }))
+            }
+            "cancel_request" if is_http_request(self.tree(), nid) => {
+                self.tree_mut().http_request_for(nid).cancel();
+                Some(Variant::Nil)
+            }
+            // Godot exposes `timeout` and `max_redirects` as properties; these
+            // are the bound setter/getter names, and they read and write the
+            // same node properties the `.tscn` does, so `r.timeout = 5.0` and
+            // `r.set_timeout(5.0)` cannot disagree.
+            "set_timeout" if is_http_request(self.tree(), nid) => {
+                let requested = match args.first() {
+                    Some(Variant::Float(f)) => *f,
+                    Some(Variant::Int(i)) => *i as f64,
+                    _ => return Some(Variant::Nil),
+                };
+                let current = http_settings(self.tree(), nid).timeout;
+                // Negative is rejected, not clamped — see `accepted_timeout`.
+                let value = crate::http_request_node::accepted_timeout(current, requested);
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("timeout", Variant::Float(value));
+                }
+                Some(Variant::Nil)
+            }
+            "get_timeout" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Float(http_settings(self.tree(), nid).timeout))
+            }
+            // 🔑 Setters only — Godot exposes NO getter and no property for
+            // either proxy (`doc/classes/HTTPRequest.xml:209-225`). Every other
+            // pair on this node has a `get_*` twin, so adding one here by
+            // symmetry would invent API upstream does not have.
+            //
+            // ⚠️ The first HTTPRequest arms that take a SECOND argument, which
+            // makes the missing-arg default load-bearing: a bare
+            // `set_http_proxy("host")` must fall back to `-1` (= unset), never
+            // to `0`. Port 0 is a real value the "unset" rule does not cover
+            // (`HTTPRequest.xml:215`, `http_client_tcp.cpp:771` — the test is
+            // `port == -1` exactly), so defaulting to 0 would leave the node
+            // holding a live proxy the script never asked for.
+            "set_http_proxy" | "set_https_proxy" if is_http_request(self.tree(), nid) => {
+                let host = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let port = match args.get(1) {
+                    Some(Variant::Int(p)) => *p,
+                    _ => -1,
+                };
+                // Matched by name rather than `if/else`, following the
+                // `apply_*`/`add_constant_*` arm at :3541. ⚠️ Not cosmetic: an
+                // `else` would silently classify any third name later added to
+                // the pattern above as the HTTPS proxy.
+                let (host_key, port_key): (&str, &str) = match method {
+                    "set_http_proxy" => ("http_proxy_host", "http_proxy_port"),
+                    "set_https_proxy" => ("https_proxy_host", "https_proxy_port"),
+                    _ => return Some(Variant::Nil),
+                };
+                // Stored verbatim; the "unset" rule is applied once, on read,
+                // by `http_request_node::proxy_settings`. Normalising here as
+                // well would give two places to disagree.
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(host_key, Variant::String(host));
+                    n.set_property(port_key, Variant::Int(port));
+                }
+                Some(Variant::Nil)
+            }
+            "set_max_redirects" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Int(amount)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Stored verbatim, negatives included: a negative means
+                // UNLIMITED (`http_request.cpp:255`), not "none".
+                let amount = *amount;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("max_redirects", Variant::Int(amount));
+                }
+                Some(Variant::Nil)
+            }
+            "get_max_redirects" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Int(http_settings(self.tree(), nid).max_redirects))
+            }
+            // `body_size_limit` and `download_file` shape what the completion
+            // DELIVERS rather than what the request sends, so they are read at
+            // emit time by `SceneTree::process_http_requests`. These arms only
+            // have to store them where that reader looks — the node itself.
+            "set_body_size_limit" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Int(bytes)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Stored verbatim, negatives included: negative is NO LIMIT
+                // (`http_request.cpp:408`), and the default is -1.
+                let bytes = *bytes;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("body_size_limit", Variant::Int(bytes));
+                }
+                Some(Variant::Nil)
+            }
+            "get_body_size_limit" if is_http_request(self.tree(), nid) => Some(Variant::Int(
+                http_delivery(self.tree(), nid).body_size_limit,
+            )),
+            // pat-s3rrv.237. Godot: `set_tls_options(client_options)`, void.
+            //
+            // Stored rather than acted on, and that is the correct behaviour
+            // here rather than a stub: on web the browser owns the TLS
+            // handshake through fetch, so these are configuration a script sets
+            // and reads back, not something this layer applies. Accepting it is
+            // the whole point — `TLSOptions` is a real class as of this bead,
+            // and a script passing one to an HTTPRequest must not error.
+            //
+            // The argument arrives as a `Variant::ObjectId` (TLSOptions is a
+            // handle-table object in gdscript-interop), so it is stored
+            // verbatim; unwrapping it here would just lose the identity.
+            "set_tls_options" if is_http_request(self.tree(), nid) => {
+                let opts = args.first().cloned().unwrap_or(Variant::Nil);
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("tls_options", opts);
+                }
+                Some(Variant::Nil)
+            }
+            // ⚠️ No `get_tls_options` arm on purpose. Godot's HTTPRequest has
+            // `set_tls_options` and no getter — no method, no `tls_options`
+            // member — so adding one would invent API in a parity port. The
+            // stored property is engine-side state a test can read, not a script
+            // surface.
+            "set_download_file" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::String(path)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let path = path.clone();
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("download_file", Variant::String(path));
+                }
+                Some(Variant::Nil)
+            }
+            "get_download_file" if is_http_request(self.tree(), nid) => Some(Variant::String(
+                http_delivery(self.tree(), nid).download_file,
+            )),
+            "set_accept_gzip" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Bool(enable)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let enable = *enable;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("accept_gzip", Variant::Bool(enable));
+                }
+                Some(Variant::Nil)
+            }
+            // ⚠️ The getter is `is_accepting_gzip`, not `get_accept_gzip`
+            // (`HTTPRequest.xml:236` names it as the property's getter). A
+            // script calling the name the setter implies would miss.
+            "is_accepting_gzip" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Bool(http_delivery(self.tree(), nid).accept_gzip))
+            }
+            // -- RichTextLabel text API (pat-s3rrv.74) -----------------------
+            //
+            // Godot builds rich text imperatively as well as declaratively;
+            // without these a script could only ever set the whole `bbcode_text`
+            // string, so nothing could append a line to a log or a dialogue box —
+            // the two things a RichTextLabel is usually for.
+            //
+            // All of them work on the same source string the draw arm reads, so
+            // a script append shows up in the very next frame with no separate
+            // model to fall out of sync.
+            // Godot's push/pop TAG STACK (pat-s3rrv.74). `push_color(c)` opens a
+            // run, `pop()` closes the most recent one — the API a log or chat
+            // box uses to build a line without hand-writing BBCode.
+            //
+            // 🔑 These emit into the SAME source string `append_text` appends
+            // to, which is the whole reason the stack needs no parallel
+            // document model: the draw arm re-parses that string every frame,
+            // so a push shows up in the next frame like any other edit.
+            "push_color" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[color={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/color]");
+                Some(Variant::Nil)
+            }
+            "push_bgcolor" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[bgcolor={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/bgcolor]");
+                Some(Variant::Nil)
+            }
+            "push_fgcolor" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[fgcolor={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/fgcolor]");
+                Some(Variant::Nil)
+            }
+            "push_underline" if is_rich_text_label(self.tree(), nid) => {
+                richtext_push(self.tree_mut(), nid, "[u]", "[/u]");
+                Some(Variant::Nil)
+            }
+            "push_strikethrough" if is_rich_text_label(self.tree(), nid) => {
+                richtext_push(self.tree_mut(), nid, "[s]", "[/s]");
+                Some(Variant::Nil)
+            }
+            // `push_meta(v)` is what makes a run clickable — the payload
+            // `meta_clicked` carries. The parser models it as `[url=...]`.
+            "push_meta" if is_rich_text_label(self.tree(), nid) => {
+                let Some(meta) = args.first().and_then(variant_string) else {
+                    return Some(Variant::Nil);
+                };
+                let open = format!("[url={meta}]");
+                richtext_push(self.tree_mut(), nid, &open, "[/url]");
+                Some(Variant::Nil)
+            }
+            // Godot's `pop()` returns nothing and is a no-op on an empty stack,
+            // so an unbalanced script misbehaves rather than crashing — the
+            // same forgiveness the engine gives.
+            "pop" if is_rich_text_label(self.tree(), nid) => {
+                richtext_pop(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "pop_all" if is_rich_text_label(self.tree(), nid) => {
+                while richtext_pop(self.tree_mut(), nid) {}
+                Some(Variant::Nil)
+            }
+            "append_text" if is_rich_text_label(self.tree(), nid) => {
+                let extra = arg_str(0)?;
+                let joined = format!("{}{}", richtext_src(self.tree(), nid), extra);
+                set_richtext(self.tree_mut(), nid, joined);
+                Some(Variant::Nil)
+            }
+            // ⚠️ `add_text` adds RAW text: "Adds raw non-BBCode-parsed text to the
+            // tag stack" (RichTextLabel.xml). Appending it unescaped would let a
+            // stray `[` in user data — a chat line, a filename — be read as a
+            // tag and silently swallow the rest of the string. The brackets are
+            // escaped with Godot's own `[lb]`/`[rb]`, which the parser now
+            // understands, so the text round-trips through `get_parsed_text`.
+            "add_text" if is_rich_text_label(self.tree(), nid) => {
+                let raw = arg_str(0)?;
+                // ⚠️ ONE pass, not two chained `replace`s. Escaping `[` emits a
+                // `]` of its own, so a following `replace(']', "[rb]")` mangles
+                // the escape just written — `[lb]` becomes `[lb[rb]`, an unknown
+                // tag that is then stripped, and the bracket the user typed
+                // disappears entirely. No ordering of two replaces avoids it,
+                // because each one emits both characters the other rewrites.
+                let escaped: String = raw.chars().fold(String::new(), |mut acc, c| {
+                    match c {
+                        '[' => acc.push_str("[lb]"),
+                        ']' => acc.push_str("[rb]"),
+                        other => acc.push(other),
+                    }
+                    acc
+                });
+                let joined = format!("{}{}", richtext_src(self.tree(), nid), escaped);
+                set_richtext(self.tree_mut(), nid, joined);
+                Some(Variant::Nil)
+            }
+            "clear" if is_rich_text_label(self.tree(), nid) => {
+                set_richtext(self.tree_mut(), nid, String::new());
+                Some(Variant::Nil)
+            }
+            "get_parsed_text" if is_rich_text_label(self.tree(), nid) => Some(Variant::String(
+                crate::control_render::richtext_parsed_text(self.tree(), nid),
+            )),
+            "get_total_character_count" if is_rich_text_label(self.tree(), nid) => {
+                // Counts PARSED characters, so markup never inflates the total —
+                // this is the denominator a typewriter effect drives
+                // `visible_characters` against.
+                let n = crate::control_render::richtext_parsed_text(self.tree(), nid)
+                    .chars()
+                    .count();
+                Some(Variant::Int(n as i64))
+            }
+
+            // -- LineEdit / TextEdit editing (pat-0q2kx.87) ------------------
+            //
+            // Registered in ClassDB, so without these arms `node_has_method`
+            // would answer true and the call would return the Nil placeholder —
+            // a method that exists and does nothing.
+            "select_all" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                crate::line_edit::select_all(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "deselect" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                crate::line_edit::deselect(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "has_selection" if crate::line_edit::is_text_input(self.tree(), nid) => Some(
+                Variant::Bool(crate::line_edit::has_selection(self.tree(), nid)),
+            ),
+            "get_selected_text" if crate::line_edit::is_text_input(self.tree(), nid) => Some(
+                Variant::String(crate::line_edit::selected_text(self.tree(), nid)),
+            ),
+            "insert_text_at_caret" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                let insert = arg_str(0)?;
+                crate::line_edit::insert_text_at_caret(self.tree_mut(), nid, &insert);
+                Some(Variant::Nil)
+            }
+
+            // `Control.accept_event()` — Godot's shorthand for
+            // `get_viewport().set_input_as_handled()` (scene/gui/control.cpp),
+            // and the documented way a `_gui_input` handler stops an event from
+            // bubbling to ancestor Controls and the later input stages.
+            "accept_event" => {
+                self.tree_mut().set_input_as_handled();
+                Some(Variant::Nil)
+            }
+
+            // The item-view Controls (pat-0q2kx.85). Their methods are
+            // class-specific — `select` means one thing on an ItemList and
+            // another on an OptionButton — so they dispatch on the node's class
+            // inside `item_views` rather than adding a dozen arms here. Last,
+            // so a method named above keeps its meaning for every class.
+            _ => {
+                if let Some(value) =
+                    crate::item_views::call_item_view_method(self.tree_mut(), nid, method, args)
+                {
+                    return Some(value);
+                }
+                // LAST of all: a registered ClassDB property accessor
+                // (pat-mgixk.8). Godot routes every bound getter/setter method
+                // to its property, so `set_modulate` / `get_rotation_degrees`
+                // and ~500 siblings work without a per-method arm. Placed here
+                // so every explicit meaning above keeps precedence, and it
+                // still answers `None` for a name that is not an accessor —
+                // which is what keeps an unknown method an error rather than a
+                // silent `Nil`.
+                let class_name = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_owned())?;
+                crate::core_node_methods::call_accessor_backed_method(
+                    self,
+                    node,
+                    &class_name,
+                    method,
+                    args,
+                )
+            }
+        }
+    }
+
+    // -- Input propagation (pat-nzgdu.83) -----------------------------------
+
+    fn set_input_as_handled(&mut self) {
+        self.tree_mut().set_input_as_handled();
+    }
+
+    fn is_input_handled(&self) -> bool {
+        self.tree().is_input_handled()
+    }
+
+    // -- Viewport / Window objects (pat-mgixk.59) ---------------------------
+
+    fn node_viewport(&self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `viewport::get_viewport` falls back to the tree root, which is always
+        // a Window and therefore always a Viewport — so this is `None` only for
+        // a receiver that names no node at all.
+        self.tree().get_node(nid)?;
+        Some(crate::viewport::get_viewport(self.tree(), nid).raw())
+    }
+
+    fn node_window(&self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_node(nid)?;
+        Some(crate::viewport::get_window(self.tree(), nid).raw())
+    }
+
+    // -- Per-node process toggles (pat-nzgdu.137) ---------------------------
+
+    fn set_process(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_process(nid, enabled);
+    }
+
+    fn is_processing(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_processing(nid)
+    }
+
+    fn set_physics_process(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_physics_process(nid, enabled);
+    }
+
+    fn set_process_input(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_process_input(nid, enabled);
+    }
+
+    fn is_processing_input(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_processing_input(nid)
+    }
+
+    // -- PhysicsServer2D (pat-0q2kx.200) ------------------------------------
+    //
+    // Each of these routes to the `PhysicsServer` bound for this script phase.
+    // With no server bound they fall through to the trait defaults' behaviour
+    // (invalid RID / no result) rather than inventing a value.
+
+    fn physics2d_circle_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_circle_shape_create())
+    }
+
+    fn physics2d_rectangle_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_rectangle_shape_create())
+    }
+
+    fn physics2d_shape_set_data_radius(&mut self, shape: u64, radius: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data(shape, radius, None))
+    }
+
+    fn physics2d_shape_set_data_extents(&mut self, shape: u64, extents: (f32, f32)) -> bool {
+        let extents = Vector2::new(extents.0, extents.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data(shape, 0.0, Some(extents)))
+    }
+
+    fn physics2d_body_create(&mut self) -> u64 {
+        self.physics_mut().map_or(0, |p| p.server_body_create())
+    }
+
+    fn physics2d_body_set_space(&mut self, body: u64, space: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_space(body, space))
+    }
+
+    fn physics2d_body_add_shape(&mut self, body: u64, shape: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_add_shape(body, shape))
+    }
+
+    fn physics2d_body_set_state_vec2(&mut self, body: u64, state: i64, value: (f32, f32)) -> bool {
+        let value = Vector2::new(value.0, value.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_state_vec2(body, state, value))
+    }
+
+    // pat-s3rrv.191: the tier-1 PhysicsServer2D surface. Each of these is the
+    // thin half — the RID bookkeeping and the world mutation live in
+    // `physics_server.rs`, so this file stays a routing table.
+    fn physics2d_capsule_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_capsule_shape_create())
+    }
+
+    fn physics2d_shape_set_data_capsule(&mut self, shape: u64, radius: f32, height: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data_capsule(shape, radius, height))
+    }
+
+    fn physics2d_body_set_param(&mut self, body: u64, param: i64, value: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_param(body, param, value))
+    }
+
+    fn physics2d_body_get_param(&self, body: u64, param: i64) -> Option<f32> {
+        self.physics()
+            .and_then(|p| p.server_body_get_param(body, param))
+    }
+
+    fn physics2d_body_set_collision_layers(
+        &mut self,
+        body: u64,
+        layers: u32,
+        is_mask: bool,
+    ) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_collision_layers(body, layers, is_mask))
+    }
+
+    fn physics2d_body_add_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_add_collision_exception(body, excepted))
+    }
+
+    fn physics2d_body_remove_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_remove_collision_exception(body, excepted))
+    }
+
+    fn physics2d_body_apply_impulse(
+        &mut self,
+        body: u64,
+        impulse: (f32, f32),
+        at_point: Option<(f32, f32)>,
+    ) -> bool {
+        let impulse = Vector2::new(impulse.0, impulse.1);
+        let at = at_point.map(|(x, y)| Vector2::new(x, y));
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_impulse(body, impulse, at))
+    }
+
+    fn physics2d_body_apply_force(
+        &mut self,
+        body: u64,
+        force: (f32, f32),
+        at_point: Option<(f32, f32)>,
+    ) -> bool {
+        let force = Vector2::new(force.0, force.1);
+        let at = at_point.map(|(x, y)| Vector2::new(x, y));
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_force(body, force, at))
+    }
+
+    fn physics2d_body_apply_torque_impulse(&mut self, body: u64, torque: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_torque_impulse(body, torque))
+    }
+
+    fn physics2d_body_get_linear_velocity(&self, body: u64) -> Option<(f32, f32)> {
+        self.physics()
+            .and_then(|p| p.server_body_linear_velocity(body))
+            .map(|v| (v.x, v.y))
+    }
+
+    fn physics2d_body_get_angular_velocity(&self, body: u64) -> Option<f32> {
+        self.physics()
+            .and_then(|p| p.server_body_angular_velocity(body))
+    }
+
+    fn physics2d_body_get_sleep_state(&self, body: u64, can_sleep: bool) -> Option<bool> {
+        self.physics()
+            .and_then(|p| p.server_body_sleep_state(body, can_sleep))
+    }
+
+    fn physics2d_area_create(&mut self) -> u64 {
+        self.physics_mut().map_or(0, |p| p.server_area_create())
+    }
+
+    fn physics2d_area_set_space(&mut self, area: u64, space: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_space(area, space))
+    }
+
+    fn physics2d_area_add_shape(&mut self, area: u64, shape: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_add_shape(area, shape))
+    }
+
+    fn physics2d_area_set_position(&mut self, area: u64, position: (f32, f32)) -> bool {
+        let position = Vector2::new(position.0, position.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_position(area, position))
+    }
+
+    fn physics2d_area_set_param(
+        &mut self,
+        area: u64,
+        param: i64,
+        scalar: f32,
+        vector: (f32, f32),
+    ) -> bool {
+        let vector = Vector2::new(vector.0, vector.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_param(area, param, scalar, vector))
+    }
+
+    fn physics2d_area_set_monitorable(&mut self, area: u64, monitorable: bool) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_monitorable(area, monitorable))
+    }
+
+    fn physics2d_body_get_position(&self, body: u64) -> Option<(f32, f32)> {
+        let pos = self.physics()?.server_body_position(body)?;
+        Some((pos.x, pos.y))
+    }
+
+    fn physics2d_body_test_motion(
+        &self,
+        body: u64,
+        motion: (f32, f32),
+    ) -> Option<(bool, (f32, f32))> {
+        let physics = self.physics()?;
+        // An RID with no space has no world position to sweep from; reporting
+        // `None` keeps that distinguishable from "swept and hit nothing".
+        physics.server_body_position(body)?;
+        let (collided, travel) =
+            physics.server_body_test_motion(body, Vector2::new(motion.0, motion.1));
+        Some((collided, (travel.x, travel.y)))
+    }
+
+    fn physics2d_node_test_move(&self, node: u64, motion: (f32, f32)) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.physics()
+            .is_some_and(|p| p.node_test_move(nid, Vector2::new(motion.0, motion.1)))
+    }
+
+    /// `PhysicsBody2D.add_collision_exception_with(body)` (pat-s3rrv.100).
+    ///
+    /// ⚠️ Both nodes must already be REGISTERED bodies. A script calling this
+    /// in `_ready` — before the first `sync_to_physics` has run — resolves no
+    /// `BodyId` and the exception is silently dropped, which is why this
+    /// answers a bool the node-method arm can surface rather than returning
+    /// unit and pretending it worked.
+    fn physics2d_node_add_collision_exception(&mut self, node: u64, other: u64) -> bool {
+        let a_nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let b_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+        let Some(phys) = self.physics_mut() else {
+            return false;
+        };
+        let (Some(a), Some(b)) = (phys.body_for_node(a_nid), phys.body_for_node(b_nid)) else {
+            return false;
+        };
+        match phys.world_mut().get_body_mut(a) {
+            Some(body) => {
+                body.add_collision_exception(b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn physics2d_node_remove_collision_exception(&mut self, node: u64, other: u64) -> bool {
+        let a_nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let b_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+        let Some(phys) = self.physics_mut() else {
+            return false;
+        };
+        let (Some(a), Some(b)) = (phys.body_for_node(a_nid), phys.body_for_node(b_nid)) else {
+            return false;
+        };
+        match phys.world_mut().get_body_mut(a) {
+            Some(body) => {
+                body.remove_collision_exception(b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The excepted bodies as node object ids, in the order they were added.
+    ///
+    /// A `BodyId` with no node behind it is dropped rather than reported as a
+    /// zero id: Godot hands back an Array of real nodes, and a script doing
+    /// `for b in get_collision_exceptions(): b.queue_free()` must not be given
+    /// something it cannot call methods on.
+    fn physics2d_node_get_collision_exceptions(&self, node: u64) -> Vec<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(phys) = self.physics() else {
+            return Vec::new();
+        };
+        let Some(id) = phys.body_for_node(nid) else {
+            return Vec::new();
+        };
+        let Some(body) = phys.world().get_body(id) else {
+            return Vec::new();
+        };
+        body.collision_exceptions
+            .iter()
+            .filter_map(|bid| phys.node_for_body(*bid))
+            .map(|n| n.object_id().raw())
+            .collect()
+    }
+
+    /// `RayCast2D.force_raycast_update()` (pat-0q2kx.32) — runs the very same
+    /// `raycast2d::force_raycast_update` the physics tick runs
+    /// (`main_loop.rs::process_raycasts`), so a scripted update and a ticked one
+    /// cannot drift apart.
+    ///
+    /// The physics server is resolved from its stored *address* rather than via
+    /// [`Self::physics`]: that helper borrows `&self`, which would collide with
+    /// the `&mut SceneTree` this call also needs. Reading the address out as a
+    /// `usize` first keeps the two borrows independent — which is the reason the
+    /// server is held as an address in the first place.
+    fn force_raycast_update_2d(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return false;
+        }
+        // SAFETY: identical contract to `physics()` — `set_script_physics_server`
+        // stored the address of a live `PhysicsServer` that `MainLoop` clears
+        // before the server can move or drop. The server is a sibling of the
+        // tree, never stored inside it, so this shared borrow cannot alias the
+        // `&mut SceneTree` taken on the next line.
+        let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+        crate::raycast2d::force_raycast_update(self.tree_mut(), physics, nid)
+    }
+
+    fn is_physics_processing(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_physics_processing(nid)
+    }
+
+    fn request_ready(&mut self, node: u64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().request_node_ready(nid);
+    }
+
+    // -- AudioServer singleton (pat-s3rrv.6) --------------------------------
+    //
+    // Every one of these addresses the live `AudioServer` that `MainLoop`'s
+    // `AudioServerBridge` mixes with each frame, bound by address for the
+    // duration of the script phase. Nothing bound (a bare accessor, or a script
+    // running outside a `MainLoop` phase) leaves the trait defaults in force.
+    //
+    // Godot indexes buses with a signed int and tolerates a bad index by doing
+    // nothing, so every method funnels through `usize::try_from` and reports
+    // failure instead of panicking on a negative or out-of-range bus.
+
+    fn audio_get_bus_index(&self, name: &str) -> i64 {
+        self.audio()
+            .and_then(|a| a.mixer().get_bus_by_name(name))
+            .map_or(-1, |i| i as i64)
+    }
+
+    fn audio_get_bus_count(&self) -> i64 {
+        self.audio().map_or(0, |a| a.mixer().bus_count() as i64)
+    }
+
+    fn audio_get_bus_name(&self, idx: i64) -> Option<String> {
+        let i = usize::try_from(idx).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.name().to_string())
+    }
+
+    fn audio_set_bus_name(&mut self, idx: i64, name: &str) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let name = name.to_string();
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_name(name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    // -- bus effects, sends, linear volume, layouts (pat-mgixk.90) ---------
+
+    fn audio_add_bus_effect(
+        &mut self,
+        bus: i64,
+        class_name: &str,
+        properties: &[(String, Variant)],
+        at_position: i64,
+    ) -> bool {
+        /// Constructs a `gdaudio` effect from the class name and properties that
+        /// `AudioEffect*.new()` carries.
+        ///
+        /// 🔑 The caller's object is NOT stored. `AudioEffectAmplify.new()` yields a
+        /// `Variant::Resource` holding the class name plus that class's ClassDB
+        /// property defaults, and Patina keeps an effect's running state in its bus
+        /// slot — so the effect is rebuilt here from the name and parameters.
+        ///
+        /// ⚠️ Only the classes that can be constructed CORRECTLY are listed. The
+        /// rest answer `None` so `add_bus_effect` reports failure, rather than
+        /// silently installing a different effect than the script asked for —
+        /// `AudioEffectCompressor`, `AudioEffectFilter` and the EQ family take
+        /// constructor arguments this mapping has no values for.
+        fn build_audio_effect(
+            class_name: &str,
+            properties: &[(String, Variant)],
+        ) -> Option<Box<dyn gdaudio::effects::AudioEffect>> {
+            use gdaudio::effects as fx;
+            let float_prop = |key: &str, fallback: f32| -> f32 {
+                properties
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .and_then(|(_, v)| match v {
+                        Variant::Float(f) => Some(*f as f32),
+                        Variant::Int(i) => Some(*i as f32),
+                        _ => None,
+                    })
+                    .unwrap_or(fallback)
+            };
+            match class_name {
+                // The one class whose authored parameter is carried through: the
+                // acceptance sets `volume_db` and asserts the mix changes.
+                "AudioEffectAmplify" => Some(Box::new(fx::AudioEffectAmplify::new(float_prop(
+                    "volume_db",
+                    0.0,
+                )))),
+                "AudioEffectReverb" => Some(Box::new(fx::AudioEffectReverb::default())),
+                "AudioEffectDelay" => Some(Box::new(fx::AudioEffectDelay::default())),
+                "AudioEffectDistortion" => Some(Box::new(fx::AudioEffectDistortion::default())),
+                "AudioEffectPanner" => Some(Box::new(fx::AudioEffectPanner::default())),
+                "AudioEffectStereoEnhance" => {
+                    Some(Box::new(fx::AudioEffectStereoEnhance::default()))
+                }
+                "AudioEffectPhaser" => Some(Box::new(fx::AudioEffectPhaser::default())),
+                "AudioEffectChorus" => Some(Box::new(fx::AudioEffectChorus::default())),
+                "AudioEffectCapture" => Some(Box::new(fx::AudioEffectCapture::default())),
+                "AudioEffectRecord" => Some(Box::new(fx::AudioEffectRecord::default())),
+                _ => None,
+            }
+        }
+
+        let Ok(i) = usize::try_from(bus) else {
+            return false;
+        };
+        let Some(effect) = build_audio_effect(class_name, properties) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let Some(b) = audio.mixer_mut().get_bus_mut(i) else {
+            return false;
+        };
+        // Godot's `at_position` inserts; `-1` appends. `EffectChain::insert`
+        // exists, so this is the chain's own operation rather than an
+        // append-then-shuffle.
+        match usize::try_from(at_position) {
+            Ok(at) => {
+                let clamped = at.min(b.effects().len());
+                b.effects_mut().insert(clamped, effect);
+            }
+            // Negative (Godot's default -1) appends.
+            Err(_) => b.effects_mut().add(effect),
+        }
+        true
+    }
+
+    fn audio_remove_bus_effect(&mut self, bus: i64, effect_idx: i64) -> bool {
+        let (Ok(i), Ok(e)) = (usize::try_from(bus), usize::try_from(effect_idx)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().remove(e).is_some(),
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_effect_count(&self, bus: i64) -> Option<i64> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.effects().len() as i64)
+    }
+
+    fn audio_swap_bus_effects(&mut self, bus: i64, a: i64, b_idx: i64) -> bool {
+        let (Ok(i), Ok(x), Ok(y)) = (
+            usize::try_from(bus),
+            usize::try_from(a),
+            usize::try_from(b_idx),
+        ) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().swap(x, y),
+            None => false,
+        }
+    }
+
+    fn audio_set_bus_effect_enabled(&mut self, bus: i64, effect_idx: i64, on: bool) -> bool {
+        let (Ok(i), Ok(e)) = (usize::try_from(bus), usize::try_from(effect_idx)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().set_enabled(e, on),
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_effect_enabled(&self, bus: i64, effect_idx: i64) -> Option<bool> {
+        let (i, e) = (
+            usize::try_from(bus).ok()?,
+            usize::try_from(effect_idx).ok()?,
+        );
+        let bus_ref = self.audio()?.mixer().get_bus(i)?;
+        if e >= bus_ref.effects().len() {
+            return None;
+        }
+        Some(bus_ref.effects().is_enabled(e))
+    }
+
+    /// The Godot class name of the effect in a slot.
+    ///
+    /// ⚠️ Derived as `AudioEffect` + the effect's own short `name()`, because
+    /// nothing stores the class name alongside the effect. That is exact for
+    /// every type EXCEPT `AudioEffectFilterCascade`, whose `name()` is also
+    /// `"Filter"` — so a cascade reports `AudioEffectFilter` and the two are
+    /// indistinguishable here. Naming the limitation rather than hiding it: the
+    /// fix is a `godot_class()` on the `AudioEffect` trait, which lives in
+    /// `gdaudio` and is a separate change.
+    fn audio_bus_effect_class(&self, bus: i64, effect_idx: i64) -> Option<String> {
+        let (i, e) = (
+            usize::try_from(bus).ok()?,
+            usize::try_from(effect_idx).ok()?,
+        );
+        // 🔑 Delegate rather than rebuild the name. `AudioServer::bus_effect_class`
+        // reads `AudioEffect::godot_class`, which is the authoritative class name:
+        // it DEFAULTS to `name()` but ten effects override it, because `name()` is
+        // the short label ("Delay") and the class is not ("AudioEffectDelay").
+        // Formatting `AudioEffect{name()}` here agrees for all 17 effects today,
+        // but it is a second, parallel name table — one override that does not
+        // follow the prefix convention, or one `name()` that already carries it,
+        // and the two silently disagree.
+        self.audio()?.bus_effect_class(i, e).map(str::to_string)
+    }
+
+    fn audio_set_bus_send(&mut self, bus: i64, send: &str) -> bool {
+        let Ok(i) = usize::try_from(bus) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => {
+                b.set_send(send);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_send(&self, bus: i64) -> Option<String> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.send().to_string())
+    }
+
+    /// `set_bus_volume_linear` — converted to dB here, on the engine side.
+    ///
+    /// 🔑 `20 * log10(linear)`, the inverse of `AudioBus::db_to_linear`. A
+    /// linear of `0.5` gives `-6.0206 dB`, which is the figure the acceptance
+    /// pins. ⚠️ Zero and negatives have no logarithm: Godot treats them as
+    /// silence, so they clamp to the mixer's quietest value rather than
+    /// producing `-inf`/`NaN`, which would poison every later mix.
+    fn audio_set_bus_volume_linear(&mut self, bus: i64, linear: f32) -> bool {
+        let db = if linear > 0.0 {
+            20.0 * linear.log10()
+        } else {
+            -80.0
+        };
+        self.audio_set_bus_volume_db(bus, db)
+    }
+
+    fn audio_get_bus_volume_linear(&self, bus: i64) -> Option<f32> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?.mixer().get_bus(i).map(|b| b.volume_linear())
+    }
+
+    /// `set_bus_count` — adds or removes TRAILING buses, as Godot does.
+    ///
+    /// ⚠️ Refuses a count below 1: bus 0 is Master and Godot does not allow
+    /// removing it.
+    fn audio_set_bus_count(&mut self, count: i64) -> bool {
+        let Ok(want) = usize::try_from(count) else {
+            return false;
+        };
+        if want == 0 {
+            return false;
+        }
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        while mixer.bus_count() > want {
+            mixer.remove_bus(mixer.bus_count() - 1);
+        }
+        while mixer.bus_count() < want {
+            // Godot names new buses "New Bus"; the index keeps them distinct so
+            // `get_bus_index` can still address each one.
+            let n = mixer.bus_count();
+            mixer.add_bus(format!("New Bus {n}"));
+        }
+        true
+    }
+
+    fn audio_move_bus(&mut self, index: i64, to_index: i64) -> bool {
+        let (Ok(from), Ok(to)) = (usize::try_from(index), usize::try_from(to_index)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        if from >= mixer.bus_count() || to >= mixer.bus_count() {
+            return false;
+        }
+        mixer.move_bus(from, to);
+        true
+    }
+
+    /// `set_bus_layout(layout)` — reuses `Mixer::load_bus_layout`, the same
+    /// entry the `.tres` boot path funnels into, so a layout applied from
+    /// script and one loaded at startup cannot disagree about a field.
+    fn audio_set_bus_layout_entries(&mut self, entries: &[(String, String)]) -> bool {
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        // ⚠️ `load_bus_layout` leaves the mixer unchanged for an empty layout
+        // and returns the resulting bus count, so `> 0` distinguishes "applied"
+        // from "there was nothing to apply".
+        audio
+            .mixer_mut()
+            .load_bus_layout(entries.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            > 0
+    }
+
+    /// The live mixer as `bus/<idx>/<field>` entries.
+    ///
+    /// 🔑 Emits exactly the fields `load_bus_layout` reads — `name`,
+    /// `volume_db`, `send`, `solo`, `mute`, `bypass_fx` — so a generate → set
+    /// round trip cannot lose one. A field written here that the loader ignores
+    /// would look like a round trip while silently dropping on the way back.
+    ///
+    /// ⚠️ Values are UNQUOTED: the loader accepts quoted or bare strings, and
+    /// bare keeps the entries identical to what a `.tres` property map yields
+    /// when `load()` parses one, so both producers feed the consumer the same
+    /// spelling.
+    fn audio_generate_bus_layout_entries(&self) -> Vec<(String, String)> {
+        let Some(audio) = self.audio() else {
+            return Vec::new();
+        };
+        let mixer = audio.mixer();
+        let mut out = Vec::new();
+        for i in 0..mixer.bus_count() {
+            let Some(bus) = mixer.get_bus(i) else {
+                continue;
+            };
+            out.push((format!("bus/{i}/name"), bus.name().to_string()));
+            out.push((format!("bus/{i}/volume_db"), bus.volume_db().to_string()));
+            out.push((format!("bus/{i}/send"), bus.send().to_string()));
+            out.push((format!("bus/{i}/solo"), bus.is_solo().to_string()));
+            out.push((format!("bus/{i}/mute"), bus.is_mute().to_string()));
+            out.push((format!("bus/{i}/bypass_fx"), bus.is_bypass().to_string()));
+        }
+        out
+    }
+
+    fn audio_set_bus_volume_db(&mut self, idx: i64, db: f32) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_volume_db(db);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_volume_db(&self, idx: i64) -> Option<f32> {
+        let i = usize::try_from(idx).ok()?;
+        self.audio()?.mixer().get_bus(i).map(|b| b.volume_db())
+    }
+
+    fn audio_set_bus_mute(&mut self, idx: i64, mute: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_mute(mute);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_mute(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_mute()))
+            .unwrap_or(false)
+    }
+
+    fn audio_set_bus_solo(&mut self, idx: i64, solo: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_solo(solo);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_solo(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_solo()))
+            .unwrap_or(false)
+    }
+
+    fn audio_set_bus_bypass_effects(&mut self, idx: i64, bypass: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_bypass(bypass);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_bypassing_effects(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_bypass()))
+            .unwrap_or(false)
+    }
+
+    fn audio_get_bus_peak_volume_left_db(&self, idx: i64, channel: i64) -> f32 {
+        let (Ok(i), Ok(c)) = (usize::try_from(idx), usize::try_from(channel)) else {
+            return -200.0;
+        };
+        self.audio()
+            .map_or(-200.0, |a| a.get_bus_peak_volume_left_db(i, c))
+    }
+
+    fn audio_get_bus_peak_volume_right_db(&self, idx: i64, channel: i64) -> f32 {
+        let (Ok(i), Ok(c)) = (usize::try_from(idx), usize::try_from(channel)) else {
+            return -200.0;
+        };
+        self.audio()
+            .map_or(-200.0, |a| a.get_bus_peak_volume_right_db(i, c))
+    }
+
+    fn audio_set_playback_speed_scale(&mut self, scale: f32) -> bool {
+        self.audio_mut()
+            .map(|a| a.set_playback_speed_scale(scale))
+            .is_some()
+    }
+
+    fn audio_get_playback_speed_scale(&self) -> f32 {
+        self.audio().map_or(1.0, |a| a.playback_speed_scale())
+    }
+
+    fn audio_get_mix_rate(&self) -> f32 {
+        self.audio()
+            .map_or(44_100.0, |a| a.output_sample_rate() as f32)
+    }
+
+    /// Godot's `add_bus(at_position)` inserts a bus named "New Bus"; a negative
+    /// or out-of-range position appends. The mixer only appends, so a positional
+    /// insert is an append followed by a move.
+    ///
+    /// `AudioMixer::move_bus` *panics* on index 0 (the master bus cannot be
+    /// displaced), so position 0 is clamped to an append rather than allowed to
+    /// take down the engine from a script.
+    fn audio_add_bus(&mut self, at_position: i64) -> bool {
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        let added = mixer.add_bus("New Bus");
+        if let Ok(target) = usize::try_from(at_position) {
+            if target >= 1 && target < added {
+                mixer.move_bus(added, target);
+            }
+        }
+        true
+    }
+
+    /// `AudioMixer::remove_bus` *panics* on index 0 or out of range. Godot
+    /// refuses to remove the master bus and ignores a bad index, so both are
+    /// reported as failure here instead of reaching the assert.
+    fn audio_remove_bus(&mut self, idx: i64) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        if i == 0 || i >= mixer.bus_count() {
+            return false;
+        }
+        mixer.remove_bus(i);
+        true
+    }
+
+    // -- bus effect instances (pat-s3rrv.141) -------------------------------
+    // `AudioEffectCapture` and `AudioEffectRecord` are the two effects a script
+    // DRIVES rather than configures, so they need a call path down to the live
+    // mixer. gdscript-interop cannot depend on gdaudio, which is why the
+    // dispatch lands here where both are in scope.
+
+    fn audio_effect_class(&self, bus_idx: i64, effect_idx: i64) -> Option<String> {
+        let bus = usize::try_from(bus_idx).ok()?;
+        let slot = usize::try_from(effect_idx).ok()?;
+        Some(self.audio()?.bus_effect_class(bus, slot)?.to_string())
+    }
+
+    fn audio_effect_call(
+        &mut self,
+        bus_idx: i64,
+        effect_idx: i64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let bus = usize::try_from(bus_idx).ok()?;
+        let slot = usize::try_from(effect_idx).ok()?;
+        // Frame counts arrive as `Int`, but a float is tolerated because
+        // arithmetic on one yields a float (`get_frames_available() / 2`).
+        let int_arg = |i: usize| -> i64 {
+            match args.get(i) {
+                Some(Variant::Int(v)) => *v,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => 0,
+            }
+        };
+        let audio = self.audio_mut()?;
+
+        match method {
+            // -- AudioEffectCapture ---------------------------------------
+            "get_buffer" => {
+                let frames = audio.bus_capture_mut(bus, slot)?.get_buffer(int_arg(0));
+                // ⚠️ One `Vector2` per FRAME, `(left, right)` — not a flat
+                // float array. A caller reading it as mono would take every
+                // other sample and hear the signal an octave up.
+                Some(Variant::PackedVector2Array(
+                    frames
+                        .into_iter()
+                        .map(|(l, r)| Vector2::new(l, r))
+                        .collect(),
+                ))
+            }
+            "can_get_buffer" => Some(Variant::Bool(
+                audio.bus_capture(bus, slot)?.can_get_buffer(int_arg(0)),
+            )),
+            "clear_buffer" => {
+                audio.bus_capture_mut(bus, slot)?.clear_buffer();
+                Some(Variant::Nil)
+            }
+            "get_frames_available" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_frames_available(),
+            )),
+            "get_buffer_length_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_buffer_length_frames(),
+            )),
+            "get_pushed_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_pushed_frames(),
+            )),
+            "get_discarded_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_discarded_frames(),
+            )),
+            "get_buffer_length" => Some(Variant::Float(
+                audio.bus_capture(bus, slot)?.get_buffer_length() as f64,
+            )),
+            "set_buffer_length" => {
+                let seconds = match args.first() {
+                    Some(Variant::Float(f)) => *f as f32,
+                    Some(Variant::Int(i)) => *i as f32,
+                    _ => return Some(Variant::Nil),
+                };
+                audio.bus_capture_mut(bus, slot)?.set_buffer_length(seconds);
+                Some(Variant::Nil)
+            }
+
+            // -- AudioEffectRecord ----------------------------------------
+            "set_recording_active" => {
+                let active = matches!(args.first(), Some(Variant::Bool(true)));
+                audio
+                    .bus_record_mut(bus, slot)?
+                    .set_recording_active(active);
+                Some(Variant::Nil)
+            }
+            "is_recording_active" => Some(Variant::Bool(
+                audio.bus_record(bus, slot)?.is_recording_active(),
+            )),
+            "set_format" => {
+                audio.bus_record_mut(bus, slot)?.set_format(int_arg(0));
+                Some(Variant::Nil)
+            }
+            "get_format" => Some(Variant::Int(audio.bus_record(bus, slot)?.get_format())),
+            "get_recording" => {
+                let recording = audio.bus_record(bus, slot)?.get_recording();
+                // ⚠️ Godot returns a NULL for an empty take rather than a
+                // zero-length stream, so a script cannot mistake "the bus was
+                // never recorded" for "silence was recorded". Same for a format
+                // this port cannot encode.
+                let Ok(wav) = recording else {
+                    return Some(Variant::Nil);
+                };
+                let mut res = gdvariant::ResourceRef {
+                    path: String::new(),
+                    class_name: "AudioStreamWAV".to_string(),
+                    properties: HashMap::new(),
+                };
+                // The four setters Godot calls on the sample it builds
+                // (`audio_effect_record.cpp:264-269`), under their real Godot
+                // property names so a script reads them the usual way.
+                res.properties
+                    .insert("data".to_string(), Variant::PackedByteArray(wav.data));
+                res.properties
+                    .insert("format".to_string(), Variant::Int(wav.format));
+                res.properties
+                    .insert("mix_rate".to_string(), Variant::Int(wav.mix_rate as i64));
+                res.properties
+                    .insert("stereo".to_string(), Variant::Bool(wav.stereo));
+                res.properties
+                    .insert("loop_mode".to_string(), Variant::Int(wav.loop_mode));
+                Some(Variant::Resource(Box::new(res)))
+            }
+
+            _ => None,
+        }
+    }
+
+    // -- Object metadata (pat-nzgdu.30) -------------------------------------
+    // Meta is Object-level state stored in the Node's own meta bag (distinct
+    // from the script/property namespace used above).
+
+    fn set_meta(&mut self, node: u64, name: &str, value: Variant) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+            n.set_meta(name, value);
+        }
+    }
+
+    fn get_meta(&self, node: u64, name: &str, default: Variant) -> Variant {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree().get_node(nid) {
+            Some(n) if n.has_meta(name) => n.get_meta(name),
+            _ => default,
+        }
+    }
+
+    fn has_meta(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_node(nid)
+            .map(|n| n.has_meta(name))
+            .unwrap_or(false)
+    }
+
+    fn remove_meta(&mut self, node: u64, name: &str) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+            n.remove_meta(name);
+        }
+    }
+
+    fn get_meta_list(&self, node: u64) -> Vec<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let mut names: Vec<String> = self
+            .tree()
+            .get_node(nid)
+            .map(|n| {
+                n.get_meta_list()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
     }
 
     fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]) {
@@ -343,6 +8117,179 @@ impl SceneAccess for SceneTreeAccessor {
         let target_oid = ObjectId::from_raw(target);
         let conn = Connection::new(target_oid, method);
         self.tree_mut().connect_signal(source_id, signal, conn);
+    }
+
+    fn connect_signal_flags(
+        &mut self,
+        source: u64,
+        signal: &str,
+        target: u64,
+        method: &str,
+        flags: i64,
+        binds: &[Variant],
+        unbinds: usize,
+    ) -> i64 {
+        // Godot refuses a connect to a signal the object does not have
+        // (`core/object/object.cpp:1638` -> `ERR_INVALID_PARAMETER`). Patina's
+        // `SignalStore` lazily CREATED the signal instead, so a mistyped name
+        // connected "successfully" and then simply never fired — the quietest
+        // possible failure (pat-mgixk.98).
+        //
+        // ⚠️ `node_has_signal` and deliberately not a narrower check: it is the
+        // only predicate covering all three places a signal can come from — a
+        // script's own `signal` declarations, ClassDB **including inherited**
+        // ones (`Button.pressed` is declared on `BaseButton`, not `Button`),
+        // and names added at runtime by `add_user_signal`. Checking the node's
+        // own class alone would reject every inherited signal and every user
+        // signal, breaking working scripts.
+        //
+        // ⚠️ Refuse only when the source's class is KNOWN to ClassDB. Godot
+        // always has every class registered; a Patina host that never ran
+        // `register_all_classes` (an embedder, a tool, much of the test
+        // suite) has an EMPTY ClassDB, where this check refused every
+        // built-in signal — `v.connect("ready", ..)` on a Node2D returned
+        // ERR_INVALID_PARAMETER and nothing ever fired. An unknown class
+        // cannot be judged, so it keeps the pre-check's old (permissive)
+        // result. This lives HERE and not in `node_has_signal`, which also
+        // answers "is `obj.name` a signal?" for property reads — saying yes
+        // there turned every property of an unregistered node into a Signal.
+        if !self.node_has_signal(source, signal) && self.source_class_is_known(source) {
+            return CONNECT_ERR_INVALID_PARAMETER;
+        }
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        let mut conn = Connection::new(target_oid, method);
+        // Godot ConnectFlags: DEFERRED=1, ONE_SHOT=4 decode into the two
+        // booleans the dispatcher reads.
+        conn.deferred = flags & 1 != 0;
+        conn.one_shot = flags & 4 != 0;
+        // 🔑 And the WHOLE mask is kept (pat-mgixk.98). Without this the stored
+        // `flags` stayed 0 for every script connect, so
+        // `CONNECT_REFERENCE_COUNTED` and `CONNECT_APPEND_SOURCE_OBJECT` were
+        // dead from GDScript no matter what `Signal::try_connect` and
+        // `emit_signal` did with them — the old comment here even asserted
+        // REFERENCE_COUNTED "does not affect dispatch", which is now exactly
+        // what it does.
+        //
+        // ⚠️ Negative `flags` cannot forge high bits: Godot's ConnectFlags are
+        // a small positive bitmask, and a script passing a negative Int would
+        // otherwise sign-extend into every flag at once.
+        conn.flags = flags.max(0) as u32;
+        if !binds.is_empty() {
+            conn.binds = binds.to_vec();
+        }
+        // pat-mgixk.98: a script's `Callable.unbind(n)`. Left at 0 before, so
+        // `sig.connect(handler.unbind(1))` passed every signal argument through
+        // and a handler declaring fewer parameters raised instead of ignoring
+        // the tail.
+        conn.unbinds = unbinds;
+        match self.tree_mut().try_connect_signal(source_id, signal, conn) {
+            Ok(()) => CONNECT_OK,
+            // Godot's already-connected path answers `ERR_INVALID_PARAMETER`
+            // too (`core/object/object.cpp:1646-1666`), having first logged the
+            // "signal is already connected" error.
+            Err(_) => CONNECT_ERR_INVALID_PARAMETER,
+        }
+    }
+
+    fn disconnect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        self.tree_mut()
+            .signal_store_mut(source_id)
+            .disconnect(signal, target_oid, method)
+    }
+
+    fn is_signal_connected(&self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        self.tree()
+            .signal_store(source_id)
+            .and_then(|store| store.get_signal(signal))
+            .map(|sig| {
+                sig.connections()
+                    .iter()
+                    .any(|c| c.target_id == target_oid && c.method == method)
+            })
+            .unwrap_or(false)
+    }
+
+    fn node_has_signal(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree();
+        // 0. A Tween is an OBJECT, not a node: `create_tween()` hands back a
+        //    TweenId, which names no node, so every check below found no class
+        //    and `tween.finished.connect(..)` / `t.connect("finished", ..)` was
+        //    refused with ERR_INVALID_PARAMETER — the handler never ran (the
+        //    connect pre-check, pat-mgixk.98, broke every tween callback).
+        if tree
+            .get_tween(crate::tween::TweenId::from_raw(node))
+            .is_some()
+        {
+            return gdobject::class_db::class_has_signal("Tween", name)
+                || matches!(name, "finished" | "loop_finished" | "step_finished");
+        }
+        // 0b. The scene root carries the MultiplayerAPI / SceneMultiplayer
+        //     signals: `multiplayer_signal_object` binds `multiplayer.<sig>` to
+        //     the root because the per-frame drain emits them there
+        //     (pat-s3rrv.18). The root's own class declares none of them, so
+        //     the connect pre-check refused `multiplayer.peer_connected
+        //     .connect(cb)` — THE Godot multiplayer idiom — and it never fired.
+        if nid == tree.root_id()
+            && gdscript_interop::interpreter::MULTIPLAYER_SIGNALS.contains(&name)
+        {
+            return true;
+        }
+        // 0c. Likewise the SceneTree's own signals: `get_tree().process_frame`
+        //     is a Signal bound to the root (the main loop emits it there), and
+        //     the root's class declares none of them — so the connect
+        //     pre-check refused `get_tree().process_frame.connect(cb)` with
+        //     ERR_INVALID_PARAMETER and `cb` never ran (pat-ivcj2).
+        if nid == tree.root_id() && SCENE_TREE_SIGNALS.contains(&name) {
+            return true;
+        }
+        // 1. The attached script's `signal` declarations — the case the
+        //    SignalStore misses, because a declared-but-unconnected signal has
+        //    no store entry yet (pat-0q2kx.9).
+        if let Some(script) = tree.get_script(nid) {
+            if script.list_signals().iter().any(|s| s == name) {
+                return true;
+            }
+        }
+        // 1b. The same, for a script that is executing right now. It is out of
+        //     the tree's script map while its own method runs, so the lookup
+        //     above missed every signal a script connected from its own
+        //     `_ready` — `pinged.connect(_on_pinged)` was refused with
+        //     ERR_INVALID_PARAMETER and never fired.
+        if crate::scene_tree::running_script_declares_signal(nid, name) {
+            return true;
+        }
+        // 2. A built-in signal on the node's class (`Button.pressed`).
+        if let Some(node_ref) = tree.get_node(nid) {
+            if gdobject::class_db::class_has_signal(node_ref.class_name(), name) {
+                return true;
+            }
+        }
+        // 3. Anything already connected or explicitly added at runtime.
+        tree.signal_store(nid)
+            .map(|store| store.get_signal(name).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Backs Godot's `Signal.get_connections()` / `has_connections()`
+    /// (pat-0q2kx.9).
+    fn signal_connections(&self, source: u64, signal: &str) -> Vec<(u64, String)> {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        self.tree()
+            .signal_store(source_id)
+            .and_then(|store| store.get_signal(signal))
+            .map(|sig| {
+                sig.connections()
+                    .iter()
+                    .map(|c| (c.target_id.raw(), c.method.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn get_node_name(&self, node: u64) -> Option<String> {
@@ -364,11 +8311,525 @@ impl SceneAccess for SceneTreeAccessor {
             .unwrap_or(false)
     }
 
+    // Analog action strength (pat-s3rrv.14). The `SceneAccess` DEFAULTS treat
+    // every action as digital (1.0 / 0.0), and the real analog values live in
+    // `gdplatform::input::InputState`, which belongs to `MainLoop` and is
+    // unreachable from a running script — so without these overrides no script
+    // could observe an analog or deadzoned value from EITHER accessor, however
+    // correct `InputState`'s own implementation was.
+    //
+    // The frame owner mirrors the pair into the snapshot; here we only read it.
+    // Falling through to the digital default when the action is absent is what
+    // keeps a keyboard-bound action reporting 1.0 while held.
+    fn get_action_strength(&self, action: &str) -> f32 {
+        if let Some(strength) = self
+            .input
+            .as_ref()
+            .and_then(|i| i.action_strengths.get(action))
+            .map(|(s, _)| *s)
+        {
+            return strength;
+        }
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn get_action_raw_strength(&self, action: &str) -> f32 {
+        if let Some(raw) = self
+            .input
+            .as_ref()
+            .and_then(|i| i.action_strengths.get(action))
+            .map(|(_, raw)| *raw)
+        {
+            return raw;
+        }
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    // -- Input singleton mutators (pat-0q2kx.24) ----------------------------
+    //
+    // Godot's `Input` mutators change live engine state
+    // (upstream/godot/core/input/input.cpp). The engine `InputState` belongs to
+    // `MainLoop`, which a running script cannot reach, so each call is queued on
+    // the tree and applied after the script phase. Reads stay answerable within
+    // the frame: mouse mode and joypads come from the tree's mirrors, and an
+    // injected action press lands on the frame snapshot so a later script in the
+    // same frame observes it — matching Godot, where `action_press` is visible to
+    // `is_action_pressed` immediately.
+
+    fn set_mouse_mode(&mut self, mode: i64) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::SetMouseMode(mode));
+        tree.set_input_mouse_mode_mirror(mode);
+    }
+
+    fn get_mouse_mode(&self) -> i64 {
+        self.tree().input_mouse_mode()
+    }
+
+    // -- SceneMultiplayer surface (pat-0q2kx.94) ----------------------------
+
+    fn multiplayer_is_server(&self) -> bool {
+        self.tree().get_multiplayer().is_server()
+    }
+
+    fn multiplayer_unique_id(&self) -> i64 {
+        self.tree()
+            .get_multiplayer()
+            .unique_id()
+            .map(|id| id.0 as i64)
+            .unwrap_or(0)
+    }
+
+    fn multiplayer_has_peer(&self) -> bool {
+        self.tree().get_multiplayer().unique_id().is_some()
+    }
+
+    fn multiplayer_peers(&self) -> Vec<i64> {
+        self.tree()
+            .get_multiplayer()
+            .get_peers()
+            .into_iter()
+            .map(|id| id as i64)
+            .collect()
+    }
+
+    fn multiplayer_remote_sender_id(&self) -> i64 {
+        self.tree().get_multiplayer().get_remote_sender_id().0 as i64
+    }
+
+    fn multiplayer_authenticating_peers(&self) -> Vec<i64> {
+        self.tree()
+            .get_multiplayer()
+            .pending_auth_peers()
+            .into_iter()
+            .map(|id| id as i64)
+            .collect()
+    }
+
+    fn multiplayer_send_bytes(&mut self, bytes: &[u8], target: i64, channel: i64) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .send_bytes(
+                bytes,
+                target as i32,
+                gdplatform::network::TransferMode::Reliable,
+                channel.clamp(0, u8::MAX as i64) as u8,
+            )
+            .is_ok()
+    }
+
+    fn multiplayer_complete_auth(&mut self, id: i64, accepted: bool) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .complete_auth(id as i32, accepted)
+    }
+
+    fn multiplayer_set_refuse_new_connections(&mut self, refuse: bool) {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .set_refuse_new_connections(refuse);
+    }
+
+    fn multiplayer_refuses_new_connections(&self) -> bool {
+        self.tree().get_multiplayer().refuse_new_connections()
+    }
+
+    /// `SceneMultiplayer.disconnect_peer(id)` (pat-s3rrv.18) — routed through
+    /// the peer state the transports share, so the peer really leaves
+    /// `get_peers()` rather than only being marked.
+    fn multiplayer_disconnect_peer(&mut self, id: i64) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .peer_state_mut()
+            .disconnect_peer(id as i32)
+    }
+
+    /// `SceneMultiplayer.clear()` — forgets the connected peers and any queued
+    /// events. The assigned transport stays, matching Godot: `clear` resets the
+    /// API's bookkeeping, it does not unassign the peer.
+    fn multiplayer_clear(&mut self) {
+        let api = self.tree_mut().get_multiplayer_mut();
+        for id in api.get_peers() {
+            api.peer_state_mut().disconnect_peer(id);
+        }
+        let _ = api.take_events();
+    }
+
+    fn multiplayer_set_auth_callback(&mut self, callback: Variant) {
+        self.tree_mut().set_multiplayer_auth_callback(callback);
+    }
+
+    fn multiplayer_get_auth_callback(&self) -> Variant {
+        self.tree().multiplayer_auth_callback()
+    }
+
+    /// `SceneMultiplayer.send_auth(id, data)` — the payload goes out on the
+    /// live transport, so it only succeeds while a peer is assigned.
+    fn multiplayer_send_auth(&mut self, id: i64, data: Vec<u8>) -> bool {
+        let api = self.tree_mut().get_multiplayer_mut();
+        let Some(peer) = api.peer_mut() else {
+            return false;
+        };
+        peer.send_packet(
+            gdplatform::network::PeerId(id.max(0) as u32),
+            gdplatform::network::Packet {
+                sender: gdplatform::network::PeerId(0),
+                channel: 0,
+                data,
+                transfer_mode: gdplatform::network::TransferMode::Reliable,
+            },
+        )
+        .is_ok()
+    }
+
+    /// The node the per-frame multiplayer drain emits its signals on
+    /// (pat-s3rrv.18).
+    ///
+    /// `poll_multiplayer_with_delta` emits all eight connection signals on the
+    /// scene root (`scene_tree.rs`, the `emit_signal(root, …)` at the end of the
+    /// event drain), so binding `multiplayer.peer_connected` to that same object
+    /// makes `.connect(cb)` land on the store the emission already reaches.
+    ///
+    /// Godot hangs these off the `MultiplayerAPI` object rather than the root;
+    /// the only observable difference is `signal.get_object()`, and routing to
+    /// the real emitter is what makes the callback actually fire.
+    fn multiplayer_signal_object(&self) -> u64 {
+        self.tree().root_id().raw()
+    }
+
+    /// `multiplayer.multiplayer_peer = peer` (pat-s3rrv.16).
+    ///
+    /// Takes the peer OUT of the process-wide handle table and hands ownership
+    /// to the tree's `MultiplayerAPI`, which is what makes the existing
+    /// per-frame `poll_multiplayer_with_delta` start driving it. Assigning the
+    /// same handle twice fails the second time — by then the tree owns the peer
+    /// and the slot is empty, which is the honest answer rather than silently
+    /// installing a second peer.
+    fn multiplayer_set_peer(&mut self, handle: u64) -> bool {
+        let id = ObjectId::from_raw(handle);
+        if !gdplatform::multiplayer_peer_handles::is_multiplayer_peer_handle(id) {
+            // pat-s3rrv.230: not a built-in transport handle — it may be a node
+            // whose script `extends MultiplayerPeerExtension`, which is how Godot
+            // lets a project supply its own transport. This used to `return false`
+            // unconditionally, so `multiplayer.multiplayer_peer = self` was
+            // silently dropped and the script's `_poll` was never called.
+            //
+            // The identity is the node because a bare `ClassInstance` has no
+            // Variant form: `self` is the only script identity the interpreter can
+            // hand across this boundary.
+            let node = crate::node::NodeId::from_object_id(id);
+            return self.tree_mut().set_script_multiplayer_peer(node);
+        }
+        let Some(peer) = gdplatform::multiplayer_peer_handles::take_multiplayer_peer(id) else {
+            return false;
+        };
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .set_multiplayer_peer(peer);
+        true
+    }
+
+    // -- cursor shape (pat-0q2kx.90) ----------------------------------------
+    //
+    // Mirrored on the tree as well as queued, for the same reason
+    // `set_mouse_mode` is: the command is applied by the frame loop, but Godot's
+    // `Input.get_current_cursor_shape()` answers immediately, so a script that
+    // sets and reads back within one frame must see its own write.
+
+    fn set_default_cursor_shape(&mut self, shape: i64) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::SetDefaultCursorShape(shape));
+        tree.set_cursor_shape_mirror(shape);
+    }
+
+    fn get_current_cursor_shape(&self) -> i64 {
+        self.tree().cursor_shape()
+    }
+
+    fn set_custom_mouse_cursor(
+        &mut self,
+        image_path: &str,
+        shape: i64,
+        hotspot_x: f32,
+        hotspot_y: f32,
+    ) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::SetCustomMouseCursor {
+                image_path: image_path.to_string(),
+                shape,
+                hotspot_x,
+                hotspot_y,
+            });
+    }
+
+    fn warp_mouse(&mut self, x: f32, y: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::WarpMouse { x, y });
+    }
+
+    fn action_press(&mut self, action: &str, strength: f32) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::ActionPress {
+            action: action.to_string(),
+            strength,
+        });
+        tree.inject_action_press(action);
+    }
+
+    fn action_release(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::ActionRelease {
+            action: action.to_string(),
+        });
+        tree.inject_action_release(action);
+    }
+
+    // -- InputMap singleton (pat-0q2kx.89) ---------------------------------
+    //
+    // Mutations are queued for the frame loop (which owns the engine map) and
+    // ALSO applied to the tree's mirror right away, so a script that does
+    // `add_action` then `has_action` in the same frame sees its own write —
+    // the same eager-mirror rule `set_mouse_mode` follows.
+
+    fn input_map_has_action(&self, action: &str) -> bool {
+        self.tree().input_map_has_action(action)
+    }
+
+    fn input_map_get_actions(&self) -> Vec<String> {
+        self.tree().input_map_actions()
+    }
+
+    fn input_map_add_action(&mut self, action: &str, deadzone: f32) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapAddAction {
+            action: action.to_string(),
+            deadzone,
+        });
+        tree.input_map_mirror_add_action(action);
+    }
+
+    fn input_map_erase_action(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseAction {
+            action: action.to_string(),
+        });
+        tree.input_map_mirror_erase_action(action);
+    }
+
+    fn input_map_action_set_deadzone(&mut self, action: &str, deadzone: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::InputMapSetDeadzone {
+                action: action.to_string(),
+                deadzone,
+            });
+    }
+
+    fn input_map_action_add_event(
+        &mut self,
+        action: &str,
+        event: gdscript_interop::bindings::InputEventSpec,
+    ) {
+        // An event the engine cannot model is dropped here rather than queued,
+        // so the mirror's event count stays truthful about what will bind.
+        let Some(binding) = binding_from_event_spec(&event) else {
+            return;
+        };
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapAddEvent {
+            action: action.to_string(),
+            binding,
+        });
+        tree.input_map_mirror_add_event(action);
+    }
+
+    fn input_map_action_erase_event(
+        &mut self,
+        action: &str,
+        event: gdscript_interop::bindings::InputEventSpec,
+    ) {
+        let Some(binding) = binding_from_event_spec(&event) else {
+            return;
+        };
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseEvent {
+            action: action.to_string(),
+            binding,
+        });
+        tree.input_map_mirror_erase_event(action);
+    }
+
+    fn input_map_action_erase_events(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseEvents {
+            action: action.to_string(),
+        });
+        tree.input_map_mirror_erase_events(action);
+    }
+
+    fn input_map_load_from_project_settings(&mut self) {
+        // No mirror call to pair with this one: a reload replaces the whole map
+        // rather than touching one action, and the tree has no copy of the
+        // project's declarations to rebuild from. It does not need one — the
+        // command applier rebuilds BOTH input-map mirrors from engine truth
+        // immediately after draining, so the restored map is visible from the
+        // next read onward, exactly as for any other queued mutator.
+        self.tree_mut()
+            .queue_input_command(InputCommand::InputMapLoadFromProjectSettings);
+    }
+
+    fn input_map_action_event_count(&self, action: &str) -> usize {
+        self.tree().input_map_action_event_count(action)
+    }
+
+    /// pat-s3rrv.14: the engine's real bindings, translated into the spec shape
+    /// the interpreter matches events against.
+    ///
+    /// A `GamepadButton` with no Godot `JoyButton` (the analog triggers, which
+    /// are axes there) is DROPPED rather than reported under a wrong index — a
+    /// binding that cannot be named in Godot's terms must not masquerade as one
+    /// that can.
+    fn input_map_action_events(
+        &self,
+        action: &str,
+    ) -> Vec<gdscript_interop::bindings::InputEventSpec> {
+        use gdplatform::input::ActionBinding as B;
+        use gdscript_interop::bindings::InputEventSpec;
+        self.tree()
+            .input_map_action_bindings(action)
+            .iter()
+            .filter_map(|binding| match binding {
+                B::KeyBinding(key) => Some(InputEventSpec::key(key.to_godot_keycode())),
+                B::KeyWithModifiers(combo) => Some(InputEventSpec {
+                    class: "InputEventKey".to_string(),
+                    code: combo.key.to_godot_keycode(),
+                    axis_value: 0.0,
+                    shift: combo.shift,
+                    ctrl: combo.ctrl,
+                    alt: combo.alt,
+                }),
+                B::MouseBinding(button) => Some(InputEventSpec {
+                    class: "InputEventMouseButton".to_string(),
+                    code: button.to_godot_index(),
+                    axis_value: 0.0,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+                B::GamepadButtonBinding(button) => {
+                    button.to_godot_index().map(|code| InputEventSpec {
+                        class: "InputEventJoypadButton".to_string(),
+                        code,
+                        axis_value: 0.0,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                    })
+                }
+                // A bare axis binding presses on POSITIVE deflection, which is
+                // what `ActionBinding::axis_positive` means; the directional
+                // form below carries its own sign.
+                B::GamepadAxisBinding(axis) => Some(InputEventSpec {
+                    class: "InputEventJoypadMotion".to_string(),
+                    code: axis.to_godot_index(),
+                    axis_value: 1.0,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+                B::GamepadAxisDirection { axis, positive } => Some(InputEventSpec {
+                    class: "InputEventJoypadMotion".to_string(),
+                    code: axis.to_godot_index(),
+                    axis_value: if *positive { 1.0 } else { -1.0 },
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+            })
+            .collect()
+    }
+
+    fn get_connected_joypads(&self) -> Vec<i64> {
+        self.tree().input_connected_joypads().to_vec()
+    }
+
+    fn is_joy_button_pressed(&self, device: i64, button: i64) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_joy_button_pressed(device, button))
+            .unwrap_or(false)
+    }
+
+    fn get_joy_axis(&self, device: i64, axis: i64) -> f32 {
+        self.input
+            .as_ref()
+            .map(|i| i.get_joy_axis(device, axis))
+            .unwrap_or(0.0)
+    }
+
+    fn start_joy_vibration(&mut self, device: i64, weak: f32, strong: f32, duration: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::StartJoyVibration {
+                device,
+                weak,
+                strong,
+                duration,
+            });
+    }
+
+    fn stop_joy_vibration(&mut self, device: i64) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::StopJoyVibration { device });
+    }
+
+    fn is_input_action_just_released(&self, action: &str) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_action_just_released(action))
+            .unwrap_or(false)
+    }
+
     fn is_input_key_pressed(&self, key: &str) -> bool {
         self.input
             .as_ref()
             .map(|i| i.is_key_pressed(key))
             .unwrap_or(false)
+    }
+
+    /// `Input.is_key_pressed(KEY_A)` (pat-0q2kx.92). The snapshot keys pressed
+    /// keys by Patina's own key names, so the Godot keycode is resolved through
+    /// the platform mapping and then asked by name — the same state the string
+    /// form reads, not a parallel one that could disagree.
+    fn is_input_keycode_pressed(&self, keycode: i64) -> bool {
+        let Some(key) = gdplatform::input::key_from_godot_keycode(keycode) else {
+            return false;
+        };
+        self.is_input_key_pressed(key.name())
+    }
+
+    fn is_anything_pressed(&self) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| {
+                !i.pressed_keys.is_empty()
+                    || !i.mouse_buttons_pressed.is_empty()
+                    || !i.actions_pressed.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn get_last_mouse_velocity(&self) -> (f32, f32) {
+        self.input
+            .as_ref()
+            .map(|i| (i.mouse_velocity.x, i.mouse_velocity.y))
+            .unwrap_or((0.0, 0.0))
     }
 
     fn get_global_mouse_position(&self) -> (f32, f32) {
@@ -394,11 +8855,19 @@ impl SceneAccess for SceneTreeAccessor {
         let pid = NodeId::from_object_id(ObjectId::from_raw(parent_id));
         let cid = NodeId::from_object_id(ObjectId::from_raw(child_id));
 
-        // The node was created by create_node and already lives in the arena.
-        // We extract it, then re-insert via SceneTree::add_child which wires
-        // up the parent-child relationship and lifecycle events.
         let tree = self.tree_mut();
-        if let Some(node) = tree.take_node(cid) {
+        // A node produced by `instantiate_packed_scene` is already in the tree
+        // (parented under the root), so move its whole subtree with `reparent`.
+        // A freshly `create_node`d node is detached (no parent) and is inserted
+        // via `take_node` + `add_child`, which wires up the parent-child
+        // relationship and lifecycle events.
+        let already_parented = tree
+            .get_node(cid)
+            .map(|n| n.parent().is_some())
+            .unwrap_or(false);
+        if already_parented {
+            tree.reparent(cid, pid).is_ok()
+        } else if let Some(node) = tree.take_node(cid) {
             tree.add_child(pid, node).is_ok()
         } else {
             false
@@ -410,12 +8879,2304 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree_mut().queue_free(nid);
     }
 
+    /// Godot `Node.rpc`: send through the tree's MultiplayerAPI, addressed by
+    /// the node's absolute path hash — the same hash `poll_multiplayer` resolves
+    /// inbound packets with, so a call lands on the matching node on the peer.
+    /// Godot `Node.rpc`: send through the tree's MultiplayerAPI, addressed by
+    /// the node's absolute path hash — the same hash `poll_multiplayer` resolves
+    /// inbound packets with, so a call lands on the matching node on the peer.
+    fn node_rpc(&mut self, node: u64, method: &str, args: &[Variant]) -> Result<(), String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // pat-s3rrv.230: a script `extends MultiplayerAPIExtension` REPLACES the
+        // built-in stack, so it is consulted before the engine's own RPC registry
+        // — Godot hands the call to `_rpc(peer, object, method, args)` and the
+        // extension owns delivery from there. Returning early is the point: the
+        // built-in path must not also run, or the call would go out twice.
+        //
+        // `0` is Godot's broadcast peer, which is what a plain `rpc()` means; the
+        // addressed form is `node_rpc_id` below.
+        if self.tree_mut().rpc_through_script_api(0, nid, method, args) {
+            return Ok(());
+        }
+        let Some(hash) = self.rpc_hash_for(nid) else {
+            return Err(format!("rpc(): node {node} is not in the tree"));
+        };
+        let sent = self
+            .tree_mut()
+            .get_multiplayer_mut()
+            .rpc(hash, method, args.to_vec())
+            .map_err(|e| format!("{e:?}"));
+        // ⚠️ `call_local` runs the method on the SENDER too, and Godot does it
+        // whether or not the packet went anywhere — a peerless send is not a
+        // reason to skip local execution.
+        //
+        // Queued rather than called inline: `rpc()` is invoked FROM inside the
+        // node's own running script, and a running script is checked out of
+        // `SceneTree.scripts`, so a re-entrant `call_script_method` would find
+        // no script and silently do nothing. The deferred queue runs it once the
+        // current method has returned and the script is back in the arena.
+        if self.tree().rpc_is_call_local(method) {
+            self.tree_mut().call_deferred(nid, method, args);
+        }
+        sent
+    }
+
+    /// [`node_rpc`](Self::node_rpc) addressed to a single peer.
+    fn node_rpc_id(
+        &mut self,
+        node: u64,
+        peer: i64,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<(), String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(hash) = self.rpc_hash_for(nid) else {
+            return Err(format!("rpc_id(): node {node} is not in the tree"));
+        };
+        let sent = self
+            .tree_mut()
+            .get_multiplayer_mut()
+            .rpc_id(hash, peer, method, args.to_vec())
+            .map_err(|e| format!("{e:?}"));
+        if self.tree().rpc_is_call_local(method) {
+            self.tree_mut().call_deferred(nid, method, args);
+        }
+        sent
+    }
+
+    fn is_object_alive(&self, id: u64) -> bool {
+        // The scene-tree node arena is the authoritative alive registry: a node
+        // is present until it is immediately freed (`remove_node`) or reaped
+        // from the deferred-deletion queue (`process_deletions`). A `queue_free`d
+        // node stays alive until that reap, matching Godot semantics.
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        self.tree().get_node(nid).is_some()
+    }
+
+    fn instance_from_id(&self, id: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        self.tree().get_node(nid).map(|_| id)
+    }
+
+    fn free_object(&mut self, id: u64) {
+        // Godot `Object.free()` is immediate; `remove_node` fires EXIT_TREE /
+        // UNPARENTED, drops the subtree from the arena, and unregisters each
+        // node from the weak-ref registry. The root cannot be freed this way.
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        let _ = self.tree_mut().remove_node(nid);
+    }
+
+    fn call_deferred(&mut self, node_id: u64, method: &str, args: &[Variant]) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        self.tree_mut().call_deferred(nid, method, args);
+    }
+
+    fn create_timer(&mut self, seconds: f64) -> Option<(u64, String)> {
+        self.create_timer_with_flags(seconds, true, false, false)
+    }
+
+    fn create_timer_with_flags(
+        &mut self,
+        seconds: f64,
+        process_always: bool,
+        process_in_physics: bool,
+        ignore_time_scale: bool,
+    ) -> Option<(u64, String)> {
+        let id = self.tree_mut().create_timer_with_flags(
+            seconds,
+            process_always,
+            process_in_physics,
+            ignore_time_scale,
+        );
+        let signal = self
+            .tree()
+            .get_timer(id)
+            .map(|t| t.signal_name.clone())
+            .unwrap_or_else(|| format!("timeout_{id}"));
+        Some((id, signal))
+    }
+
+    fn process_timers(&mut self, delta: f64) -> Vec<String> {
+        self.tree_mut().process_timers(delta);
+        self.tree_mut().take_timeout_signals()
+    }
+
+    fn script_class_chain(&self, node: u64) -> Vec<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // The running script is out of the arena while it executes, so `self
+        // is Player` must ask the active-script registry first.
+        crate::scene_tree::running_script_class_names(nid)
+            .or_else(|| self.tree().get_script(nid).map(|s| s.script_class_names()))
+            .unwrap_or_default()
+    }
+
     fn get_class(&self, node: u64) -> Option<String> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree()
             .get_node(nid)
             .map(|n| n.class_name().to_string())
     }
+
+    // -- AnimationPlayer playback (pat-0q2kx.1) -----------------------------
+
+    fn animation_player_play(
+        &mut self,
+        node: u64,
+        name: &str,
+        custom_blend: f64,
+        custom_speed: f64,
+        from_end: bool,
+    ) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(player) = self.tree_mut().get_animation_player_mut(nid) else {
+            return false;
+        };
+        if name.is_empty() {
+            // Godot's `play()` with no argument resumes the current clip, or
+            // starts the autoplay clip when nothing has played yet.
+            //
+            // ⚠️ Still routed through `play_ex` so a bare `play()` with an
+            // explicit speed — `play("", -1, 2.0)` — is not silently normal
+            // speed. The resume branch only chooses the NAME.
+            let current = player.current_animation().map(str::to_owned);
+            match current {
+                Some(current) => player.play_ex(&current, custom_blend, custom_speed, from_end),
+                None => {
+                    player.play_autoplay();
+                }
+            }
+        } else {
+            // `play_ex`, not `play`: it has honoured custom_blend/custom_speed/
+            // from_end since pat-0q2kx.1 and had no caller passing them
+            // (pat-mgixk.79).
+            player.play_ex(name, custom_blend, custom_speed, from_end);
+        }
+        true
+    }
+
+    fn animation_player_stop(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_pause(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.pause();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_queue(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.queue(name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `AnimatedSprite2D.play_backwards(name)` — Godot's `play(name, -1, true)`
+    /// (`animated_sprite_2d.cpp:520-522`).
+    ///
+    /// ⚠️ Writes NODE PROPERTIES, not a playback struct.
+    /// `process_animated_sprites` rebuilds its `AnimatedSpritePlayback` from the
+    /// node every tick, so anything set on a struct here would be discarded
+    /// before the next frame.
+    /// `AnimatedSprite2D.play(name, custom_speed, from_end)`.
+    ///
+    /// ⚠️ The direction and the starting frame are INDEPENDENT arguments: the
+    /// sign of `custom_speed` decides which way the clip runs, `from_end`
+    /// decides where the playhead starts. Godot's `play_backwards(name)` is
+    /// exactly `play(name, -1, true)` (`animated_sprite_2d.cpp:520-522`) — both
+    /// at once — so folding them into a single flag would make
+    /// `play("walk", -1, false)`, a reverse run from wherever the clip is,
+    /// impossible to express.
+    fn animated_sprite_play(
+        &mut self,
+        node: u64,
+        name: &str,
+        custom_speed: f64,
+        from_end: bool,
+    ) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let clip = if name.is_empty() {
+            current_sprite_animation(n)
+        } else {
+            name.to_string()
+        };
+        let last = crate::scene_tree::sprite_frames_from_node(n)
+            .map(|f| f.frame_count(&clip).saturating_sub(1))
+            .unwrap_or(0);
+        // Godot's `play()` (animated_sprite_2d.cpp:494-513) only rewinds when
+        // the animation CHANGES, or when replaying a clip that already ran to
+        // its end. Re-calling `play()` on the clip that is running keeps the
+        // playhead — the usual `if moving: play()` every `_process` pattern.
+        // Rewinding unconditionally pinned Dodge the Creeps' player to frame 0.
+        let same_clip = clip == current_sprite_animation(n);
+        let frame = match n.get_property("frame") {
+            Variant::Int(f) => f,
+            _ => 0,
+        };
+        let playing = matches!(n.get_property("playing"), Variant::Bool(true));
+        let finished = !playing
+            && if from_end {
+                frame == 0
+            } else {
+                frame == last as i64
+            };
+        let keep_playhead = same_clip && !finished;
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        if keep_playhead {
+            n.set_property("playing", Variant::Bool(true));
+            let speed = if custom_speed == 0.0 {
+                1.0
+            } else {
+                custom_speed
+            };
+            n.set_property("speed_scale", Variant::Float(speed));
+            return true;
+        }
+        n.set_property("animation", Variant::String(clip));
+        n.set_property(
+            "frame",
+            Variant::Int(if from_end { last as i64 } else { 0 }),
+        );
+        // ⚠️ A `__sf_time` of 0 is the START of the frame going forwards and the
+        // END of it going backwards, because a reversed clip counts down through
+        // `(-hold, 0]`. That is exactly Godot's `set_frame_and_progress(last,
+        // 1.0)` / `(0, 0.0)` pair, expressed once instead of twice.
+        n.set_property("__sf_time", Variant::Float(0.0));
+        // Godot keeps `speed_scale` and `custom_speed` separate and multiplies
+        // them; the node carries only `speed_scale`, so the custom speed lands
+        // there — the same place `play_backwards` negates.
+        let speed = if custom_speed == 0.0 {
+            1.0
+        } else {
+            custom_speed
+        };
+        n.set_property("speed_scale", Variant::Float(speed));
+        n.set_property("playing", Variant::Bool(true));
+        true
+    }
+
+    fn animated_sprite_play_backwards(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let clip = if name.is_empty() {
+            current_sprite_animation(n)
+        } else {
+            name.to_string()
+        };
+        // `from_end`: start at the last frame. Without it a non-looping clip
+        // begins already at its reverse end and finishes without drawing.
+        let last = crate::scene_tree::sprite_frames_from_node(n)
+            .map(|f| f.frame_count(&clip).saturating_sub(1))
+            .unwrap_or(0);
+        let speed = match n.get_property("speed_scale") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 1.0,
+        };
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("animation", Variant::String(clip));
+        n.set_property("frame", Variant::Int(last as i64));
+        n.set_property("__sf_time", Variant::Float(0.0));
+        n.set_property(
+            "speed_scale",
+            Variant::Float(-(speed.abs().max(0.01)) as f64),
+        );
+        n.set_property("playing", Variant::Bool(true));
+        true
+    }
+
+    /// `AnimatedSprite2D.pause()` — freeze without resetting.
+    ///
+    /// ⚠️ Godot spells `pause` and `stop` as `_stop_internal(reset)`
+    /// (`animated_sprite_2d.cpp:524-540`); the ONLY difference is whether the
+    /// frame and progress are cleared. Collapsing them loses mid-clip resume.
+    fn animated_sprite_pause(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("playing", Variant::Bool(false));
+        true
+    }
+
+    /// `AnimatedSprite2D.stop()` — freeze AND reset to the clip start.
+    fn animated_sprite_stop(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("playing", Variant::Bool(false));
+        n.set_property("frame", Variant::Int(0));
+        n.set_property("__sf_time", Variant::Float(0.0));
+        // ⚠️ `frame_progress` has to be cleared HERE, not left to the next tick.
+        // `process_animated_sprites` skips a node whose `playing` is false, so
+        // nothing recomputes it after a stop — the sprite would sit rewound to
+        // frame 0 while still advertising the sub-frame offset it stopped at.
+        n.set_property("frame_progress", Variant::Float(0.0));
+        true
+    }
+
+    /// `AnimatedSprite2D.set_frame_and_progress(frame, progress)` — both at once.
+    ///
+    /// ⚠️ `progress` is a 0..1 FRACTION of the current frame, while the tick
+    /// stores raw seconds in `__sf_time` and derives progress as
+    /// `time / frame_seconds(frame)`. Storing the fraction directly would make a
+    /// progress of 0.5 mean half a second, which on a 10 fps clip is five frames.
+    fn animated_sprite_set_frame_and_progress(
+        &mut self,
+        node: u64,
+        frame: i64,
+        progress: f64,
+    ) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let anim = current_sprite_animation(n);
+        let idx = frame.max(0) as usize;
+        let hold = crate::scene_tree::sprite_frames_from_node(n)
+            .and_then(|f| f.animation(&anim).map(|a| a.frame_seconds(idx)))
+            .unwrap_or(0.0);
+        // ⚠️ Read BEFORE the mutable re-borrow, and read it at all: the
+        // fraction -> seconds conversion is direction-dependent, because a
+        // reversed clip stores `__sf_time` in `(-hold, 0]`. Writing
+        // `progress * hold` on a backwards sprite would put the playhead a
+        // whole frame ahead of where the caller asked for, and the reader in
+        // `process_animated_sprites` would clamp it straight back to 1.0.
+        // The two conversions have to agree; this is the inverse of that one.
+        let backwards = match n.get_property("speed_scale") {
+            Variant::Float(f) => f < 0.0,
+            Variant::Int(i) => i < 0,
+            _ => false,
+        };
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        let seconds = if backwards {
+            (progress - 1.0) * hold as f64
+        } else {
+            progress * hold as f64
+        };
+        n.set_property("frame", Variant::Int(idx as i64));
+        n.set_property("__sf_time", Variant::Float(seconds));
+        n.set_property("frame_progress", Variant::Float(progress));
+        true
+    }
+
+    /// `AnimatedSprite2D.get_playing_speed()` — the SIGNED effective speed, or
+    /// 0 while stopped. Negative means the clip is running backwards.
+    fn animated_sprite_playing_speed(&self, node: u64) -> f64 {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return 0.0;
+        };
+        if !matches!(n.get_property("playing"), Variant::Bool(true)) {
+            return 0.0;
+        }
+        match n.get_property("speed_scale") {
+            Variant::Float(f) => f,
+            Variant::Int(i) => i as f64,
+            _ => 1.0,
+        }
+    }
+
+    fn animation_player_play_backwards(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(player) = self.tree_mut().get_animation_player_mut(nid) else {
+            return false;
+        };
+        // An empty name means "the current clip", matching `play()`'s handling.
+        let clip = if name.is_empty() {
+            player.current_animation().map(str::to_owned)
+        } else {
+            Some(name.to_owned())
+        };
+        if let Some(clip) = clip {
+            player.play_backwards(&clip, -1.0);
+        }
+        true
+    }
+
+    fn animation_player_playing_speed(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.get_playing_speed())
+    }
+
+    fn animation_player_has_animation(&self, node: u64, name: &str) -> Option<bool> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.has_animation(name))
+    }
+
+    fn animation_player_animation_list(&self, node: u64) -> Option<Vec<String>> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.get_animation_list())
+    }
+
+    fn animation_player_speed_scale(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.speed_scale)
+    }
+
+    fn animation_player_play_section(&mut self, node: u64, name: &str, start: f64, end: f64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(p) = self.tree_mut().get_animation_player_mut(nid) {
+            // Godot's defaults for the three arguments a 3-arg call omits.
+            p.play_section(name, start, end, -1.0, 1.0, false);
+        }
+    }
+
+    fn animation_player_set_speed_scale(&mut self, node: u64, scale: f64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(p) = self.tree_mut().get_animation_player_mut(nid) {
+            p.speed_scale = scale;
+        }
+    }
+
+    // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
+
+    fn signal_connection_list(
+        &self,
+        node: u64,
+        signal_name: &str,
+    ) -> Vec<(u64, String, bool, u32)> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(store) = self.tree().signal_store(nid) else {
+            return Vec::new();
+        };
+        let Some(signal) = store.get_signal(signal_name) else {
+            return Vec::new();
+        };
+        signal
+            .connections()
+            .iter()
+            .map(|c| {
+                // ⚠️ The decoded booleans are OR-ed back into the reported
+                // mask (pat-mgixk.98). A connection built through
+                // `Connection::as_one_shot()` / `as_deferred()` — which
+                // packed-scene wiring and the editor use — never passed a
+                // `flags` mask at all, so `c.flags` alone would report 0 for a
+                // connection that really IS one-shot. These two bits can only
+                // ever be ADDED, never contradict the mask, because
+                // `with_flags` keeps them in step with it.
+                let mut flags = c.flags;
+                if c.one_shot {
+                    flags |= gdobject::signal::CONNECT_ONE_SHOT;
+                }
+                if c.deferred {
+                    flags |= gdobject::signal::CONNECT_DEFERRED;
+                }
+                (c.target_id.raw(), c.method.clone(), c.one_shot, flags)
+            })
+            .collect()
+    }
+
+    fn incoming_connections(&self, node: u64) -> Vec<(u64, String, String)> {
+        // Godot answers this from a per-object back-reference list; this tree
+        // keeps connections only on the SOURCE, so the whole graph is scanned.
+        // Linear in nodes×signals — fine for an introspection call a script
+        // makes rarely, and it cannot go stale the way a cached back-list can.
+        let target_raw = node;
+        let mut out = Vec::new();
+        for id in self.tree().all_nodes_in_tree_order() {
+            let Some(store) = self.tree().signal_store(id) else {
+                continue;
+            };
+            for signal_name in store.signal_names() {
+                let Some(signal) = store.get_signal(signal_name) else {
+                    continue;
+                };
+                for conn in signal.connections() {
+                    if conn.target_id.raw() == target_raw {
+                        out.push((id.raw(), signal_name.to_string(), conn.method.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn has_any_connections(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(store) = self.tree().signal_store(nid) else {
+            return false;
+        };
+        store.signal_names().into_iter().any(|name| {
+            store
+                .get_signal(name)
+                .is_some_and(|s| s.connection_count() > 0)
+        })
+    }
+
+    fn notify_property_list_changed(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if self.tree().get_node(nid).is_none() {
+            return false;
+        }
+        self.tree_mut()
+            .emit_signal(nid, "property_list_changed", &[]);
+        true
+    }
+
+    fn animation_player_seek(&mut self, node: u64, time: f64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.seek(time, true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_is_playing(&self, node: u64) -> Option<bool> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.playing)
+    }
+
+    fn animation_player_current(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.current_animation().unwrap_or("").to_string())
+    }
+
+    fn animation_player_position(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.position())
+    }
+
+    // -- SceneTree control surface (pat-0q2kx.47) --------------------------
+    //
+    // Thin routing onto SceneTree's own implementations, which already existed
+    // and were unit-tested; what was missing was any way for a script to reach
+    // them. `EngineResult` collapses to a bool here because GDScript's
+    // `change_scene_to_file` returns an Error code the idiomatic call discards.
+
+    fn change_scene_to_file(&mut self, path: &str) -> bool {
+        self.tree_mut().change_scene_to_file(path).is_ok()
+    }
+
+    fn reload_current_scene(&mut self) -> bool {
+        self.tree_mut().reload_current_scene().is_ok()
+    }
+
+    fn set_current_scene(&mut self, node_id: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        // Refuse a node that is not in the tree rather than recording a
+        // current scene that cannot be read back — `current_scene` would then
+        // answer an id `get_node` cannot resolve.
+        if self.tree().get_node(nid).is_none() {
+            return false;
+        }
+        // `None` source: there is no file behind this scene, so
+        // `reload_current_scene` correctly stops working — as in Godot.
+        self.tree_mut().set_current_scene(nid, None);
+        true
+    }
+
+    fn change_scene_to_node(&mut self, node_id: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        // Godot hands the node OVER, so it must come out of the arena first.
+        //
+        // ⚠️ If it still has a parent, that parent keeps a stale child id after
+        // `take_node` — the node is re-inserted under the root with the same
+        // id, so the subtree survives, but the old parent would list a child it
+        // no longer owns. Detaching first keeps the old parent consistent. The
+        // natural argument is an `instantiate()` result, which has no parent.
+        let parent = self.tree().get_node(nid).and_then(|n| n.parent());
+        if let Some(pid) = parent {
+            if let Some(old) = self.tree_mut().get_node_mut(pid) {
+                old.remove_child_id(nid);
+            }
+        }
+        let Some(mut node) = self.tree_mut().take_node(nid) else {
+            return false;
+        };
+        node.set_parent(None);
+        self.tree_mut().change_scene_to_node(node).is_ok()
+    }
+
+    fn notify_group_flags(&mut self, flags: i64, group: &str, what: i64) -> bool {
+        self.tree_mut().notify_group_flags(
+            flags.max(0) as u32,
+            group,
+            gdobject::notification::Notification::new(what as i32),
+        );
+        true
+    }
+
+    fn quit(&mut self, exit_code: i64) {
+        self.tree_mut().quit(exit_code as i32);
+    }
+
+    fn set_tree_paused(&mut self, paused: bool) {
+        self.tree_mut().set_paused(paused);
+    }
+
+    /// `get_tree().set_multiplayer(api)` from a script (pat-s3rrv.230).
+    ///
+    /// The capability already existed and only Rust could reach it, so this is
+    /// the spelling rather than the mechanism.
+    fn set_script_multiplayer_api(&mut self, node: u64) -> bool {
+        // Same identity story as `multiplayer_set_peer` above: the script's
+        // identity is the node it is attached to.
+        let node = crate::node::NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_script_multiplayer_api(node)
+    }
+
+    fn is_tree_paused(&self) -> bool {
+        self.tree().paused()
+    }
+
+    fn tree_root(&self) -> Option<u64> {
+        Some(self.tree().root_id().raw())
+    }
+
+    fn tree_node_count(&self) -> i64 {
+        self.tree().node_count() as i64
+    }
+
+    /// pat-mgixk.8 — `SceneTree.get_current_scene()`. `None` before any scene
+    /// has been instanced, which Godot reports as `null` rather than `/root`.
+    fn current_scene(&self) -> Option<u64> {
+        self.tree().current_scene().map(|id| id.object_id().raw())
+    }
+
+    fn nodes_in_group(&self, group: &str) -> Vec<u64> {
+        self.tree()
+            .get_nodes_in_group(group)
+            .into_iter()
+            .map(|id| id.raw())
+            .collect()
+    }
+
+    fn first_node_in_group(&self, group: &str) -> Option<u64> {
+        self.tree()
+            .get_first_node_in_group(group)
+            .map(|id| id.raw())
+    }
+
+    fn tree_has_group(&self, group: &str) -> bool {
+        self.tree().has_group(group)
+    }
+
+    fn call_group_flags(&mut self, flags: i64, group: &str, method: &str, args: &[Variant]) {
+        // A negative flag word cannot name any GROUP_CALL_* bit; clamp rather
+        // than wrap it into a mask that would silently mean "reverse + deferred".
+        self.tree_mut()
+            .call_group_flags(flags.max(0) as u32, group, method, args);
+    }
+
+    fn set_group(&mut self, group: &str, property: &str, value: Variant) {
+        self.tree_mut().set_group(group, property, value);
+    }
+
+    fn set_group_flags(&mut self, flags: i64, group: &str, property: &str, value: Variant) -> bool {
+        // `flags.max(0)` for the same reason `notify_group_flags` above does
+        // it: GDScript ints are signed and the flag set is a u32 bitfield, so a
+        // negative would wrap into every flag at once.
+        self.tree_mut()
+            .set_group_flags(flags.max(0) as u32, group, property, value);
+        true
+    }
+
+    fn notify_group(&mut self, group: &str, what: i64) {
+        self.tree_mut().notify_group(
+            group,
+            gdobject::notification::Notification::new(what as i32),
+        );
+    }
+
+    // -- Physics query parameter constructors (pat-s3rrv.26) ---------------
+
+    fn physics_query_static_call(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        // Godot: `PhysicsRayQueryParameters2D.create(from, to)` — a static
+        // factory returning a configured parameters object. `intersect_ray`
+        // accepts nothing else, so without this the whole query surface is
+        // unreachable from script no matter what ClassDB knows about it.
+        match (type_name, method) {
+            // `PhysicsServer3D.space_get_direct_state(space)` (pat-v3co1): the
+            // server spelling of `get_world_3d().direct_space_state`. There is
+            // one 3D space per tree, so only its RID (from `World3D.get_space()`)
+            // resolves; anything else is Godot's null for an unknown space.
+            ("PhysicsServer3D", "space_get_direct_state") => Some(match args.first() {
+                Some(Variant::Rid(rid)) if rid.id() == SPACE_3D_RID => {
+                    Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE))
+                }
+                _ => Variant::Nil,
+            }),
+            ("PhysicsRayQueryParameters2D", "create") => {
+                let from = match args.first() {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return None,
+                };
+                let to = match args.get(1) {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return None,
+                };
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    new_ray_params_handle(from, to),
+                )))
+            }
+            // `CircleShape2D.new()` / `RectangleShape2D.new()` — the shape
+            // resources `intersect_shape` takes. `gdphysics2d::Shape2D` has had
+            // these forever and `shape_cast` has been correct and unit-tested,
+            // but no script could build the argument, so the whole shape-query
+            // half of PhysicsDirectSpaceState2D was unreachable (pat-s3rrv.26).
+            //
+            // Defaults are Godot's: radius 10, size 20x20 (= half-extents 10).
+            ("CircleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Circle { radius: 10.0 }),
+            ))),
+            ("RectangleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Rectangle {
+                    half_extents: gdcore::math::Vector2::new(10.0, 10.0),
+                }),
+            ))),
+            // The remaining six Shape2D subclasses (pat-s3rrv.98). All were
+            // already in ClassDB and already representable by
+            // `gdphysics2d::shape::Shape2D`; only `.new()` was missing, so
+            // `var s = CapsuleShape2D.new()` failed on a class the editor's own
+            // resource picker offers.
+            //
+            // Defaults are Godot's, from each class's doc XML rather than
+            // copied from the circle above:
+            ("CapsuleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                // ⚠️ height is the TOTAL height (30.0), not Godot's derived
+                // `mid_height` (= height - 2 * radius). Storing mid_height here
+                // would give a capsule 20px shorter than the authored one.
+                new_shape_handle(gdphysics2d::shape::Shape2D::Capsule {
+                    radius: 10.0,
+                    height: 30.0,
+                }),
+            ))),
+            ("SegmentShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Segment {
+                    a: gdcore::math::Vector2::new(0.0, 0.0),
+                    b: gdcore::math::Vector2::new(0.0, 10.0),
+                }),
+            ))),
+            // ⚠️ Both polygon kinds default to NO points, which is Godot's
+            // default and is a legal shape — geometry arrives later through the
+            // `points` / `segments` setter. Seeding a placeholder quad instead
+            // would make an unconfigured shape silently collide.
+            ("ConvexPolygonShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::convex_polygon(&[])),
+            ))),
+            ("ConcavePolygonShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::concave_polygon(&[])),
+            ))),
+            ("WorldBoundaryShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                // ⚠️ The default normal is (0, -1) — pointing UP in Godot's
+                // y-down 2D space, so the solid half-plane is everything below
+                // the line. Flipping the sign leaves a "floor" that bodies fall
+                // through while the shape still exists.
+                new_shape_handle(gdphysics2d::shape::Shape2D::world_boundary(
+                    gdcore::math::Vector2::new(0.0, -1.0),
+                    0.0,
+                )),
+            ))),
+            ("SeparationRayShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::SeparationRay { length: 20.0 }),
+            ))),
+            ("PhysicsShapeQueryParameters2D", "new") => Some(Variant::ObjectId(
+                ObjectId::from_raw(new_shape_params_handle()),
+            )),
+            _ => None,
+        }
+    }
+
+    // -- AnimationNodeStateMachinePlayback (pat-s3rrv.1) --------------------
+
+    fn animation_tree_playback_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let (node, sm_name) = playback_handle_target(handle)?;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+
+        // `get_current_length` is the one method that needs the clip library
+        // rather than the machine, so read it before the mutable borrow.
+        if method == "get_current_length" {
+            let tree = self.tree().get_animation_tree(nid)?;
+            let sm = tree.state_machine(&sm_name)?;
+            return Some(Variant::Float(sm.current_length(&tree.animations)));
+        }
+
+        let sm = self
+            .tree_mut()
+            .get_animation_tree_mut(nid)?
+            .state_machine_mut(&sm_name)?;
+
+        match method {
+            // Godot: travel(to_node, reset_on_teleport = true). The path is
+            // walked by `advance` over the following frames, using each hop's
+            // declared crossfade — a travel is not an instant jump.
+            "travel" => {
+                let target = variant_string(args.first()?)?;
+                sm.travel(&target);
+                Some(Variant::Nil)
+            }
+            "start" => {
+                let target = variant_string(args.first()?)?;
+                let reset = match args.get(1) {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    // Godot's default.
+                    _ => true,
+                };
+                sm.start(&target, reset);
+                Some(Variant::Nil)
+            }
+            "next" | "travel_to_next_blend" => {
+                sm.next_state();
+                Some(Variant::Nil)
+            }
+            "stop" => {
+                sm.stop();
+                Some(Variant::Nil)
+            }
+            "is_playing" => Some(Variant::Bool(sm.is_playing())),
+            "get_current_node" => Some(Variant::String(sm.current_node().to_string())),
+            "get_travel_path" => Some(Variant::Array(
+                sm.travel_path_remaining()
+                    .iter()
+                    .map(|s| Variant::String(s.clone()))
+                    .collect(),
+            )),
+            // Godot answers an empty StringName when no fade is in flight.
+            "get_fading_from_node" => Some(Variant::String(
+                sm.fading_from_node().unwrap_or_default().to_string(),
+            )),
+            "get_current_play_position" => Some(Variant::Float(sm.current_play_position())),
+            // Not a playback method: fall through so the interpreter reports it
+            // rather than swallowing a typo as a no-op.
+            _ => None,
+        }
+    }
+
+    // -- Tween (pat-0q2kx.4) -----------------------------------------------
+
+    fn create_tween(&mut self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree_mut();
+        tree.get_node(nid)?;
+        let id = tree.create_tween(nid);
+        // Godot's `create_tween()` hands back an already-running tween: the
+        // script chains tweeners onto it and it advances on the next frame
+        // without an explicit `play()`.
+        if let Some(t) = tree.get_tween_mut(id) {
+            t.start();
+        }
+        Some(id.raw())
+    }
+
+    fn tween_call(&mut self, tween: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let tid = TweenId::from_raw(tween);
+        // The identity check that makes this safe to try before node dispatch:
+        // an id that names no live tween returns `None` and the interpreter
+        // falls through to ordinary node semantics.
+        self.tree_mut().get_tween_mut(tid)?;
+
+        // `self` handle, so the fluent chain keeps flowing:
+        // `create_tween().tween_property(...).set_trans(...).set_ease(...)`.
+        let handle = Variant::ObjectId(ObjectId::from_raw(tween));
+
+        match method {
+            // -- tweeners ---------------------------------------------------
+            // Godot: tween_property(object, property, final_val, duration)
+            "tween_property" => {
+                let target = variant_object_raw(args.first()?)?;
+                let property = variant_string(args.get(1)?)?;
+                let final_value = args.get(2)?.clone();
+                let duration = variant_number(args.get(3)?)?;
+                // Godot samples the start value when the tweener *starts*; the
+                // tween is created and stepped in the same frame here, so the
+                // node's present value is that same sample.
+                let start = {
+                    let nid = NodeId::from_object_id(ObjectId::from_raw(target));
+                    let (prop, sub) = crate::tween::split_property_path(&property);
+                    let base = self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property(prop))
+                        .unwrap_or(Variant::Nil);
+                    match sub {
+                        // `"position:x"` interpolates a float component, so the
+                        // start value must be that component — not the whole
+                        // Vector2, which would make `interpolate_variant` bail
+                        // on the type mismatch against the float end value.
+                        Some(s) => {
+                            crate::tween::read_subname(&base, s).unwrap_or(Variant::Float(0.0))
+                        }
+                        None => base,
+                    }
+                };
+                let step =
+                    TweenStep::new(property, start, final_value, duration).with_target(target);
+                self.push_tween_step(tid, step)?;
+                Some(handle)
+            }
+            // Godot: tween_method(callable, from, to, duration). Patina carries
+            // the callable as a plain method name on the owning node's script.
+            "tween_method" => {
+                let m = variant_callable_method(args.first()?)?;
+                let from = args.get(1)?.clone();
+                let to = args.get(2)?.clone();
+                let duration = variant_number(args.get(3)?)?;
+                self.push_tween_step(tid, TweenStep::method(m, from, to, duration))?;
+                Some(handle)
+            }
+            "tween_callback" => {
+                let m = variant_callable_method(args.first()?)?;
+                self.push_tween_step(tid, TweenStep::callback(m))?;
+                Some(handle)
+            }
+            "tween_interval" => {
+                let secs = variant_number(args.first()?)?;
+                self.push_tween_step(tid, TweenStep::interval(secs))?;
+                Some(handle)
+            }
+
+            // -- per-tweener setters ----------------------------------------
+            //
+            // Godot returns the *Tweener* from `tween_property`, and these
+            // setters apply to it. Patina returns the tween handle, so they
+            // apply to the most recently added step — which is the same step
+            // in every fluent chain.
+            "set_ease" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.with_last_step(tid, |s| s.ease_type = ease_type_from_i64(v))?;
+                Some(handle)
+            }
+            "set_trans" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.with_last_step(tid, |s| s.trans_func = trans_func_from_i64(v))?;
+                Some(handle)
+            }
+            "set_delay" => {
+                let v = variant_number(args.first()?)?;
+                self.with_last_step(tid, |s| s.delay = v)?;
+                Some(handle)
+            }
+
+            // -- sequencing ---------------------------------------------------
+            //
+            // `parallel()` makes the *next* tweener run alongside the previous
+            // one; Godot also accepts it retroactively on the last one, which is
+            // how the fluent form `.tween_property(..).parallel()` reads.
+            "parallel" => {
+                self.with_last_step(tid, |s| s.parallel = true)?;
+                Some(handle)
+            }
+            "chain" => {
+                self.with_last_step(tid, |s| s.parallel = false)?;
+                Some(handle)
+            }
+            // Godot's `set_parallel(enabled = true)`: a MODE, not a one-shot.
+            // Every tweener added afterwards runs alongside the previous one
+            // until it is turned off — `parallel()` above only affects the next.
+            "set_parallel" => {
+                let enabled = !matches!(args.first(), Some(Variant::Bool(false)));
+                let tween = self.tree_mut().get_tween_mut(tid)?;
+                tween.default_parallel = enabled;
+                Some(handle)
+            }
+
+            // -- tween-wide controls ------------------------------------------
+            "set_loops" => {
+                let n = args
+                    .first()
+                    .and_then(variant_number)
+                    .map(|v| v as i32)
+                    // Godot: `set_loops()` with no argument loops forever.
+                    .unwrap_or(-1);
+                self.tree_mut().get_tween_mut(tid)?.set_loops(n);
+                Some(handle)
+            }
+            "set_speed_scale" => {
+                let v = variant_number(args.first()?)?;
+                self.tree_mut().get_tween_mut(tid)?.set_speed_scale(v);
+                Some(handle)
+            }
+            "play" => {
+                self.tree_mut().get_tween_mut(tid)?.play();
+                Some(Variant::Nil)
+            }
+            "pause" => {
+                self.tree_mut().get_tween_mut(tid)?.pause();
+                Some(Variant::Nil)
+            }
+            "stop" => {
+                self.tree_mut().get_tween_mut(tid)?.stop();
+                Some(Variant::Nil)
+            }
+            "kill" => {
+                self.tree_mut().get_tween_mut(tid)?.kill();
+                Some(Variant::Nil)
+            }
+            "is_running" => {
+                let running = self.tree_mut().get_tween_mut(tid)?.running;
+                Some(Variant::Bool(running))
+            }
+            "is_valid" => {
+                let valid = self.tree_mut().get_tween_mut(tid)?.is_valid();
+                Some(Variant::Bool(valid))
+            }
+            // -- PropertyTweener start-value verbs (pat-s3rrv.46) -----------
+            //
+            // Godot's `tween_property(...).from(v)` / `.from_current()` /
+            // `.as_relative()` all rewrite the tweener's START value, so they
+            // land on the most recently added step exactly like the setters
+            // above. ClassDB advertised all three and a call raised
+            // `UndefinedFunction` until this bead.
+            "from" => {
+                let v = args.first()?.clone();
+                self.with_last_step(tid, |s| s.start_value = v)?;
+                Some(handle)
+            }
+            "from_current" => {
+                // Re-sample the target's property NOW. `tween_property` already
+                // sampled at creation, so this only differs when the chain moved
+                // the node in between — which is precisely why Godot has it.
+                let target = {
+                    let tween = self.tree_mut().get_tween_mut(tid)?;
+                    let step = tween.steps.last()?;
+                    (step.target, step.property_path.clone())
+                };
+                let (raw, path) = target;
+                let owner = self.tree().tween_owner(tid)?;
+                let nid = match raw {
+                    Some(r) => NodeId::from_object_id(ObjectId::from_raw(r)),
+                    None => owner,
+                };
+                let (prop, sub) = crate::tween::split_property_path(&path);
+                let base = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property(prop))
+                    .unwrap_or(Variant::Nil);
+                let current = match sub {
+                    Some(sn) => {
+                        crate::tween::read_subname(&base, sn).unwrap_or(Variant::Float(0.0))
+                    }
+                    None => base,
+                };
+                self.with_last_step(tid, |s| s.start_value = current)?;
+                Some(handle)
+            }
+            "as_relative" => {
+                // The final value becomes an OFFSET from the start value, so
+                // `tween_property(n, "position", Vector2(10, 0), 1).as_relative()`
+                // ends at start + (10, 0) instead of at (10, 0).
+                self.with_last_step(tid, |s| {
+                    if let Some(sum) = crate::tween::add_variants(&s.start_value, &s.end_value) {
+                        s.end_value = sum;
+                    }
+                })?;
+                Some(handle)
+            }
+
+            // -- subtween (pat-s3rrv.46) ------------------------------------
+            //
+            // `TweenStep::subtween` existed and nothing could reach it: the
+            // nested tween arrives as another live tween handle, which is taken
+            // out of the tree so the parent owns it — Godot's
+            // `tween_subtween(subtween)` does the same.
+            "tween_subtween" => {
+                let raw = variant_object_raw(args.first()?)?;
+                let sub_id = TweenId::from_raw(raw);
+                // A handle that names no live tween is not a subtween.
+                let nested = self.tree_mut().take_tween(sub_id)?;
+                self.push_tween_step(tid, TweenStep::subtween(nested))?;
+                Some(handle)
+            }
+
+            // -- process / pause modes (pat-s3rrv.46) ------------------------
+            "set_process_mode" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_process_mode(TweenProcessMode::from_i64(v));
+                Some(handle)
+            }
+            "set_pause_mode" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_pause_mode(TweenPauseMode::from_i64(v));
+                Some(handle)
+            }
+            // Godot's `set_ignore_time_scale(ignore = true)`.
+            "set_ignore_time_scale" => {
+                let ignore = !matches!(args.first(), Some(Variant::Bool(false)));
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_ignore_time_scale(ignore);
+                Some(handle)
+            }
+            "bind_node" => {
+                let raw = variant_object_raw(args.first()?)?;
+                self.tree_mut().get_tween_mut(tid)?.bind_node(raw);
+                Some(handle)
+            }
+
+            // -- introspection / manual stepping (pat-s3rrv.46) --------------
+            "get_total_elapsed_time" => {
+                let t = self.tree_mut().get_tween_mut(tid)?.get_total_elapsed_time();
+                Some(Variant::Float(t))
+            }
+            "get_loops_left" => {
+                let n = self.tree_mut().get_tween_mut(tid)?.get_loops_left();
+                Some(Variant::Int(n as i64))
+            }
+            // `custom_step(delta)` advances the tween by hand and reports
+            // whether it is still running. The property writes land on the next
+            // `process_tweens` pass, which is the same frame's phase.
+            "custom_step" => {
+                let delta = variant_number(args.first()?)?;
+                let running = self.tree_mut().get_tween_mut(tid)?.custom_step(delta);
+                Some(Variant::Bool(running))
+            }
+            // Godot's static `Tween.interpolate_value(initial, delta, elapsed,
+            // duration, trans_type, ease_type)`. Reached through a live handle
+            // here because Patina has no static-call path onto Tween.
+            "interpolate_value" => {
+                let initial = args.first()?.clone();
+                let delta = args.get(1)?.clone();
+                let elapsed = variant_number(args.get(2)?)?;
+                let duration = variant_number(args.get(3)?)?;
+                let trans = trans_func_from_i64(variant_number(args.get(4)?)? as i64);
+                let ease_type = ease_type_from_i64(variant_number(args.get(5)?)? as i64);
+                Some(Tween::interpolate_value(
+                    &initial, &delta, elapsed, duration, trans, ease_type,
+                ))
+            }
+
+            // A live tween asked for a method Tween does not have: fall through
+            // so the interpreter reports `UndefinedFunction` as it would for any
+            // other object, rather than silently returning Nil.
+            _ => None,
+        }
+    }
+
+    fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {
+        // A `.glb`/`.gltf` is a PackedScene in Godot's sense (its importer
+        // reports that type), but it is NOT `.tscn` text: it is binary GLB or
+        // glTF JSON. The reader below would fail to parse it and hand the script
+        // a silent `null`, so it is instantiated from the parsed document
+        // instead (pat-mgixk.23).
+        //
+        // ⚠️ This branch is required by the class rename in `gltf_import.rs`.
+        // Reporting PackedScene without it turns "cannot instantiate a
+        // GltfDocument resource" — a clear error — into a silent null, which is
+        // strictly worse. The two changes belong together.
+        let lower = path.to_lowercase();
+        if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+            let fs_path = gdcore::file_access::resolve_path(path).ok()?;
+            let doc = gdresource::import_gltf(&fs_path).ok()?;
+            let tree = self.tree_mut();
+            let root = tree.root_id();
+            // Attached under the root like the tscn path below; the script's
+            // follow-up `add_child` reparents it.
+            return crate::gltf_scene::build_gltf_subtree(tree, root, &doc).map(|id| id.raw());
+        }
+
+        // `res://` resolves against the configured project root, exactly like
+        // `SceneTree::change_scene_to_file`. Hand-rolling
+        // `strip_prefix("res://")` here instead mapped `res://X` to the
+        // CWD-relative `X`, so `preload("res://bullet.tscn").instantiate()` —
+        // the way every real game spawns — only worked when the process
+        // happened to be running from the project root (pat-u3l8c.12).
+        // An unconfigured root is an Err here, which becomes `null` at the
+        // call site, matching the "missing/unloadable scene → null" contract.
+        // Read through `FileAccess`, which serves a mounted `.pck` before disk
+        // (pat-s3rrv.34). The raw `std::fs::read_to_string` this replaces made
+        // `preload("res://bullet.tscn").instantiate()` fail outright in an
+        // exported game, where the scene exists only inside the pack.
+        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
+        let scene = crate::packed_scene::PackedScene::from_tscn(&source).ok()?;
+        // Recursively resolve `instance=ExtResource` sub-scenes the same way.
+        let resolve = |sub: &str| -> Option<crate::packed_scene::PackedScene> {
+            // A sub-scene may be an imported `.glb` (a spawned enemy.tscn
+            // instances enemy.glb); it is not `.tscn` text (pat-m2jgd).
+            let lower = sub.to_ascii_lowercase();
+            if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+                return crate::gltf_scene::packed_scene_from_gltf_path(sub);
+            }
+            let src = gdcore::file_access::FileAccess::read_file_string(sub).ok()?;
+            crate::packed_scene::PackedScene::from_tscn(&src).ok()
+        };
+        let tree = self.tree_mut();
+        // Built DETACHED, as Godot does: no `_enter_tree` or `_ready` runs until
+        // the script's `add_child` inserts it. Parenting it under `/root` here
+        // meant the lifecycle fired on insertion — each node before its children
+        // existed, so READY went parent-first — and then fired AGAIN when
+        // `add_child` reparented it, so a spawned node's `_ready` ran twice
+        // (pat-mgixk.61).
+        let instance =
+            crate::packed_scene::instantiate_packed_scene_detached(tree, &scene, &resolve).ok()?;
+        // Godot's `scene_file_path` on the instantiated root: what a render path
+        // re-reads an inline `SubResource` from once the PackedScene is gone
+        // (`world_environment::authoring_scene_path`, pat-i4jgd).
+        if let Some(root) = tree.get_node_mut(instance) {
+            root.set_property(
+                crate::world_environment::SCENE_FILE_PATH_KEY,
+                Variant::String(path.to_string()),
+            );
+        }
+        // The spawned nodes' own scripts. Without this the subtree is inert: no
+        // `_ready`, no `_process`, no signal handlers — the scene spawns and then
+        // does nothing, which is the half of this bug a tree-shape assertion
+        // cannot see.
+        attach_subtree_scripts_from_res(tree, instance);
+        Some(instance.raw())
+    }
+
+    fn instantiate_script(&mut self, path: &str) -> Option<u64> {
+        self.instantiate_script_with_values(path, &[])
+    }
+
+    fn instantiate_script_with_args(&mut self, path: &str, args: &[Variant]) -> Option<u64> {
+        // `load("res://h.gd").new(21)` -> `_init(21)` (pat-mgixk.100). The
+        // interpreter's `new` arm passed no arguments at all, so a constructor
+        // taking parameters could never receive them.
+        self.instantiate_script_inner(path, &[], args)
+    }
+
+    fn instantiate_script_resource(
+        &mut self,
+        script_path: &str,
+        values: &[(String, Variant)],
+    ) -> Option<u64> {
+        self.instantiate_script_with_values(script_path, values)
+    }
+
+    fn bound_resource_snapshot(&self, binding: &str) -> Option<gdvariant::ResourceRef> {
+        crate::script_subresource::bound_snapshot(self.tree(), binding)
+    }
+
+    fn bound_resource_get(&self, binding: &str, field: &str) -> Option<Variant> {
+        crate::script_subresource::bound_get(self.tree(), binding, field)
+    }
+
+    fn bound_resource_set(&mut self, binding: &str, field: &str, value: Variant) -> bool {
+        crate::script_subresource::bound_set(self.tree_mut(), binding, field, value)
+    }
+
+    fn get_script_path(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_script(nid)?
+            .script_file_path()
+            .map(str::to_string)
+    }
+
+    fn script_exported_values(&self, node: u64) -> Vec<(String, Variant)> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(script) = self.tree().get_script(nid) else {
+            return Vec::new();
+        };
+        script
+            .exported_property_names()
+            .into_iter()
+            .filter_map(|name| script.get_property(&name).map(|v| (name, v)))
+            .collect()
+    }
+
+    // -- AStar2D / AStar3D / AStarGrid2D (pat-s3rrv.19) --------------------
+    //
+    // `crate::astar` has been a complete, unit-tested pathfinder since
+    // pat-p0s82, with ClassDB metadata registered — and zero callers. The
+    // instances live here rather than in the interpreter's handle tables
+    // because `gdscript-interop` cannot name a `gdscene` type (this crate
+    // depends on it, not the reverse), so the trait is the inversion seam.
+
+    fn polygon_path_finder_new(&mut self) -> Option<u64> {
+        POLYGON_PATH_FINDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::POLYGON_PATH_FINDER_HANDLE_TAG | seq;
+            reg.finders
+                .insert(raw, crate::polygon_path_finder::PolygonPathFinder::new());
+            Some(raw)
+        })
+    }
+
+    fn polygon_path_finder_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let vec2 = |i: usize| match args.get(i) {
+            Some(Variant::Vector2(v)) => *v,
+            _ => gdcore::math::Vector2::ZERO,
+        };
+        POLYGON_PATH_FINDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let f = reg.finders.get_mut(&handle)?;
+            Some(match method {
+                // Godot: `setup(points: PackedVector2Array, connections:
+                // PackedInt32Array)`. The connections are a **flat** list of
+                // index pairs, while the module takes tuples — adapting that is
+                // the whole reason this lives on the scene side.
+                //
+                // An odd trailing index is dropped rather than paired with
+                // nothing: `chunks_exact(2)` ignores the remainder, which
+                // matches Godot treating the array as pairs.
+                "setup" => {
+                    let points = match args.first() {
+                        Some(Variant::PackedVector2Array(p)) => p.clone(),
+                        _ => Vec::new(),
+                    };
+                    let flat = match args.get(1) {
+                        Some(Variant::PackedInt32Array(c)) => c.clone(),
+                        _ => Vec::new(),
+                    };
+                    let pairs: Vec<(usize, usize)> = flat
+                        .chunks_exact(2)
+                        .filter(|c| c[0] >= 0 && c[1] >= 0)
+                        .map(|c| (c[0] as usize, c[1] as usize))
+                        .collect();
+                    f.setup(points, &pairs);
+                    Variant::Nil
+                }
+                "find_path" => Variant::PackedVector2Array(f.find_path(vec2(0), vec2(1))),
+                "get_intersections" => {
+                    Variant::PackedVector2Array(f.get_intersections(vec2(0), vec2(1)))
+                }
+                "is_point_inside" => Variant::Bool(f.is_point_inside(vec2(0))),
+                // Godot returns a zero Vector2 when there are no points at all,
+                // rather than failing — a script asking an empty finder gets a
+                // usable value.
+                "get_closest_point" => Variant::Vector2(
+                    f.get_closest_point(vec2(0))
+                        .unwrap_or(gdcore::math::Vector2::ZERO),
+                ),
+                // Godot's `get_bounds` is a `Rect2`; the module reports the
+                // min/max extent, so this converts rather than reshaping the
+                // module. An empty finder yields a zero rect, matching Godot's
+                // default-constructed `bounds`.
+                "get_bounds" => {
+                    let (pos, size) = match f.bounds() {
+                        Some((min, max)) => (min, max - min),
+                        None => (gdcore::math::Vector2::ZERO, gdcore::math::Vector2::ZERO),
+                    };
+                    Variant::Rect2(gdcore::math::Rect2 {
+                        position: pos,
+                        size,
+                    })
+                }
+                "set_point_penalty" => {
+                    let idx = match args.first() {
+                        Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                        _ => return None,
+                    };
+                    let penalty = match args.get(1) {
+                        Some(Variant::Float(v)) => *v as f32,
+                        Some(Variant::Int(v)) => *v as f32,
+                        _ => 0.0,
+                    };
+                    f.set_point_penalty(idx, penalty);
+                    Variant::Nil
+                }
+                "get_point_penalty" => {
+                    let idx = match args.first() {
+                        Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                        _ => return None,
+                    };
+                    Variant::Float(f64::from(f.get_point_penalty(idx)))
+                }
+                // Godot's `data` property is the serialization surface —
+                // `_set_data` / `_get_data` in
+                // `scene/resources/2d/polygon_path_finder.cpp` — and is what
+                // lets a finder round-trip through a `.tres`. Its five keys are
+                // Godot's, not invented here: `points`, `connections` (per-point
+                // adjacency), `segments` (the FLAT edge pairs), `bounds`, and an
+                // optional `penalties`.
+                //
+                // ⚠️ `connections` and `segments` are different shapes and both
+                // are emitted. `segments` is what reconstruction reads;
+                // `connections` is per-point adjacency that Godot's own loader
+                // requires to be present and the same length as `points`, so
+                // omitting it would produce a dictionary Godot refuses.
+                "get_data" => {
+                    let mut d = gdvariant::Dictionary::new();
+                    let points = f.points().to_vec();
+                    let mut adjacency: Vec<Variant> =
+                        vec![Variant::PackedInt32Array(Vec::new()); points.len()];
+                    let mut segments: Vec<i32> = Vec::new();
+                    // `&(i, j)` — `edges()` hands back a slice, so a plain
+                    // `(i, j)` binds two `&usize` and every cast below fails.
+                    for &(i, j) in f.edges() {
+                        segments.push(i as i32);
+                        segments.push(j as i32);
+                        for (from, to) in [(i, j), (j, i)] {
+                            if let Some(Variant::PackedInt32Array(list)) = adjacency.get_mut(from) {
+                                list.push(to as i32);
+                            }
+                        }
+                    }
+                    let (pos, size) = match f.bounds() {
+                        Some((min, max)) => (min, max - min),
+                        None => (gdcore::math::Vector2::ZERO, gdcore::math::Vector2::ZERO),
+                    };
+                    let penalties: Vec<f32> =
+                        (0..points.len()).map(|i| f.get_point_penalty(i)).collect();
+                    d.insert("points", Variant::PackedVector2Array(points));
+                    d.insert("connections", Variant::Array(adjacency.into()));
+                    d.insert("segments", Variant::PackedInt32Array(segments));
+                    d.insert(
+                        "bounds",
+                        Variant::Rect2(gdcore::math::Rect2 {
+                            position: pos,
+                            size,
+                        }),
+                    );
+                    d.insert("penalties", Variant::PackedFloat32Array(penalties));
+                    Variant::Dictionary(d.into())
+                }
+                "set_data" => {
+                    let Some(Variant::Dictionary(d)) = args.first() else {
+                        return None;
+                    };
+                    let points = match d.get("points") {
+                        Some(Variant::PackedVector2Array(p)) => p.clone(),
+                        _ => return None,
+                    };
+                    // Rebuilt from `segments`, the flat pair list — the same
+                    // shape `setup` takes, and the only key that carries the
+                    // edges unambiguously.
+                    let pairs: Vec<(usize, usize)> = match d.get("segments") {
+                        Some(Variant::PackedInt32Array(seg)) => seg
+                            .chunks_exact(2)
+                            .filter(|c| c[0] >= 0 && c[1] >= 0)
+                            .map(|c| (c[0] as usize, c[1] as usize))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    f.setup(points, &pairs);
+                    // ⚠️ AFTER `setup`, which clears penalties — restoring them
+                    // first would silently drop every one.
+                    if let Some(Variant::PackedFloat32Array(pen)) = d.get("penalties") {
+                        for (i, v) in pen.iter().enumerate() {
+                            f.set_point_penalty(i, *v);
+                        }
+                    }
+                    Variant::Nil
+                }
+                _ => return None,
+            })
+        })
+    }
+
+    fn astar_new(&mut self, class_name: &str) -> Option<u64> {
+        ASTAR_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::ASTAR_HANDLE_TAG | seq;
+            match class_name {
+                "AStar2D" => {
+                    reg.astar2d.insert(raw, crate::astar::AStar2D::new());
+                }
+                "AStar3D" => {
+                    reg.astar3d.insert(raw, crate::astar::AStar3D::new());
+                }
+                "AStarGrid2D" => {
+                    reg.grid.insert(raw, crate::astar::AStarGrid2D::new());
+                }
+                _ => return None,
+            }
+            Some(raw)
+        })
+    }
+
+    fn mesh_builder_new(&mut self, class_name: &str) -> Option<u64> {
+        MESH_BUILDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::MESH_BUILDER_HANDLE_TAG | seq;
+            match class_name {
+                "ImmediateMesh" => {
+                    reg.immediate
+                        .insert(raw, gdserver3d::immediate_mesh::ImmediateMesh::new());
+                }
+                "SurfaceTool" => {
+                    reg.surface
+                        .insert(raw, gdserver3d::mesh::SurfaceTool::new());
+                }
+                _ => return None,
+            }
+            Some(raw)
+        })
+    }
+
+    fn mesh_builder_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        MESH_BUILDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(m) = reg.immediate.get_mut(&handle) {
+                return immediate_mesh_call(m, method, args);
+            }
+            if let Some(t) = reg.surface.get_mut(&handle) {
+                // ⚠️ `commit` is answered HERE, not in `surface_tool_call`,
+                // because it must return the handle and only this scope has it
+                // (pat-s3rrv.201).
+                //
+                // Godot's `commit()` returns a fresh ArrayMesh. Here the tool's
+                // own handle IS the mesh reference: `resolve_mesh` reads the
+                // geometry back through `surface_tool_geometry`. The visible
+                // difference is that later edits to the tool keep affecting an
+                // already-committed mesh, where Godot's snapshot would not.
+                if method == "commit" {
+                    if t.vertex_count() == 0 {
+                        // Nothing built: Godot returns null, and handing back a
+                        // handle here would render an empty instance instead.
+                        return Some(Variant::Nil);
+                    }
+                    return Some(Variant::ObjectId(ObjectId::from_raw(handle)));
+                }
+                return surface_tool_call(t, method, args);
+            }
+            None
+        })
+    }
+
+    fn astar_call(&mut self, handle: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        ASTAR_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(a) = reg.astar2d.get_mut(&handle) {
+                return astar_call_2d(a, method, args);
+            }
+            if let Some(a) = reg.astar3d.get_mut(&handle) {
+                return astar_call_3d(a, method, args);
+            }
+            if let Some(g) = reg.grid.get_mut(&handle) {
+                return astar_call_grid(g, method, args);
+            }
+            None
+        })
+    }
+}
+
+/// Live AStar objects, keyed by the handle the interpreter carries.
+/// `ImmediateMesh` and `SurfaceTool` instances owned by the scene layer
+/// (pat-s3rrv.197), keyed by the tagged handle scripts hold.
+///
+/// Mirrors [`AStarRegistry`]: both classes are RefCounted in Godot and both live
+/// in `gdserver3d`, which `gdscript-interop` cannot name, so the scene layer
+/// owns them and the interpreter routes on the tag alone.
+#[derive(Default)]
+struct MeshBuilderRegistry {
+    immediate: std::collections::HashMap<u64, gdserver3d::immediate_mesh::ImmediateMesh>,
+    surface: std::collections::HashMap<u64, gdserver3d::mesh::SurfaceTool>,
+    next_seq: u64,
+}
+
+thread_local! {
+    static MESH_BUILDER_REGISTRY: std::cell::RefCell<MeshBuilderRegistry> =
+        std::cell::RefCell::new(MeshBuilderRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
+}
+
+#[derive(Default)]
+struct AStarRegistry {
+    astar2d: std::collections::HashMap<u64, crate::astar::AStar2D>,
+    astar3d: std::collections::HashMap<u64, crate::astar::AStar3D>,
+    grid: std::collections::HashMap<u64, crate::astar::AStarGrid2D>,
+    next_seq: u64,
+}
+
+/// Live `PolygonPathFinder` instances behind their handles (pat-s3rrv.240).
+///
+/// Owned here rather than in the interpreter for the reason AStar records: the
+/// type lives in `gdscene`, and `gdscene` depends on `gdscript-interop`, not the
+/// reverse.
+#[derive(Default)]
+struct PolygonPathFinderRegistry {
+    finders: std::collections::HashMap<u64, crate::polygon_path_finder::PolygonPathFinder>,
+    next_seq: u64,
+}
+
+thread_local! {
+    static POLYGON_PATH_FINDER_REGISTRY: std::cell::RefCell<PolygonPathFinderRegistry> =
+        std::cell::RefCell::new(PolygonPathFinderRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
+}
+
+thread_local! {
+    static ASTAR_REGISTRY: std::cell::RefCell<AStarRegistry> =
+        std::cell::RefCell::new(AStarRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
+}
+
+/// The renderable geometry an `ImmediateMesh` handle currently holds
+/// (pat-s3rrv.197), or `None` when it has no finished surfaces.
+///
+/// ⚠️ This accessor exists because `MESH_BUILDER_REGISTRY` is a PRIVATE
+/// thread-local in this module, while the code that needs it —
+/// `RenderServer3DAdapter::resolve_mesh` — lives in `render_server_3d.rs`.
+/// Without it that resolver cannot see the geometry at all: `get_mesh_path`
+/// matches only `Variant::String`, so an `ObjectId` handle assigned to
+/// `MeshInstance3D.mesh` returns `None` and the node renders a DEFAULT CUBE.
+///
+/// That failure is deceptive rather than loud — the instance exists and carries
+/// exactly one surface, so a check that only counts surfaces passes against
+/// geometry that ignored the script entirely. Only the vertex count betrays it.
+///
+/// `None` for a cleared mesh is deliberate and is what makes
+/// `clear_surfaces()` mean "renders nothing" instead of handing the renderer an
+/// empty husk that still counts as a live instance.
+pub(crate) fn immediate_mesh_geometry(handle: u64) -> Option<gdserver3d::mesh::Mesh3D> {
+    MESH_BUILDER_REGISTRY.with(|r| r.borrow().immediate.get(&handle).and_then(|m| m.to_mesh()))
+}
+
+/// The mesh a `SurfaceTool` handle has accumulated so far (pat-s3rrv.197).
+///
+/// Godot's `SurfaceTool.commit()` returns an ArrayMesh; this is the same data
+/// for the same reason as [`immediate_mesh_geometry`] — the registry is private
+/// to this module. Returns `None` for a tool with no vertices, so an
+/// uncommitted builder does not render an empty instance.
+pub(crate) fn surface_tool_geometry(handle: u64) -> Option<gdserver3d::mesh::Mesh3D> {
+    MESH_BUILDER_REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let tool = reg.surface.get(&handle)?;
+        if tool.vertex_count() == 0 {
+            return None;
+        }
+        Some(tool.commit())
+    })
+}
+
+/// Dispatches an `ImmediateMesh` method (pat-s3rrv.197).
+///
+/// ⚠️ Errors are reported as `Variant::Bool(false)`, never by silently doing
+/// nothing. Godot ERRORS when `surface_add_vertex` is called outside a
+/// begin/end pair, and a silent no-op would let a script build geometry it
+/// believes exists — the acceptance calls this out explicitly.
+fn immediate_mesh_call(
+    mesh: &mut gdserver3d::immediate_mesh::ImmediateMesh,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    let vec3 = |i: usize| match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    let ok = |r: Result<(), gdserver3d::immediate_mesh::ImmediateMeshError>| {
+        Some(Variant::Bool(r.is_ok()))
+    };
+    match method {
+        "surface_begin" => {
+            let primitive = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                Some(Variant::Float(f)) => *f as i64,
+                // Godot's own default for `surface_begin` is PRIMITIVE_TRIANGLES
+                // (3), NOT 0 — 0 is PRIMITIVE_POINTS, so defaulting to zero
+                // would draw a point cloud for a call that omitted the argument.
+                _ => 3,
+            };
+            ok(mesh.surface_begin(primitive))
+        }
+        "surface_set_normal" => ok(mesh.surface_set_normal(vec3(0))),
+        "surface_set_uv" => {
+            let uv = match args.first() {
+                Some(Variant::Vector2(v)) => [v.x, v.y],
+                _ => [0.0, 0.0],
+            };
+            ok(mesh.surface_set_uv(uv))
+        }
+        "surface_set_color" => {
+            let c = match args.first() {
+                Some(Variant::Color(c)) => *c,
+                _ => gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0),
+            };
+            ok(mesh.surface_set_color(c))
+        }
+        "surface_add_vertex" => ok(mesh.surface_add_vertex(vec3(0))),
+        "surface_end" => ok(mesh.surface_end()),
+        "clear_surfaces" => {
+            mesh.clear_surfaces();
+            Some(Variant::Nil)
+        }
+        "get_surface_count" => Some(Variant::Int(mesh.surface_count() as i64)),
+        _ => None,
+    }
+}
+
+/// Dispatches a `SurfaceTool` method (pat-s3rrv.197).
+fn surface_tool_call(
+    tool: &mut gdserver3d::mesh::SurfaceTool,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    let vec3 = |i: usize| match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    match method {
+        "begin" => {
+            let primitive = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                _ => 3,
+            };
+            // Same ordinal table as ImmediateMesh: TRIANGLES is 3, not 2.
+            match gdserver3d::immediate_mesh::primitive_from_godot_int(primitive) {
+                Some(p) => {
+                    tool.begin(p);
+                    Some(Variant::Bool(true))
+                }
+                None => Some(Variant::Bool(false)),
+            }
+        }
+        "set_normal" => {
+            tool.set_normal(vec3(0));
+            Some(Variant::Nil)
+        }
+        "set_uv" => {
+            let uv = match args.first() {
+                Some(Variant::Vector2(v)) => [v.x, v.y],
+                _ => [0.0, 0.0],
+            };
+            tool.set_uv(uv);
+            Some(Variant::Nil)
+        }
+        "add_vertex" => {
+            tool.add_vertex(vec3(0));
+            Some(Variant::Nil)
+        }
+        "add_index" => {
+            let i = match args.first() {
+                Some(Variant::Int(i)) => *i.max(&0) as u32,
+                _ => 0,
+            };
+            tool.add_index(i);
+            Some(Variant::Nil)
+        }
+        // ⚠️ `set_color` and `clear` were ClassDB-REGISTERED with no dispatch
+        // arm (pat-s3rrv.201). This dispatcher errors loudly on an unknown
+        // method rather than returning Nil, so they failed noisily — but they
+        // failed, and `has_method` answered true for both.
+        "set_color" => {
+            let Some(Variant::Color(c)) = args.first() else {
+                return Some(Variant::Bool(false));
+            };
+            tool.set_color(*c);
+            Some(Variant::Nil)
+        }
+        "clear" => {
+            tool.clear();
+            Some(Variant::Nil)
+        }
+        "commit_to_arrays" => {
+            // Packing lives in `script_mesh` beside its inverse
+            // (`mesh_from_mesh_array`) so the two can be round-trip tested
+            // against each other rather than only through a script.
+            Some(Variant::Array(
+                crate::script_mesh::mesh_to_mesh_array(&tool.commit(), tool.colors()).into(),
+            ))
+        }
+        "set_smooth_group" => {
+            let group = match args.first() {
+                Some(Variant::Int(i)) => *i as u32,
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_smooth_group(group);
+            Some(Variant::Nil)
+        }
+        "set_bones" => {
+            let bones: Vec<i32> = match args.first() {
+                Some(Variant::PackedInt32Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_bones(&bones);
+            Some(Variant::Nil)
+        }
+        "set_weights" => {
+            let weights: Vec<f32> = match args.first() {
+                Some(Variant::PackedFloat32Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_weights(&weights);
+            Some(Variant::Nil)
+        }
+        "add_triangle_fan" => {
+            // Godot's signature is (vertices, uvs, colors, uv2s, normals,
+            // tangents); uv2 and tangent have no channel in Mesh3D, so those
+            // two positions are accepted and ignored rather than rejected.
+            let verts = match args.first() {
+                Some(Variant::PackedVector3Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            let uvs: Vec<[f32; 2]> = match args.get(1) {
+                Some(Variant::PackedVector2Array(v)) => v.iter().map(|p| [p.x, p.y]).collect(),
+                _ => Vec::new(),
+            };
+            let colors: Vec<gdcore::math::Color> = match args.get(2) {
+                Some(Variant::PackedColorArray(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            let normals: Vec<gdcore::math::Vector3> = match args.get(4) {
+                Some(Variant::PackedVector3Array(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            Some(Variant::Bool(
+                tool.add_triangle_fan(&verts, &uvs, &colors, &normals),
+            ))
+        }
+        "index" => {
+            tool.index();
+            Some(Variant::Nil)
+        }
+        "deindex" => {
+            tool.deindex();
+            Some(Variant::Nil)
+        }
+        "generate_normals" => {
+            // Godot's parameter is `flip`, defaulting to false.
+            let flip = matches!(args.first(), Some(Variant::Bool(true)));
+            tool.generate_normals(flip);
+            Some(Variant::Nil)
+        }
+        "get_vertex_count" => Some(Variant::Int(tool.vertex_count() as i64)),
+        _ => None,
+    }
+}
+
+fn astar_int(args: &[Variant], i: usize) -> i64 {
+    match args.get(i) {
+        Some(Variant::Int(v)) => *v,
+        Some(Variant::Float(f)) => *f as i64,
+        _ => 0,
+    }
+}
+
+fn astar_f32(args: &[Variant], i: usize, default: f32) -> f32 {
+    match args.get(i) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(v)) => *v as f32,
+        _ => default,
+    }
+}
+
+/// Godot defaults `bidirectional` to `true` on connect/disconnect/are_connected.
+fn astar_bool(args: &[Variant], i: usize, default: bool) -> bool {
+    match args.get(i) {
+        Some(Variant::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+fn astar_v2(args: &[Variant], i: usize) -> gdcore::math::Vector2 {
+    match args.get(i) {
+        Some(Variant::Vector2(v)) => *v,
+        _ => gdcore::math::Vector2::new(0.0, 0.0),
+    }
+}
+
+fn astar_v3(args: &[Variant], i: usize) -> gdcore::math::Vector3 {
+    match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+    }
+}
+
+/// A `Vector2i` cell id. Scripts also spell these as integer-valued `Vector2`s.
+fn astar_v2i(args: &[Variant], i: usize) -> gdcore::math::Vector2i {
+    match args.get(i) {
+        Some(Variant::Vector2i(v)) => *v,
+        Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+        _ => gdcore::math::Vector2i::new(0, 0),
+    }
+}
+
+/// The half of the AStar surface that does not mention the vector type.
+/// Returns `None` for methods handled by the per-dimension wrappers.
+fn astar_call_shared<V: crate::astar::AStarVector>(
+    a: &mut crate::astar::AStar<V>,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    match method {
+        "has_point" => Some(Variant::Bool(a.has_point(astar_int(args, 0)))),
+        "remove_point" => {
+            a.remove_point(astar_int(args, 0));
+            Some(Variant::Nil)
+        }
+        "get_point_count" => Some(Variant::Int(a.get_point_count() as i64)),
+        // pat-s3rrv.19: the id/capacity surface. `get_available_point_id` is
+        // the one scripts reach for constantly — `a.add_point(a.get_available_point_id(), pos)`.
+        "get_available_point_id" => Some(Variant::Int(a.get_available_point_id())),
+        "get_point_capacity" => Some(Variant::Int(a.get_point_capacity() as i64)),
+        "reserve_space" => {
+            let n = astar_int(args, 0).max(0) as usize;
+            a.reserve_space(n);
+            Some(Variant::Nil)
+        }
+        "get_point_ids" => Some(Variant::PackedInt64Array(a.get_point_ids())),
+        "get_point_weight_scale" => Some(Variant::Float(
+            a.get_point_weight_scale(astar_int(args, 0)).unwrap_or(0.0) as f64,
+        )),
+        "set_point_weight_scale" => {
+            a.set_point_weight_scale(astar_int(args, 0), astar_f32(args, 1, 1.0));
+            Some(Variant::Nil)
+        }
+        "set_point_disabled" => {
+            a.set_point_disabled(astar_int(args, 0), astar_bool(args, 1, true));
+            Some(Variant::Nil)
+        }
+        "is_point_disabled" => Some(Variant::Bool(a.is_point_disabled(astar_int(args, 0)))),
+        "connect_points" => {
+            a.connect_points(
+                astar_int(args, 0),
+                astar_int(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "disconnect_points" => {
+            a.disconnect_points(
+                astar_int(args, 0),
+                astar_int(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "are_points_connected" => Some(Variant::Bool(a.are_points_connected(
+            astar_int(args, 0),
+            astar_int(args, 1),
+            astar_bool(args, 2, true),
+        ))),
+        "get_point_connections" => Some(Variant::PackedInt64Array(
+            a.get_point_connections(astar_int(args, 0)),
+        )),
+        "get_id_path" => Some(Variant::PackedInt64Array(
+            a.get_id_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "clear" => {
+            a.clear();
+            Some(Variant::Nil)
+        }
+        _ => None,
+    }
+}
+
+fn astar_call_2d(a: &mut crate::astar::AStar2D, method: &str, args: &[Variant]) -> Option<Variant> {
+    match method {
+        "add_point" => {
+            a.add_point(
+                astar_int(args, 0),
+                astar_v2(args, 1),
+                astar_f32(args, 2, 1.0),
+            );
+            Some(Variant::Nil)
+        }
+        "get_point_position" => Some(
+            a.get_point_position(astar_int(args, 0))
+                .map(Variant::Vector2)
+                .unwrap_or(Variant::Nil),
+        ),
+        "set_point_position" => {
+            a.set_point_position(astar_int(args, 0), astar_v2(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_point_path" => Some(Variant::PackedVector2Array(
+            a.get_point_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "get_closest_point" => Some(Variant::Int(
+            a.get_closest_point(astar_v2(args, 0), astar_bool(args, 1, false)),
+        )),
+        // pat-s3rrv.19: the fallback is the dimension's zero — `AStarVector`
+        // cannot name one generically, and Godot returns a default-constructed
+        // vector when no segment qualifies.
+        "get_closest_position_in_segment" => Some(Variant::Vector2(
+            a.get_closest_position_in_segment(astar_v2(args, 0), gdcore::math::Vector2::ZERO),
+        )),
+        _ => astar_call_shared(a, method, args),
+    }
+}
+
+fn astar_call_3d(a: &mut crate::astar::AStar3D, method: &str, args: &[Variant]) -> Option<Variant> {
+    match method {
+        "add_point" => {
+            a.add_point(
+                astar_int(args, 0),
+                astar_v3(args, 1),
+                astar_f32(args, 2, 1.0),
+            );
+            Some(Variant::Nil)
+        }
+        "get_point_position" => Some(
+            a.get_point_position(astar_int(args, 0))
+                .map(Variant::Vector3)
+                .unwrap_or(Variant::Nil),
+        ),
+        "set_point_position" => {
+            a.set_point_position(astar_int(args, 0), astar_v3(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_point_path" => Some(Variant::PackedVector3Array(
+            a.get_point_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "get_closest_point" => Some(Variant::Int(
+            a.get_closest_point(astar_v3(args, 0), astar_bool(args, 1, false)),
+        )),
+        "get_closest_position_in_segment" => Some(Variant::Vector3(
+            a.get_closest_position_in_segment(astar_v3(args, 0), gdcore::math::Vector3::ZERO),
+        )),
+        _ => astar_call_shared(a, method, args),
+    }
+}
+
+/// Godot's `AStarGrid2D.DiagonalMode` enum values (doc/classes/AStarGrid2D.xml).
+fn astar_diagonal_mode(v: i64) -> crate::astar::DiagonalMode {
+    match v {
+        1 => crate::astar::DiagonalMode::Never,
+        2 => crate::astar::DiagonalMode::AtLeastOneWalkable,
+        3 => crate::astar::DiagonalMode::OnlyIfNoObstacles,
+        _ => crate::astar::DiagonalMode::Always,
+    }
+}
+
+/// Godot's `AStarGrid2D.Heuristic` enum values.
+fn astar_heuristic(v: i64) -> crate::astar::Heuristic {
+    match v {
+        1 => crate::astar::Heuristic::Manhattan,
+        2 => crate::astar::Heuristic::Octile,
+        3 => crate::astar::Heuristic::Chebyshev,
+        _ => crate::astar::Heuristic::Euclidean,
+    }
+}
+
+fn astar_call_grid(
+    g: &mut crate::astar::AStarGrid2D,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    match method {
+        // `set_region(position, size)`; Godot's `region` property is a Rect2i,
+        // which Patina's Variant does not model, so the two-vector spelling is
+        // what a script uses here.
+        "set_region" => {
+            g.set_region(astar_v2i(args, 0), astar_v2i(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_size" => Some(Variant::Vector2i(g.get_region().1)),
+        "set_size" => {
+            let (pos, _) = g.get_region();
+            g.set_region(pos, astar_v2i(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_cell_size" => {
+            g.set_cell_size(astar_v2(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_offset" => {
+            g.set_offset(astar_v2(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_diagonal_mode" => {
+            g.set_diagonal_mode(astar_diagonal_mode(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_default_compute_heuristic" => {
+            g.set_default_compute_heuristic(astar_heuristic(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_default_estimate_heuristic" => {
+            g.set_default_estimate_heuristic(astar_heuristic(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_jumping_enabled" => {
+            g.set_jumping_enabled(astar_bool(args, 0, true));
+            Some(Variant::Nil)
+        }
+        // pat-s3rrv.19: `update()` used to be a no-op, so this had nothing to
+        // report; the flag it clears is what a script branches on.
+        "is_dirty" => Some(Variant::Bool(g.is_dirty())),
+        "update" => {
+            g.update();
+            Some(Variant::Nil)
+        }
+        "is_in_bounds" => Some(Variant::Bool(
+            g.is_in_bounds(astar_int(args, 0) as i32, astar_int(args, 1) as i32),
+        )),
+        "is_in_boundsv" => Some(Variant::Bool(g.is_in_boundsv(astar_v2i(args, 0)))),
+        "set_point_solid" => {
+            g.set_point_solid(astar_v2i(args, 0), astar_bool(args, 1, true));
+            Some(Variant::Nil)
+        }
+        "is_point_solid" => Some(Variant::Bool(g.is_point_solid(astar_v2i(args, 0)))),
+        "fill_solid_region" => {
+            g.fill_solid_region(
+                astar_v2i(args, 0),
+                astar_v2i(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "set_point_weight_scale" => {
+            g.set_point_weight_scale(astar_v2i(args, 0), astar_f32(args, 1, 1.0));
+            Some(Variant::Nil)
+        }
+        "get_point_weight_scale" => Some(Variant::Float(
+            g.get_point_weight_scale(astar_v2i(args, 0)) as f64,
+        )),
+        "get_point_position" => Some(Variant::Vector2(g.get_point_position(astar_v2i(args, 0)))),
+        // Godot returns a typed Vector2i array; Patina has no PackedVector2iArray,
+        // so the cells come back as a plain Array of Vector2i.
+        "get_id_path" => Some(Variant::Array(
+            g.get_id_path(astar_v2i(args, 0), astar_v2i(args, 1))
+                .into_iter()
+                .map(Variant::Vector2i)
+                .collect(),
+        )),
+        "get_point_path" => Some(Variant::PackedVector2Array(
+            g.get_point_path(astar_v2i(args, 0), astar_v2i(args, 1)),
+        )),
+        _ => None,
+    }
+}
+
+/// Extracts the base class from a GDScript's leading `extends` declaration,
+/// defaulting to `Node`. A path/quoted base (`extends "res://x.gd"`) resolves
+/// to a Node subtype we cannot name statically, so it falls back to `Node` —
+/// matching the autoload boot path's `base_class_from_source`.
+/// The native (engine) class a script ultimately extends.
+///
+/// `extends Sprite2D` answers `Sprite2D`. `extends "res://base.gd"` follows the
+/// chain of script-to-script extends to the first NON-script ancestor, which is
+/// the class Godot gives a node built from that script (pat-mgixk.21).
+fn script_base_class(source: &str) -> String {
+    script_base_class_chain(source, 0)
+}
+
+/// `depth` bounds a cycle — `a.gd extends "res://b.gd"` and back again would
+/// otherwise recurse until the stack ran out.
+fn script_base_class_chain(source: &str, depth: usize) -> String {
+    // Real script inheritance is not deeper than this; anything past it is a
+    // cycle, and answering the default beats overflowing the stack.
+    const MAX_SCRIPT_BASE_DEPTH: usize = 16;
+
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("extends") {
+            // Require a separator so we don't match `extends_foo`.
+            let rest = match rest.strip_prefix([' ', '\t']) {
+                Some(r) => r.trim(),
+                None => return "Node".to_string(),
+            };
+            if rest.is_empty() {
+                return "Node".to_string();
+            }
+            // A SCRIPT base. This used to answer "Node", so a script extending
+            // another script lost its engine class entirely: the only non-test
+            // caller is `instantiate_script_with_values`, which passes this
+            // straight to `Node::new(name, base_class)`, so
+            // `load("res://player.gd").new()` built a bare `Node` however
+            // specific the base's own `extends` was (pat-mgixk.21).
+            //
+            // ⚠️ Every failure to resolve still falls back to "Node", and that
+            // is load-bearing rather than lazy: a unit test configures no
+            // project root, so the path is unreadable there, and the
+            // pre-existing `script_base_class("extends \"res://base.gd\"")
+            // == "Node"` assertion has to keep passing.
+            if let Some(base_path) = quoted_extends_path(rest) {
+                if depth >= MAX_SCRIPT_BASE_DEPTH {
+                    return "Node".to_string();
+                }
+                return match read_script_source(&base_path) {
+                    Some(base_source) => script_base_class_chain(&base_source, depth + 1),
+                    None => "Node".to_string(),
+                };
+            }
+            return rest.split_whitespace().next().unwrap_or("Node").to_string();
+        }
+        // First meaningful line isn't `extends` → default base class.
+        break;
+    }
+    "Node".to_string()
+}
+
+/// The path inside `extends "res://base.gd"`, or `None` for a bare class name.
+fn quoted_extends_path(rest: &str) -> Option<String> {
+    let inner = rest.strip_prefix('"')?;
+    let end = inner.find('"')?;
+    let path = &inner[..end];
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Reads a script's text, consulting `FileAccess` first so a script inside a
+/// mounted `.pck` resolves, then falling back to a CWD-relative path.
+///
+/// The two steps mirror `interpreter.rs`'s `read_resource_source` and exist for
+/// the same reason: `FileAccess` treats an unconfigured `res://` root as an
+/// error, and dropping the fallback would break every caller that loads a
+/// script without configuring a root first.
+fn read_script_source(path: &str) -> Option<String> {
+    if let Ok(text) = gdcore::file_access::FileAccess::read_file_string(path) {
+        return Some(text);
+    }
+    std::fs::read_to_string(path.strip_prefix("res://").unwrap_or(path)).ok()
 }
 
 #[cfg(test)]
@@ -425,6 +11186,220 @@ mod tests {
     use crate::main_loop::MainLoop;
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
+
+    /// pat-s3rrv.19: does the AStar registry round-trip AT ALL?
+    ///
+    /// The script-level diagnostic proved `AStar2D.new()` hands back a
+    /// correctly tagged handle (`0xa100000000000001`) and that *every* method on
+    /// it then fails — including `get_point_count()`, which takes no arguments.
+    /// So `astar_call` returns `None` for an entry `astar_new` has just
+    /// inserted, which should be impossible: both use the same file-level
+    /// `thread_local!` and the same key.
+    ///
+    /// This calls the two trait methods back to back with NOTHING in between —
+    /// no interpreter, no script, no `stacker::maybe_grow` stack switch. It
+    /// splits the last fork in that bead:
+    ///
+    /// * FAILS → the registry itself is broken, and the fault is in these ~30
+    ///   lines.
+    /// * PASSES → the registry is fine and something on the interpreter path
+    ///   between `.new()` and the method call is losing it.
+    #[test]
+    fn astar_registry_round_trips_a_handle() {
+        use gdscript_interop::bindings::SceneAccess;
+
+        let mut tree = SceneTree::new();
+        // SAFETY: `tree` outlives the accessor, which never escapes this test.
+        let mut access = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+
+        let raw = access
+            .astar_new("AStar2D")
+            .expect("AStar2D.new() must mint a handle");
+        assert_eq!(
+            raw & 0xFF00_0000_0000_0000,
+            gdscript_interop::bindings::ASTAR_HANDLE_TAG,
+            "the minted handle must carry the AStar tag",
+        );
+
+        let answer = access.astar_call(raw, "get_point_count", &[]);
+        assert_eq!(
+            answer,
+            Some(Variant::Int(0)),
+            "`astar_call` must find the entry `astar_new` just inserted. `None` \
+             here means the registry lookup is the bug — the handle is right \
+             (verified above) and no interpreter was involved at all",
+        );
+
+        // …and it must still be there on a second call, i.e. the lookup is not
+        // consuming the entry.
+        assert_eq!(
+            access.astar_call(raw, "get_point_count", &[]),
+            Some(Variant::Int(0)),
+            "the entry must survive being looked up",
+        );
+    }
+
+    /// pat-s3rrv.19: an AStar handle must be claimed by NO other handle family.
+    ///
+    /// This is the bug the whole bead turned on. `ASTAR_HANDLE_TAG` was `0xA1`,
+    /// which is byte-for-byte `gdcore::xml_parser`'s `XML_HANDLE_TAG` — the same
+    /// tag in a different crate. `call_method_on` checks `is_xml_parser_handle`
+    /// **before** the AStar branch, so every AStar handle was claimed by
+    /// XMLParser and every method on it died as
+    /// `MethodNotFound("XMLParser.<method>")`.
+    ///
+    /// It hid for eight passes because the symptom points at the wrong layer:
+    /// `AStar2D.new()` works (the constructor never consults the predicates),
+    /// the registry round-trips in isolation, and the failure is identical for
+    /// zero-argument methods — so the constructor, the registry and the argument
+    /// conversion all look guilty in turn and all check out clean.
+    ///
+    /// ⚠️ A tag byte is a WORKSPACE-wide namespace that nothing enforces. A
+    /// sweep of `gdscript-interop` alone — which is where `ASTAR_HANDLE_TAG`
+    /// lives — misses `gdcore`, `gdresource` and `gdobject` entirely. That is
+    /// precisely the sweep I ran, twice, and it came back clean both times.
+    #[test]
+    fn an_astar_handle_is_not_claimed_by_another_handle_family() {
+        use gdscript_interop::bindings::SceneAccess;
+
+        let mut tree = SceneTree::new();
+        // SAFETY: `tree` outlives the accessor, which never escapes this test.
+        let mut access = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+
+        for class in ["AStar2D", "AStar3D", "AStarGrid2D"] {
+            let raw = access.astar_new(class).expect("handle minted");
+            let id = gdcore::id::ObjectId::from_raw(raw);
+
+            assert!(
+                gdscript_interop::bindings::is_astar_handle(raw),
+                "{class} must mint an AStar-tagged handle",
+            );
+            // The collision that caused this bead. `is_xml_parser_handle` is
+            // checked earlier in `call_method_on`, so a shared tag silently
+            // steals every AStar method call.
+            assert!(
+                !gdcore::xml_parser::is_xml_parser_handle(id),
+                "{class}'s handle {raw:#018x} is being claimed by XMLParser — \
+                 the two tags have collided again. `call_method_on` checks \
+                 XMLParser first, so every AStar method will die as \
+                 MethodNotFound(\"XMLParser.<method>\")",
+            );
+            assert!(
+                !gdcore::is_file_access_handle(id) && !gdcore::is_dir_access_handle(id),
+                "{class}'s handle collides with a gdcore file handle",
+            );
+            assert!(
+                !gdresource::is_config_file_handle(id)
+                    && !gdresource::is_zip_reader_handle(id)
+                    && !gdresource::is_zip_packer_handle(id)
+                    && !gdresource::pck::is_pck_packer_handle(id),
+                "{class}'s handle collides with a gdresource handle",
+            );
+            assert!(
+                !gdobject::refcounted_handle::is_refcounted_handle(id),
+                "{class}'s handle collides with the RefCounted family",
+            );
+        }
+    }
+
+    /// pat-s3rrv.19: the next layer down — a script WITH access installed.
+    ///
+    /// `astar_registry_round_trips_a_handle` proved the registry is sound:
+    /// `astar_new` inserts and `astar_call` finds it again. So the handle is
+    /// lost somewhere on the interpreter path instead.
+    ///
+    /// This runs the real thing one step below `SceneTree::call_script_method`:
+    /// a `GDScriptNodeInstance` with a genuine `SceneTreeAccessor` installed,
+    /// invoked directly so the `Result` — and with it the **error text** — comes
+    /// back instead of being swallowed. `call_script_method` discards the error
+    /// (it returns `Option`), which is why every previous run could only say
+    /// *that* it failed and never *why*.
+    #[test]
+    fn astar_reaches_a_script_with_access_installed() {
+        use gdscript_interop::bindings::ScriptInstance;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = tree
+            .add_child(root, Node::new("Pathfinder", "Node"))
+            .expect("child adds");
+        let src = "extends Node\n\
+                   func run():\n\
+                   \x20   var a = AStar2D.new()\n\
+                   \x20   return a.get_point_count()\n";
+        let mut script =
+            crate::GDScriptNodeInstance::from_source(src, node).expect("script parses");
+
+        // SAFETY: `tree` outlives `script` in this test and is never moved
+        // afterwards; the accessor does not escape.
+        let accessor = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+        script.set_scene_access(Box::new(accessor), node.raw());
+
+        let out = script.call_method("run", &[]);
+        assert_eq!(
+            out.as_ref().ok(),
+            Some(&Variant::Int(0)),
+            "an empty AStar2D has 0 points. The error text is the deliverable \
+             here — it names the layer that loses a handle the registry \
+             demonstrably round-trips: {out:?}",
+        );
+    }
+
+    // pat-u3l8c.12: `load("x.gd").new()` — the accessor loads the script, makes
+    // a node of its base class with the script attached, and returns its id.
+    #[test]
+    fn script_base_class_reads_extends_or_defaults_to_node() {
+        assert_eq!(script_base_class("extends Node2D\nvar x = 1\n"), "Node2D");
+        assert_eq!(script_base_class("# hi\nextends Control\n"), "Control");
+        assert_eq!(script_base_class("var x = 1\n"), "Node");
+        assert_eq!(script_base_class(""), "Node");
+        // A path/quoted base can't be named statically → Node.
+        assert_eq!(script_base_class("extends \"res://base.gd\"\n"), "Node");
+    }
+
+    #[test]
+    fn accessor_instantiate_script_attaches_script_node() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("patina_u3l8c12_{}_{}.gd", std::process::id(), n));
+        std::fs::write(&path, "extends Node2D\nvar hp = 7\n").unwrap();
+        // Absolute path (no `res://`) is read directly, avoiding CWD coupling.
+        let path_str = path.to_str().unwrap().to_string();
+
+        let mut tree = SceneTree::new();
+        let tree_ptr = &mut tree as *mut SceneTree;
+        let raw = {
+            // SAFETY: `tree_ptr` points at `tree`, which outlives this block, and
+            // nothing else borrows `tree` while `acc` is alive.
+            let mut acc = unsafe { SceneTreeAccessor::new(tree_ptr) };
+            acc.instantiate_script(&path_str)
+        };
+        let raw = raw.expect("script instantiated");
+
+        let node_id = NodeId::from_object_id(ObjectId::from_raw(raw));
+        assert!(
+            tree.get_script(node_id).is_some(),
+            "the scripted instance has its script attached"
+        );
+        assert_eq!(
+            tree.get_node(node_id).unwrap().class_name(),
+            "Node2D",
+            "node uses the script's base class"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // pat-fk17e.1's two behaviour tests moved OUT of this module, to
+    // `crates/gdscene/tests/script_backed_resource_tres.rs`. The bead asks
+    // for them "through the scene/script path, not Rust-level APIs", and an
+    // in-crate `mod tests` cannot promise that: it sees `pub(crate)` items
+    // (`SceneTreeAccessor` among them) that a host embedding the engine
+    // never can, so it could pass against a surface no script could reach.
+    // The integration test drives `SceneTree::call_script_method`, which is
+    // the public entry point and installs the accessor itself.
 
     const PLAYER_SCRIPT: &str = "\
 extends Node2D
@@ -1154,6 +12129,9 @@ extends Node2D
 var connected = false
 func _ready():
     var p = get_parent()
+    # Godot 4 refuses to connect a signal the object does not have, so the
+    # (script-less) parent declares it first.
+    p.add_user_signal(\"test_sig\")
     p.connect(\"test_sig\", $Child2, \"on_test\")
     self.connected = true
 ";
@@ -1168,6 +12146,101 @@ func _ready():
         let store = tree.signal_store(parent_id);
         assert!(store.is_some());
         assert!(store.unwrap().has_signal("test_sig"));
+    }
+
+    #[test]
+    fn signal_deferred_one_shot_bind_dispatch() {
+        // A deferred, one-shot connection with a bound arg: emitting twice in a
+        // frame must fire the target method exactly once, only at the deferred
+        // flush, with the bound value; and the connection is gone afterward
+        // (one-shot). Covers the scene-runtime half of pat-nzgdu.31.
+        let (mut tree, parent_id, _c1_id, c2_id) = build_tree_with_children();
+
+        let target_src = "\
+extends Node2D
+var hits = 0
+var last = 0
+func on_sig(v):
+    self.hits += 1
+    self.last = v
+";
+        let script = GDScriptNodeInstance::from_source(target_src, c2_id).unwrap();
+        tree.attach_script(c2_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c2_id);
+
+        // Connect parent."sig" -> c2.on_sig, deferred + one-shot + bind(42).
+        let conn = Connection::new(c2_id.object_id(), "on_sig")
+            .as_deferred()
+            .as_one_shot()
+            .with_binds(vec![Variant::Int(42)]);
+        tree.connect_signal(parent_id, "sig", conn);
+
+        // Emit twice in the same frame.
+        tree.emit_signal(parent_id, "sig", &[]);
+        tree.emit_signal(parent_id, "sig", &[]);
+
+        // Deferred: nothing has fired yet.
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("hits"),
+            Some(Variant::Int(0)),
+            "deferred connection must not fire before the flush"
+        );
+
+        // Flush the deferred queue (end-of-frame MessageQueue).
+        tree.process_deferred_calls();
+
+        // Fired exactly once (one-shot removed after first emit), bind arrived.
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("hits"),
+            Some(Variant::Int(1)),
+            "one-shot deferred connection fires exactly once at the flush"
+        );
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("last"),
+            Some(Variant::Int(42)),
+            "bound argument arrives in the callback"
+        );
+        // One-shot connection removed.
+        assert!(!tree
+            .signal_store(parent_id)
+            .and_then(|s| s.get_signal("sig"))
+            .map(|sig| sig.is_connected())
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn signal_disconnect_and_is_connected() {
+        // Exercises the SceneTree signal store logic that the SceneAccess
+        // disconnect_signal / is_signal_connected methods delegate to.
+        let (mut tree, parent_id, _c1_id, c2_id) = build_tree_with_children();
+        let target = c2_id.object_id();
+
+        let is_conn = |tree: &SceneTree| {
+            tree.signal_store(parent_id)
+                .and_then(|s| s.get_signal("sig"))
+                .map(|sig| {
+                    sig.connections()
+                        .iter()
+                        .any(|c| c.target_id == target && c.method == "on_sig")
+                })
+                .unwrap_or(false)
+        };
+
+        assert!(!is_conn(&tree), "not connected initially");
+        tree.connect_signal(parent_id, "sig", Connection::new(target, "on_sig"));
+        assert!(is_conn(&tree), "connected after connect");
+        assert!(
+            tree.signal_store_mut(parent_id)
+                .disconnect("sig", target, "on_sig"),
+            "disconnect removes the connection"
+        );
+        assert!(!is_conn(&tree), "not connected after disconnect");
+        assert!(
+            !tree
+                .signal_store_mut(parent_id)
+                .disconnect("sig", target, "on_sig"),
+            "disconnecting a missing connection returns false"
+        );
     }
 
     #[test]
@@ -2735,6 +13808,7 @@ func _on_signal_from_emitter():
         // `get_parent().get_node("Emitter").connect(...)`.
         let emitter_script = "\
 extends Node2D
+signal my_signal
 func _ready():
     var p = get_parent()
     var me = p.get_node(\"Emitter\")
@@ -3193,6 +14267,118 @@ func _process(delta):
     }
 
     #[test]
+    fn object_instance_validity_lifecycle() {
+        // pat-nzgdu.32: is_instance_valid / instance_from_id / weakref().get_ref()
+        // must all consult the live-object registry (the scene-tree arena) rather
+        // than a bare non-nil check. A child freed via `Object.free()` (immediate)
+        // must report invalid the moment it is freed.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let owner = Node::new("Owner", "Node");
+        let owner_id = tree.add_child(root, owner).unwrap();
+
+        let victim = Node::new("Victim", "Node");
+        let victim_id = tree.add_child(owner_id, victim).unwrap();
+
+        let script_src = "\
+extends Node
+var did_run = false
+var cid = 0
+var valid_before = false
+var resolved_before = 0
+var valid_after = true
+var weak_after = 0
+var resolved_after = 0
+func _process(delta):
+    if did_run:
+        return
+    did_run = true
+    var child = get_node(\"Victim\")
+    cid = child.get_instance_id()
+    var w = weakref(child)
+    valid_before = is_instance_valid(child)
+    resolved_before = instance_from_id(cid)
+    child.free()
+    valid_after = is_instance_valid(child)
+    weak_after = w.get_ref()
+    resolved_after = instance_from_id(cid)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, owner_id).unwrap();
+        tree.attach_script(owner_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        // The immediate `free()` removed the victim from the arena.
+        assert!(tree.get_node(victim_id).is_none());
+
+        let s = tree.get_script(owner_id).unwrap();
+        // While alive: valid, and resolvable by id.
+        assert_eq!(s.get_property("valid_before"), Some(Variant::Bool(true)));
+        assert!(
+            matches!(
+                s.get_property("resolved_before"),
+                Some(Variant::ObjectId(_))
+            ),
+            "instance_from_id should resolve a live object, got {:?}",
+            s.get_property("resolved_before")
+        );
+        // After free(): invalid, weakref lost, id no longer resolvable.
+        assert_eq!(s.get_property("valid_after"), Some(Variant::Bool(false)));
+        assert_eq!(s.get_property("weak_after"), Some(Variant::Nil));
+        assert_eq!(s.get_property("resolved_after"), Some(Variant::Nil));
+    }
+
+    #[test]
+    fn queue_free_defers_instance_validity_until_reap() {
+        // A `queue_free`d node stays *valid* until the end-of-frame reap
+        // (`process_deletions`), matching Godot: the deferred deletion has not
+        // happened yet, so `is_instance_valid` still reports true in-frame.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let owner = Node::new("Owner", "Node");
+        let owner_id = tree.add_child(root, owner).unwrap();
+
+        let victim = Node::new("Victim", "Node");
+        let victim_id = tree.add_child(owner_id, victim).unwrap();
+
+        let script_src = "\
+extends Node
+var did_run = false
+var valid_after_queue_free = false
+func _process(delta):
+    if did_run:
+        return
+    did_run = true
+    var child = get_node(\"Victim\")
+    child.queue_free()
+    valid_after_queue_free = is_instance_valid(child)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, owner_id).unwrap();
+        tree.attach_script(owner_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        // Deferred: still valid and still in the arena this frame.
+        assert_eq!(
+            tree.get_script(owner_id)
+                .unwrap()
+                .get_property("valid_after_queue_free"),
+            Some(Variant::Bool(true))
+        );
+        assert!(tree.get_node(victim_id).is_some());
+        assert_eq!(tree.pending_deletion_count(), 1);
+
+        // After the reap the node is gone from the arena -> future
+        // is_instance_valid checks (via the registry) would report false.
+        tree.process_deletions();
+        assert!(tree.get_node(victim_id).is_none());
+    }
+
+    #[test]
     fn spawned_nodes_get_process_called_on_next_frame() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
@@ -3632,7 +14818,16 @@ func _ready():
                 !signal_events.is_empty(),
                 "Signal emission should be traced"
             );
-            assert_eq!(signal_events[0].detail, "hit");
+            // The script's `emit_signal("hit")` must be traced. It is NOT
+            // necessarily the FIRST signal: `enter_tree` legitimately emits
+            // `tree_entered` first (lifecycle.rs:50, matching Godot), so
+            // asserting `signal_events[0]` pinned an ordering the engine never
+            // promised. Assert the intent — that "hit" was traced — instead.
+            assert!(
+                signal_events.iter().any(|e| e.detail == "hit"),
+                "the script's emit_signal(\"hit\") must be traced; got {:?}",
+                signal_events.iter().map(|e| &e.detail).collect::<Vec<_>>()
+            );
         }
     }
 
@@ -3918,4 +15113,46 @@ func _ready():
             );
         }
     }
+}
+
+impl SceneTreeAccessor {
+    /// Whether ClassDB can judge `source`'s built-in signals: it names a node
+    /// (or tween) whose class is registered. See the connect pre-check.
+    fn source_class_is_known(&self, source: u64) -> bool {
+        let tree = self.tree();
+        if tree
+            .get_tween(crate::tween::TweenId::from_raw(source))
+            .is_some()
+        {
+            return true;
+        }
+        let nid = NodeId::from_object_id(ObjectId::from_raw(source));
+        tree.get_node(nid)
+            .map(|n| gdobject::class_db::class_exists(n.class_name()))
+            .unwrap_or(true)
+    }
+}
+
+/// `(add|remove|has)_theme_<kind>_override` -> `(op, property group)`, the
+/// group being the `theme_override_<group>/<name>` spelling a `.tscn` uses.
+fn theme_override_group(method: &str) -> Option<(&'static str, &'static str)> {
+    let (op, rest) = if let Some(r) = method.strip_prefix("add_theme_") {
+        ("add", r)
+    } else if let Some(r) = method.strip_prefix("remove_theme_") {
+        ("remove", r)
+    } else if let Some(r) = method.strip_prefix("has_theme_") {
+        ("has", r)
+    } else {
+        return None;
+    };
+    let group = match rest.strip_suffix("_override")? {
+        "color" => "colors",
+        "constant" => "constants",
+        "font_size" => "font_sizes",
+        "font" => "fonts",
+        "stylebox" => "styles",
+        "icon" => "icons",
+        _ => return None,
+    };
+    Some((op, group))
 }

@@ -11,7 +11,10 @@
 //! The [`LifecycleManager`] encapsulates this logic and operates on a
 //! [`SceneTree`].
 
-use gdobject::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_READY};
+use gdobject::notification::{
+    NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_POST_ENTER_TREE,
+    NOTIFICATION_READY,
+};
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
@@ -30,6 +33,33 @@ impl LifecycleManager {
     /// 1. `ENTER_TREE` top-down (parent first, then children depth-first).
     /// 2. `READY` bottom-up (deepest children first, then parent).
     pub fn enter_tree(tree: &mut SceneTree, subtree_root: NodeId) {
+        Self::enter_tree_skipping_ready(tree, subtree_root, &[]);
+    }
+
+    /// [`enter_tree`](Self::enter_tree), but READY is **not** delivered to any
+    /// node listed in `skip_ready` (pat-mgixk.406).
+    ///
+    /// 🔑 For `SceneTree::reparent`. Godot fires EXIT_TREE/ENTER_TREE for a moved
+    /// subtree but does **not** re-run READY — `_propagate_ready` notifies a node
+    /// only once, re-armable through `Node.request_ready()`
+    /// (`scene/main/node.cpp`). Without this, every reparent replayed `_ready`
+    /// for the whole moved subtree, and the editor's drag-reparent re-ran user
+    /// callbacks.
+    ///
+    /// ⚠️ The filter is a PARAMETER rather than a check on the node's own ready
+    /// flag, and that distinction is the whole design. Patina's hosts assemble a
+    /// tree with `add_child` — which readies each node immediately — and only
+    /// then attach scripts, relying on a second `enter_tree` pass to deliver
+    /// `_ready` to the scripts that were not there the first time.
+    /// `EngineBootstrap::init_lifecycle` does exactly that for the main scene.
+    /// A node-level "already ready, skip" guard therefore silently stops `_ready`
+    /// running at boot; only the CALLER knows whether a pass is a re-entry or a
+    /// first real dispatch.
+    pub fn enter_tree_skipping_ready(
+        tree: &mut SceneTree,
+        subtree_root: NodeId,
+        skip_ready: &[NodeId],
+    ) {
         // Phase 1: ENTER_TREE — top-down.
         let mut top_down = Vec::new();
         tree.collect_subtree_top_down(subtree_root, &mut top_down);
@@ -41,6 +71,37 @@ impl LifecycleManager {
                 node.receive_notification(NOTIFICATION_ENTER_TREE);
             }
             tree.process_script_enter_tree(id);
+            // Deliver ENTER_TREE to the script's `_notification` virtual too,
+            // alongside the named `_enter_tree` callback (pat-nzgdu.13).
+            tree.notify_script(id, NOTIFICATION_ENTER_TREE.code() as i64);
+            // Godot emits Node.tree_entered as each node enters the tree
+            // (pat-nzgdu.84). Fires here for both add_child auto-enter and any
+            // subtree re-entry; nodes with no connections are a no-op.
+            tree.emit_signal(id, "tree_entered", &[]);
+            // ...and the PARENT announces the arrival (pat-mgixk.64). Godot
+            // pairs these: `_propagate_enter_tree` emits `tree_entered` on the
+            // node and then `child_entered_tree(node)` on its parent
+            // (`node.cpp:358-365`). Registered in our ClassDB but never emitted,
+            // so `child_entered_tree.connect(..)` succeeded and never fired.
+            //
+            // ⚠️ Read the parent BEFORE emitting: `emit_signal` takes `&mut
+            // SceneTree`, so the immutable borrow from `get_node` has to end
+            // first.
+            //
+            // Emitted for every node in the subtree, each on its OWN parent —
+            // including `subtree_root`, whose parent sits outside the subtree and
+            // is the one actually gaining a child.
+            let entering_parent = tree.get_node(id).and_then(|n| n.parent());
+            if let Some(parent) = entering_parent {
+                tree.emit_signal(
+                    parent,
+                    "child_entered_tree",
+                    &[gdvariant::Variant::ObjectId(id.object_id())],
+                );
+            }
+            // A `ShaderGlobalsOverride` pushes its `params/*` values into the
+            // global shader parameter store as it enters (pat-s3rrv.209).
+            apply_shader_globals_override(tree, id);
         }
 
         // Phase 2: READY — bottom-up.
@@ -48,12 +109,101 @@ impl LifecycleManager {
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
         for &id in &bottom_up {
+            // Caller-supplied re-entry filter (pat-mgixk.406); empty for every
+            // ordinary `enter_tree`.
+            //
+            // Godot's `_propagate_ready` (`scene/main/node.cpp:317-332`) sends
+            // `NOTIFICATION_POST_ENTER_TREE` on EVERY entry, then READY only the
+            // first time (`ready_first`). So a re-entered node gets the former
+            // and not the latter — and it is STILL ready: `is_node_ready()` is
+            // `!ready_first`, which a reparent does not reset. Skipping the whole
+            // body here left a reparented node reporting `is_ready() == false`.
+            if let Some(node) = tree.get_node_mut(id) {
+                node.receive_notification(NOTIFICATION_POST_ENTER_TREE);
+            }
+            tree.notify_script(id, NOTIFICATION_POST_ENTER_TREE.code() as i64);
+            if skip_ready.contains(&id) {
+                if let Some(node) = tree.get_node_mut(id) {
+                    node.set_ready(true);
+                }
+                continue;
+            }
             tree.trace_record(id, TraceEventType::Notification, "READY");
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_ready(true);
                 node.receive_notification(NOTIFICATION_READY);
             }
             tree.process_script_ready(id);
+            tree.notify_script(id, NOTIFICATION_READY.code() as i64);
+            // Godot's `_propagate_ready` emits `ready` AFTER the node's own
+            // `_ready` has run (`node.cpp:331`), which is what makes
+            // `await child.ready` resume at the right moment (pat-mgixk.64).
+            // Ordering matters and follows the calls above, not precedes them: a
+            // listener woken by `ready` must be able to see whatever `_ready`
+            // set up.
+            //
+            // Bottom-up like the rest of this phase, so a parent's `ready`
+            // fires after every descendant's.
+            tree.emit_signal(id, "ready", &[]);
+        }
+    }
+
+    /// Rewinds a premature enter/ready pass so [`enter_tree`](Self::enter_tree)
+    /// can deliver the real one exactly once (pat-0q2kx.46).
+    ///
+    /// [`SceneTree::add_child`] enters a child the moment it is inserted. That is
+    /// right for a live tree, but wrong when a subtree is *assembled* under an
+    /// already-live root: each node is entered before it has children — so
+    /// `READY` fires parent-first instead of child-first — and before its script
+    /// is attached, so the script sees neither callback. Callers that assemble
+    /// first and dispatch afterwards (the editor's Play flow, autoload
+    /// instantiation) call this to drop that pass: `inside_tree` and `ready` are
+    /// cleared and the `ENTER_TREE`/`READY` entries are removed from every node's
+    /// notification log, leaving exactly one of each once the real dispatch runs.
+    ///
+    /// Signals are deliberately not rewound. Nothing can be connected to a node
+    /// that has not yet run a script callback, so the premature `tree_entered`
+    /// emission had no listeners to reach.
+    ///
+    /// ⚠️ That reasoning was re-checked when `ready` and `child_entered_tree`
+    /// were added to the same phases (pat-mgixk.64). It holds for `ready` and
+    /// `tree_entered`, which are emitted ON THE ENTERING NODE — that node has no
+    /// script and therefore no connections during the premature pass.
+    ///
+    /// ⚠️ It does NOT hold as cleanly for `child_entered_tree`, and this is the
+    /// one place it is written down: that signal is emitted on the **parent**,
+    /// which in the assemble-then-dispatch flows (the editor's Play path,
+    /// autoload instantiation) is an already-live node that may well have a
+    /// script and listeners. Such a parent therefore sees
+    /// `child_entered_tree` TWICE for the same child: once from the premature
+    /// pass `add_child` triggers, once from the real dispatch after this rewind.
+    /// Emissions cannot be un-emitted, so the rewind cannot repair it.
+    ///
+    /// Left as-is deliberately rather than papered over: the pre-existing
+    /// `tree_entered` emission has had the same duplicate-on-rewind shape since
+    /// pat-nzgdu.84, suppressing it needs a "premature pass" flag threaded
+    /// through `add_child` -> `enter_tree`, and guessing at that without being
+    /// able to run the editor Play flow would trade a known, documented
+    /// duplicate for an unknown regression. Worth its own bead.
+    pub fn rewind_for_redispatch(tree: &mut SceneTree, subtree_root: NodeId) {
+        let mut ids = Vec::new();
+        tree.collect_subtree_top_down(subtree_root, &mut ids);
+
+        for id in ids {
+            if let Some(node) = tree.get_node_mut(id) {
+                let kept: Vec<_> = node
+                    .notification_log()
+                    .iter()
+                    .copied()
+                    .filter(|n| *n != NOTIFICATION_ENTER_TREE && *n != NOTIFICATION_READY)
+                    .collect();
+                node.clear_notification_log();
+                for n in kept {
+                    node.receive_notification(n);
+                }
+                node.set_inside_tree(false);
+                node.set_ready(false);
+            }
         }
     }
 
@@ -62,6 +212,31 @@ impl LifecycleManager {
     /// Call this before removing a subtree from the tree. The sequence is:
     /// `EXIT_TREE` bottom-up (deepest children first, then parent).
     pub fn exit_tree(tree: &mut SceneTree, subtree_root: NodeId) {
+        // 🔑 Godot emits `tree_exiting` TOP-DOWN and BEFORE any
+        // `NOTIFICATION_EXIT_TREE` is delivered (`node.cpp:423`), pairing it with
+        // `child_exiting_tree(node)` on the parent (`:433`). That ordering is the
+        // point of the signal: a listener gets to inspect the subtree while it is
+        // still intact and still inside the tree. Emitting it alongside the
+        // bottom-up EXIT_TREE pass below would hand listeners a subtree whose
+        // deeper nodes had already torn themselves down.
+        //
+        // Hence a separate pre-pass rather than two more lines in the loop.
+        let mut top_down = Vec::new();
+        tree.collect_subtree_top_down(subtree_root, &mut top_down);
+        for &id in &top_down {
+            tree.emit_signal(id, "tree_exiting", &[]);
+            // Parent read before the emit, as in `enter_tree`: `emit_signal`
+            // needs `&mut SceneTree`.
+            let exiting_parent = tree.get_node(id).and_then(|n| n.parent());
+            if let Some(parent) = exiting_parent {
+                tree.emit_signal(
+                    parent,
+                    "child_exiting_tree",
+                    &[gdvariant::Variant::ObjectId(id.object_id())],
+                );
+            }
+        }
+
         let mut bottom_up = Vec::new();
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
@@ -73,6 +248,97 @@ impl LifecycleManager {
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
             tree.process_script_exit_tree(id);
+            tree.notify_script(id, NOTIFICATION_EXIT_TREE.code() as i64);
+            // …and drops them again on the way out, restoring whatever the
+            // project file or a script last set (pat-s3rrv.209).
+            clear_shader_globals_override(tree, id);
+        }
+    }
+}
+
+/// Whether `id` is a `ShaderGlobalsOverride` node.
+fn is_shader_globals_override(tree: &SceneTree, id: NodeId) -> bool {
+    tree.get_node(id)
+        .map(|n| n.is_class("ShaderGlobalsOverride"))
+        .unwrap_or(false)
+}
+
+/// The node's `params/<name>` properties, stripped to `<name>`.
+///
+/// Godot's `ShaderGlobalsOverride` exposes one `params/<name>` property per
+/// declared project global; only the ones actually set are pushed.
+fn shader_globals_override_params(
+    tree: &SceneTree,
+    id: NodeId,
+) -> Vec<(String, gdvariant::Variant)> {
+    match tree.get_node(id) {
+        Some(node) => node
+            .properties()
+            .filter_map(|(key, value)| {
+                key.strip_prefix("params/")
+                    .map(|name| (name.to_string(), value.clone()))
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The `ShaderGlobalsOverride` currently in the tree, ignoring `exclude`.
+///
+/// ⚠️ Godot's rule is that exactly **one** override is active: the first in the
+/// tree wins and any other warns rather than fighting it. Resolved by walking
+/// the tree rather than caching a "current override" somewhere, so there is no
+/// stale global to leak between scenes — or, in this codebase, between tests
+/// sharing one process.
+fn active_shader_globals_override(tree: &SceneTree, exclude: Option<NodeId>) -> Option<NodeId> {
+    let mut all = Vec::new();
+    tree.collect_subtree_top_down(tree.root_id(), &mut all);
+    all.into_iter().find(|&id| {
+        Some(id) != exclude
+            && tree
+                .get_node(id)
+                .map(|n| n.is_class("ShaderGlobalsOverride") && n.is_inside_tree())
+                .unwrap_or(false)
+    })
+}
+
+/// Pushes a `ShaderGlobalsOverride`'s params into the global store.
+///
+/// A no-op for every other class, so this costs one `is_class` per node
+/// entering the tree.
+fn apply_shader_globals_override(tree: &mut SceneTree, id: NodeId) {
+    if !is_shader_globals_override(tree, id) {
+        return;
+    }
+    // ⚠️ First in the tree wins. ENTER_TREE runs top-down, so an override
+    // earlier in the scene is already `inside_tree` here and this one must
+    // stand down — it reports a configuration warning instead
+    // (`SceneTree::node_configuration_warnings`).
+    if active_shader_globals_override(tree, Some(id)).is_some() {
+        return;
+    }
+    for (name, value) in shader_globals_override_params(tree, id) {
+        gdvariant::shader_globals::set_override(&name, Some(value));
+    }
+}
+
+/// Drops a `ShaderGlobalsOverride`'s params, then hands control to whatever
+/// override is still in the tree.
+fn clear_shader_globals_override(tree: &mut SceneTree, id: NodeId) {
+    if !is_shader_globals_override(tree, id) {
+        return;
+    }
+    for (name, _) in shader_globals_override_params(tree, id) {
+        gdvariant::shader_globals::set_override(&name, None);
+    }
+    // ⚠️ Re-apply whoever remains. Two things need this: the active override
+    // leaving should promote the next one, and an INACTIVE override leaving
+    // would otherwise clear a param the active one owns, because both nodes
+    // name the same global. Re-applying makes that self-correcting rather than
+    // order-dependent.
+    if let Some(next) = active_shader_globals_override(tree, Some(id)) {
+        for (name, value) in shader_globals_override_params(tree, next) {
+            gdvariant::shader_globals::set_override(&name, Some(value));
         }
     }
 }
@@ -84,13 +350,17 @@ mod tests {
     use crate::scene_tree::SceneTree;
     use gdobject::notification::{
         NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE,
-        NOTIFICATION_PARENTED, NOTIFICATION_READY, NOTIFICATION_UNPARENTED,
+        NOTIFICATION_PARENTED, NOTIFICATION_POSTINITIALIZE, NOTIFICATION_POST_ENTER_TREE,
+        NOTIFICATION_READY, NOTIFICATION_UNPARENTED,
     };
 
-    /// Helper: build a small tree and return (tree, root, parent, child1, child2).
+    /// Helper: build a small tree with root NOT inside_tree, so lifecycle
+    /// tests can manually control when enter_tree / exit_tree fires.
     fn build_test_tree() -> (SceneTree, NodeId, NodeId, NodeId, NodeId) {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
+        // Disable auto-lifecycle so tests control it manually.
+        tree.get_node_mut(root).unwrap().set_inside_tree(false);
 
         let parent = Node::new("Parent", "Node");
         let parent_id = tree.add_child(root, parent).unwrap();
@@ -110,21 +380,27 @@ mod tests {
 
         LifecycleManager::enter_tree(&mut tree, parent_id);
 
-        // Parent: PARENTED (add to root) + 2x CHILD_ORDER_CHANGED (child1, child2 added) + ENTER_TREE + READY
+        // Parent: POSTINITIALIZE + PARENTED (add to root) + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(parent_log[1], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(parent_log[1], NOTIFICATION_PARENTED);
         assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
-        assert_eq!(parent_log[3], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[3], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[4], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[5], NOTIFICATION_POST_ENTER_TREE);
 
-        // Children: PARENTED + ENTER_TREE
+        // Children: POSTINITIALIZE + PARENTED + ENTER_TREE
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(c1_log[1], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(c1_log[1], NOTIFICATION_PARENTED);
+        assert_eq!(c1_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[3], NOTIFICATION_POST_ENTER_TREE);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(c2_log[1], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c2_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(c2_log[1], NOTIFICATION_PARENTED);
+        assert_eq!(c2_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c2_log[3], NOTIFICATION_POST_ENTER_TREE);
     }
 
     #[test]
@@ -133,27 +409,33 @@ mod tests {
 
         LifecycleManager::enter_tree(&mut tree, parent_id);
 
-        // Parent: PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY = 5
+        // Parent: POSTINITIALIZE + PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY = 6
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log.len(), 5);
-        assert_eq!(parent_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(parent_log[1], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log.len(), 7);
+        assert_eq!(parent_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(parent_log[1], NOTIFICATION_PARENTED);
         assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
-        assert_eq!(parent_log[3], NOTIFICATION_ENTER_TREE);
-        assert_eq!(parent_log[4], NOTIFICATION_READY);
+        assert_eq!(parent_log[3], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[4], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[5], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(parent_log[6], NOTIFICATION_READY);
 
-        // Children: PARENTED + ENTER_TREE + READY = 3
+        // Children: POSTINITIALIZE + PARENTED + ENTER_TREE + READY = 4
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log.len(), 3);
-        assert_eq!(c1_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(c1_log[1], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c1_log[2], NOTIFICATION_READY);
+        assert_eq!(c1_log.len(), 5);
+        assert_eq!(c1_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(c1_log[1], NOTIFICATION_PARENTED);
+        assert_eq!(c1_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(c1_log[4], NOTIFICATION_READY);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log.len(), 3);
-        assert_eq!(c2_log[0], NOTIFICATION_PARENTED);
-        assert_eq!(c2_log[1], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c2_log[2], NOTIFICATION_READY);
+        assert_eq!(c2_log.len(), 5);
+        assert_eq!(c2_log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(c2_log[1], NOTIFICATION_PARENTED);
+        assert_eq!(c2_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c2_log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(c2_log[4], NOTIFICATION_READY);
     }
 
     #[test]
@@ -178,31 +460,37 @@ mod tests {
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
 
-        // Parent: PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY
+        // Parent: POSTINITIALIZE + PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY
         assert_eq!(
             parent_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
-        // Children: PARENTED + ENTER_TREE + READY
+        // Children: POSTINITIALIZE + PARENTED + ENTER_TREE + READY
         assert_eq!(
             c1_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
         assert_eq!(
             c2_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
@@ -218,6 +506,7 @@ mod tests {
         assert_eq!(
             parent_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
@@ -226,10 +515,24 @@ mod tests {
         );
 
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
+        assert_eq!(
+            c1_log,
+            &[
+                NOTIFICATION_POSTINITIALIZE,
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_EXIT_TREE
+            ]
+        );
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
+        assert_eq!(
+            c2_log,
+            &[
+                NOTIFICATION_POSTINITIALIZE,
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_EXIT_TREE
+            ]
+        );
 
         // Bottom-up means children exit before parent.
         let mut bottom_up = Vec::new();
@@ -241,16 +544,19 @@ mod tests {
     fn enter_tree_single_node_no_children() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(false);
         let leaf = Node::new("Leaf", "Node");
         let leaf_id = tree.add_child(root, leaf).unwrap();
 
         LifecycleManager::enter_tree(&mut tree, leaf_id);
 
         let log = tree.get_node(leaf_id).unwrap().notification_log();
-        assert_eq!(log.len(), 3);
-        assert_eq!(log[0], NOTIFICATION_PARENTED);
-        assert_eq!(log[1], NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[2], NOTIFICATION_READY);
+        assert_eq!(log.len(), 5);
+        assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(log[1], NOTIFICATION_PARENTED);
+        assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(log[4], NOTIFICATION_READY);
         assert!(tree.get_node(leaf_id).unwrap().is_inside_tree());
         assert!(tree.get_node(leaf_id).unwrap().is_ready());
     }
@@ -259,6 +565,7 @@ mod tests {
     fn exit_tree_leaf_node_only() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(false);
         let parent = Node::new("Parent", "Node");
         let parent_id = tree.add_child(root, parent).unwrap();
         let leaf = Node::new("Leaf", "Node");
@@ -267,13 +574,24 @@ mod tests {
         LifecycleManager::exit_tree(&mut tree, leaf_id);
 
         let leaf_log = tree.get_node(leaf_id).unwrap().notification_log();
-        assert_eq!(leaf_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
+        assert_eq!(
+            leaf_log,
+            &[
+                NOTIFICATION_POSTINITIALIZE,
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_EXIT_TREE
+            ]
+        );
 
-        // Parent should have PARENTED from add_child + CHILD_ORDER_CHANGED from adding leaf
+        // Parent should have POSTINITIALIZE + PARENTED + CHILD_ORDER_CHANGED
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
         assert_eq!(
             parent_log,
-            &[NOTIFICATION_PARENTED, NOTIFICATION_CHILD_ORDER_CHANGED]
+            &[
+                NOTIFICATION_POSTINITIALIZE,
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_CHILD_ORDER_CHANGED
+            ]
         );
     }
 
@@ -288,8 +606,10 @@ mod tests {
         assert_eq!(
             c1_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,
             ]
@@ -299,10 +619,12 @@ mod tests {
         assert_eq!(
             parent_log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,
             ]

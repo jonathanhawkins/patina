@@ -63,6 +63,12 @@ fn dump_node(tree: &SceneTree, node_id: NodeId) -> Value {
     // Collect properties in sorted order for deterministic output.
     let mut props = BTreeMap::new();
     for (key, value) in node.properties() {
+        // The `script` reference is a resource link, not a stored property in
+        // these goldens: the Godot property dumper (tools/oracle) and the
+        // runner's dump both omit it.
+        if key == "script" {
+            continue;
+        }
         props.insert(key.clone(), to_json(value));
     }
 
@@ -510,4 +516,25 @@ fn assert_resource_matches_golden(actual: &Value, golden: &Value) {
             assert_properties_eq(&a_sp, &e_sp, &format!("subresource/{key}"));
         }
     }
+}
+
+/// Checks: the tiny script-host scenes (`test_bare`, `test_mover`,
+/// `test_pos_x`) instance to the trees their goldens record. These goldens
+/// existed with no test reading them (golden_staleness flagged them orphaned).
+#[test]
+fn golden_scene_test_bare() {
+    let actual = load_and_dump_scene("scenes/test_bare.tscn");
+    assert_scene_matches_golden(&actual, &read_golden("golden/scenes/test_bare.json"));
+}
+
+#[test]
+fn golden_scene_test_mover() {
+    let actual = load_and_dump_scene("scenes/test_mover.tscn");
+    assert_scene_matches_golden(&actual, &read_golden("golden/scenes/test_mover.json"));
+}
+
+#[test]
+fn golden_scene_test_pos_x() {
+    let actual = load_and_dump_scene("scenes/test_pos_x.tscn");
+    assert_scene_matches_golden(&actual, &read_golden("golden/scenes/test_pos_x.json"));
 }

@@ -33,17 +33,19 @@ impl fmt::Display for Notification {
             13 => "READY",
             14 => "PAUSED",
             15 => "UNPAUSED",
-            16 => "CHILD_ORDER_CHANGED",
+            16 => "PHYSICS_PROCESS",
             17 => "PROCESS",
-            18 => "PHYSICS_PROCESS",
-            20 => "PARENTED",
-            21 => "UNPARENTED",
-            25 => "INSTANCED",
-            26 => "DRAG_BEGIN",
-            27 => "DRAG_END",
+            18 => "PARENTED",
+            19 => "UNPARENTED",
+            20 => "INSTANCED",
+            21 => "DRAG_BEGIN",
+            22 => "DRAG_END",
+            23 => "PATH_RENAMED",
+            24 => "CHILD_ORDER_CHANGED",
+            25 => "INTERNAL_PROCESS",
+            26 => "INTERNAL_PHYSICS_PROCESS",
+            27 => "POST_ENTER_TREE",
             30 => "DRAW",
-            35 => "INTERNAL_PROCESS",
-            36 => "INTERNAL_PHYSICS_PROCESS",
             _ => return write!(f, "Notification({})", self.0),
         };
         write!(f, "NOTIFICATION_{name}")
@@ -51,6 +53,12 @@ impl fmt::Display for Notification {
 }
 
 // ── Standard notification constants ─────────────────────────────────
+//
+// ⚠️ The VALUES are Godot's (`scene/main/node.h`, the `NOTIFICATION_*` enum).
+// Several used to be invented — PHYSICS_PROCESS was 18, PARENTED 20,
+// CHILD_ORDER_CHANGED 16, INTERNAL_PROCESS 35 — which is invisible while every
+// comparison goes through these constants and wrong the moment a script, a
+// probe or a ported test compares the number Godot documents.
 
 /// Sent after the object has been fully initialized.
 pub const NOTIFICATION_POSTINITIALIZE: Notification = Notification::new(0);
@@ -77,37 +85,45 @@ pub const NOTIFICATION_PAUSED: Notification = Notification::new(14);
 pub const NOTIFICATION_UNPAUSED: Notification = Notification::new(15);
 
 /// The order of children within the parent has changed.
-pub const NOTIFICATION_CHILD_ORDER_CHANGED: Notification = Notification::new(16);
+pub const NOTIFICATION_CHILD_ORDER_CHANGED: Notification = Notification::new(24);
 
 /// Called every frame during `_process`.
 pub const NOTIFICATION_PROCESS: Notification = Notification::new(17);
 
 /// Called every physics tick during `_physics_process`.
-pub const NOTIFICATION_PHYSICS_PROCESS: Notification = Notification::new(18);
+pub const NOTIFICATION_PHYSICS_PROCESS: Notification = Notification::new(16);
 
 /// Node has gained a parent.
-pub const NOTIFICATION_PARENTED: Notification = Notification::new(20);
+pub const NOTIFICATION_PARENTED: Notification = Notification::new(18);
 
 /// Node has lost its parent.
-pub const NOTIFICATION_UNPARENTED: Notification = Notification::new(21);
+pub const NOTIFICATION_UNPARENTED: Notification = Notification::new(19);
 
 /// Node has been instanced from a packed scene.
-pub const NOTIFICATION_INSTANCED: Notification = Notification::new(25);
+pub const NOTIFICATION_INSTANCED: Notification = Notification::new(20);
 
 /// Drag operation started.
-pub const NOTIFICATION_DRAG_BEGIN: Notification = Notification::new(26);
+pub const NOTIFICATION_DRAG_BEGIN: Notification = Notification::new(21);
 
 /// Drag operation ended.
-pub const NOTIFICATION_DRAG_END: Notification = Notification::new(27);
+pub const NOTIFICATION_DRAG_END: Notification = Notification::new(22);
+
+/// The node's path (or an ancestor's) changed — Godot `NOTIFICATION_PATH_RENAMED`.
+pub const NOTIFICATION_PATH_RENAMED: Notification = Notification::new(23);
+
+/// Sent on EVERY tree entry, after `_ready` has had its chance — Godot
+/// `NOTIFICATION_POST_ENTER_TREE` (`node.cpp` `_propagate_ready`). Unlike
+/// `NOTIFICATION_READY` it repeats on a re-entry (a reparent).
+pub const NOTIFICATION_POST_ENTER_TREE: Notification = Notification::new(27);
 
 /// Request to draw (2D).
 pub const NOTIFICATION_DRAW: Notification = Notification::new(30);
 
 /// Called every frame for internal engine processing (before user `_process`).
-pub const NOTIFICATION_INTERNAL_PROCESS: Notification = Notification::new(35);
+pub const NOTIFICATION_INTERNAL_PROCESS: Notification = Notification::new(25);
 
 /// Called every physics tick for internal engine processing (before user `_physics_process`).
-pub const NOTIFICATION_INTERNAL_PHYSICS_PROCESS: Notification = Notification::new(36);
+pub const NOTIFICATION_INTERNAL_PHYSICS_PROCESS: Notification = Notification::new(26);
 
 /// Trait for types that can receive and handle notifications.
 ///
@@ -162,7 +178,23 @@ mod tests {
         assert_eq!(NOTIFICATION_EXIT_TREE.code(), 11);
         assert_eq!(NOTIFICATION_READY.code(), 13);
         assert_eq!(NOTIFICATION_PROCESS.code(), 17);
-        assert_eq!(NOTIFICATION_PHYSICS_PROCESS.code(), 18);
+        // `scene/main/node.h`. PHYSICS_PROCESS was pinned here as 18 — the
+        // test named "match_godot" asserted a value Godot never used.
+        assert_eq!(NOTIFICATION_PHYSICS_PROCESS.code(), 16);
+        assert_eq!(NOTIFICATION_MOVED_IN_PARENT.code(), 12);
+        assert_eq!(NOTIFICATION_PAUSED.code(), 14);
+        assert_eq!(NOTIFICATION_UNPAUSED.code(), 15);
+        assert_eq!(NOTIFICATION_PARENTED.code(), 18);
+        assert_eq!(NOTIFICATION_UNPARENTED.code(), 19);
+        assert_eq!(NOTIFICATION_INSTANCED.code(), 20);
+        assert_eq!(NOTIFICATION_DRAG_BEGIN.code(), 21);
+        assert_eq!(NOTIFICATION_DRAG_END.code(), 22);
+        assert_eq!(NOTIFICATION_PATH_RENAMED.code(), 23);
+        assert_eq!(NOTIFICATION_CHILD_ORDER_CHANGED.code(), 24);
+        assert_eq!(NOTIFICATION_INTERNAL_PROCESS.code(), 25);
+        assert_eq!(NOTIFICATION_INTERNAL_PHYSICS_PROCESS.code(), 26);
+        assert_eq!(NOTIFICATION_POST_ENTER_TREE.code(), 27);
+        assert_eq!(NOTIFICATION_DRAW.code(), 30);
         assert_eq!(NOTIFICATION_POSTINITIALIZE.code(), 0);
         assert_eq!(NOTIFICATION_PREDELETE.code(), 1);
     }

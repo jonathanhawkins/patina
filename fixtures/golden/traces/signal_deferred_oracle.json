@@ -1,0 +1,32 @@
+{
+  "description": "Oracle trace fixture for deferred signal behavior parity. Godot records SignalEmit at emission time regardless of whether connections are immediate or deferred. Deferred callbacks fire at end-of-frame flush. This fixture models a mixed immediate+deferred scenario across 2 frames.",
+  "upstream_version": "4.6.1-stable",
+  "scenario": "deferred_behavior",
+  "expected_callback_order": [
+    { "label": "immediate_A", "fires_at": "emit", "frame": 0 },
+    { "label": "immediate_B", "fires_at": "emit", "frame": 0 },
+    { "label": "deferred_C", "fires_at": "flush", "frame": 0 },
+    { "label": "deferred_D", "fires_at": "flush", "frame": 0 },
+    { "label": "immediate_E", "fires_at": "emit", "frame": 1 }
+  ],
+  "event_trace": [
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "sig_mixed",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "sig_deferred_only",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "sig_frame1",
+      "frame": 1
+    }
+  ]
+}

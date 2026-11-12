@@ -147,6 +147,9 @@ fn main() {
     let final_ground_pos = get_position(main_loop.tree(), ground_id);
 
     let mut renderer = SoftwareRenderer::new();
+    // Use the engine's built-in default UI font so any Label/Button text renders
+    // as real TTF glyphs (pat-u3l8c.69).
+    renderer.use_default_font();
     let mut viewport = Viewport::new(WIDTH, HEIGHT, Color::rgb(0.1, 0.1, 0.15));
 
     // Ground: dark green rectangle.

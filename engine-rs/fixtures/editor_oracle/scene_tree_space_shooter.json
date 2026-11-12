@@ -1,0 +1,45 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/space_shooter.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Background",
+				"node_class": "Node2D",
+				"owner": "SpaceShooter",
+				"path": "/root/SpaceShooter/Background",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Player",
+				"node_class": "Node2D",
+				"owner": "SpaceShooter",
+				"path": "/root/SpaceShooter/Player",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "EnemySpawner",
+				"node_class": "Node2D",
+				"owner": "SpaceShooter",
+				"path": "/root/SpaceShooter/EnemySpawner",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "ScoreLabel",
+				"node_class": "Node2D",
+				"owner": "SpaceShooter",
+				"path": "/root/SpaceShooter/ScoreLabel",
+				"scene_file_path": ""
+			}
+		],
+		"name": "SpaceShooter",
+		"node_class": "Node2D",
+		"owner": "",
+		"path": "/root/SpaceShooter",
+		"scene_file_path": "res://scenes/space_shooter.tscn"
+	}
+}

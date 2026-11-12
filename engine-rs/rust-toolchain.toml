@@ -1,0 +1,9 @@
+# Pinned so CI and every local/agent build use the SAME compiler and clippy.
+# CI tracked `stable` while local builds sat on an older one, so each Rust
+# release added new clippy lints that failed `-D warnings` with no code
+# change. Bump this deliberately (and the workflows' dtolnay/rust-toolchain@
+# version with it), fixing the new lints in the same change.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

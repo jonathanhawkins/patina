@@ -20,31 +20,71 @@
 
 #![warn(clippy::all)]
 
+pub mod bit_map;
+pub mod block_compression;
 pub mod cache;
+pub mod compressed;
+pub mod config_file;
+pub mod ctex;
+pub mod dpi_texture;
+pub mod ecfg;
+pub mod fbx_import;
+pub mod fuzz_res;
+pub mod gltf_import;
+pub mod glyph_outline;
+pub mod image;
+pub mod image_svg;
+pub mod image_tga_bmp;
 pub mod importers;
 pub mod loader;
+pub mod missing;
+pub mod noise;
+pub mod pck;
+pub mod portable_compressed_texture;
 pub mod project;
+pub mod radiance_hdr;
 pub mod res_loader;
 pub mod resource;
 pub mod saver;
+pub mod shader_ast;
+pub mod shader_preprocessor;
+pub mod shader_tokenizer;
+pub mod stream_peer_gzip;
 pub mod uid;
 pub mod unified;
+pub mod woff;
+pub mod zip;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
+// `crate::` qualifier disambiguates the local module from the external `image`
+// crate dependency (which is referenced elsewhere via `::image::`).
+pub use crate::image::{Image, ImageFormat};
+pub use config_file::{is_config_file_handle, ConfigFile};
 pub use importers::{
     import_font, import_image, import_wav, load_import_file, parse_import_file, resolve_res_path,
     ImportFile, ResourceFormatLoader,
 };
 pub use loader::{parse_uid_string, parse_variant_value, ResourceLoader, TresLoader};
-pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader};
+pub use missing::{MissingNode, MissingResource, PreservedProperties};
+pub use noise::{FastNoiseLite, FractalType, NoiseType};
+pub use project::{
+    AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader, ShaderGlobal,
+};
 pub use res_loader::{
-    is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,
+    is_binary_resource, is_res_binary, load_res_binary, load_resource_bytes, parse_res_header,
+    ResBinaryHeader, RES_MAGIC,
 };
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
-pub use uid::UidRegistry;
+pub use uid::{id_to_text, parse_uid_sidecar, text_to_id, UidRegistry, UID_INVALID_TEXT};
 pub use unified::UnifiedLoader;
+pub use zip::{crc32, is_zip_packer_handle, is_zip_reader_handle, ZipAppend, ZipPacker, ZipReader};
+
+/// Import a glTF 2.0 (`.gltf` / `.glb`) asset into a mesh document resource.
+///
+/// See [`gltf_import`] for supported features and the unsupported-extension list.
+pub use gltf_import::{import_gltf, import_gltf_bytes};
 
 #[cfg(test)]
 mod integration_tests {

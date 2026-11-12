@@ -1,0 +1,25 @@
+[gd_scene format=3 uid="uid://csg_composition"]
+
+[node name="CSGWorld" type="Node3D"]
+
+[node name="Combiner" type="CSGCombiner3D" parent="."]
+
+[node name="Box" type="CSGBox3D" parent="Combiner"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+size = Vector3(2, 2, 2)
+
+[node name="Sphere" type="CSGSphere3D" parent="Combiner"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0)
+radius = 1.5
+
+[node name="Cylinder" type="CSGCylinder3D" parent="Combiner"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+radius = 0.5
+height = 3.0
+
+[node name="Standalone" type="CSGBox3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 0)
+size = Vector3(1, 1, 1)
+
+[node name="Probe" type="ReflectionProbe" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)

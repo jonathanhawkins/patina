@@ -142,9 +142,18 @@ struct SharedState {
 pub struct FrameServerHandle {
     state: Arc<SharedState>,
     thread: Option<JoinHandle<()>>,
+    port: Option<u16>,
 }
 
 impl FrameServerHandle {
+    /// The port actually listening, or `None` when the bind failed. With
+    /// `start(0)` this is the OS-chosen port, which lets a caller (and the
+    /// tests) avoid picking a "free" port that something else takes before the
+    /// bind.
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
     /// Encodes the framebuffer as BMP and stores it for the next `/frame.bmp` request.
     pub fn update_frame(&self, fb: &FrameBuffer) {
         let bmp = encode_bmp(fb);
@@ -189,25 +198,36 @@ pub fn start(port: u16) -> FrameServerHandle {
         running: AtomicBool::new(true),
     });
 
+    // Bind HERE, before returning: binding on the server thread let `start`
+    // return while the port was still closed, so a caller connecting right
+    // away got ConnectionRefused whenever the host was busy (a 150 ms sleep in
+    // space_shooter_live_test failed at load average 30).
+    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::error!("Failed to bind frame server on port {port}: {e}");
+            None
+        }
+    };
+    let bound_port = listener
+        .as_ref()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port());
     let state_clone = Arc::clone(&state);
     let thread = thread::spawn(move || {
-        run_server(state_clone, port);
+        if let Some(listener) = listener {
+            run_server(state_clone, listener);
+        }
     });
 
     FrameServerHandle {
         state,
         thread: Some(thread),
+        port: bound_port,
     }
 }
 
-fn run_server(state: Arc<SharedState>, port: u16) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind frame server on port {port}: {e}");
-            return;
-        }
-    };
+fn run_server(state: Arc<SharedState>, listener: TcpListener) {
     listener
         .set_nonblocking(true)
         .expect("failed to set non-blocking");
@@ -469,6 +489,27 @@ mod tests {
     fn free_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
+    }
+
+    /// `start` returns with the port already listening: a connect straight
+    /// after it, with no sleep and no retry, must succeed. Binding used to
+    /// happen on the server thread, so this raced and lost under host load.
+    #[test]
+    fn start_returns_with_the_port_already_listening() {
+        // Port 0: the OS picks a port at the bind itself. A `free_port()` probe
+        // released its port before `start` re-bound it, so under a parallel
+        // workspace run another process could take it in between and the
+        // connect was refused for a reason unrelated to what this test checks.
+        for _ in 0..20 {
+            let handle = start(0);
+            let port = handle.port().expect("start(0) binds a port");
+            let connected = TcpStream::connect(format!("127.0.0.1:{port}"));
+            handle.stop();
+            assert!(
+                connected.is_ok(),
+                "connect right after start: {connected:?}"
+            );
+        }
     }
 
     fn connect_with_retry(port: u16) -> TcpStream {

@@ -1,0 +1,104 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_csg_composition",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CSGBox3D",
+              "name": "Box",
+              "path": "/root/CSGWorld/Combiner/Box",
+              "properties": {
+                "transform": {
+                  "type": "Transform3D",
+                  "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+                },
+                "size": {
+                  "type": "Vector3",
+                  "value": [2.0, 2.0, 2.0]
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "CSGSphere3D",
+              "name": "Sphere",
+              "path": "/root/CSGWorld/Combiner/Sphere",
+              "properties": {
+                "transform": {
+                  "type": "Transform3D",
+                  "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+                },
+                "radius": {
+                  "type": "Float",
+                  "value": 1.5
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "CSGCylinder3D",
+              "name": "Cylinder",
+              "path": "/root/CSGWorld/Combiner/Cylinder",
+              "properties": {
+                "transform": {
+                  "type": "Transform3D",
+                  "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0]
+                },
+                "radius": {
+                  "type": "Float",
+                  "value": 0.5
+                },
+                "height": {
+                  "type": "Float",
+                  "value": 3.0
+                }
+              }
+            }
+          ],
+          "class": "CSGCombiner3D",
+          "name": "Combiner",
+          "path": "/root/CSGWorld/Combiner",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "CSGBox3D",
+          "name": "Standalone",
+          "path": "/root/CSGWorld/Standalone",
+          "properties": {
+            "transform": {
+              "type": "Transform3D",
+              "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0]
+            },
+            "size": {
+              "type": "Vector3",
+              "value": [1.0, 1.0, 1.0]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "ReflectionProbe",
+          "name": "Probe",
+          "path": "/root/CSGWorld/Probe",
+          "properties": {
+            "transform": {
+              "type": "Transform3D",
+              "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0]
+            }
+          }
+        }
+      ],
+      "class": "Node3D",
+      "name": "CSGWorld",
+      "path": "/root/CSGWorld",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

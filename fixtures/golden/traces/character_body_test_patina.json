@@ -1,0 +1,909 @@
+{
+  "event_trace": [
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Player/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Platform/CollisionShape"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/World/Wall/CollisionShape"
+    }
+  ],
+  "frame_count": 3,
+  "physics_time": 0.05,
+  "process_time": 0.05,
+  "scene_file": "/Users/bone/dev/games/patina/fixtures/scenes/character_body_test.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "CollisionShape2D",
+                "name": "CollisionShape",
+                "notifications": [
+                  "NOTIFICATION_PARENTED",
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/World/Player/CollisionShape",
+                "properties": {},
+                "script_vars": {}
+              }
+            ],
+            "class": "CharacterBody2D",
+            "name": "Player",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_CHILD_ORDER_CHANGED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Player",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  100.0,
+                  100.0
+                ]
+              }
+            },
+            "script_vars": {}
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "CollisionShape2D",
+                "name": "CollisionShape",
+                "notifications": [
+                  "NOTIFICATION_PARENTED",
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/World/Platform/CollisionShape",
+                "properties": {},
+                "script_vars": {}
+              }
+            ],
+            "class": "StaticBody2D",
+            "name": "Platform",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_CHILD_ORDER_CHANGED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Platform",
+            "properties": {
+              "collision_mask": {
+                "type": "Int",
+                "value": 0
+              },
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  100.0,
+                  200.0
+                ]
+              }
+            },
+            "script_vars": {}
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "CollisionShape2D",
+                "name": "CollisionShape",
+                "notifications": [
+                  "NOTIFICATION_PARENTED",
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/World/Wall/CollisionShape",
+                "properties": {},
+                "script_vars": {}
+              }
+            ],
+            "class": "StaticBody2D",
+            "name": "Wall",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_CHILD_ORDER_CHANGED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Wall",
+            "properties": {
+              "collision_mask": {
+                "type": "Int",
+                "value": 0
+              },
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  300.0,
+                  150.0
+                ]
+              }
+            },
+            "script_vars": {}
+          }
+        ],
+        "class": "Node",
+        "name": "World",
+        "notifications": [
+          "NOTIFICATION_PARENTED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/World",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_CHILD_ORDER_CHANGED",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

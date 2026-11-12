@@ -15,6 +15,13 @@ gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscene = { path = "../gdscene" }
+# pat-mgixk.28: the 2D framebuffer `--frame-out` writes. NOTE the absence of
+# `gdeditor`: the whole point of moving the canvas builder into `gdscene` was
+# that a headless run must not pull the editor in, and the acceptance test
+# asserts on this file to keep it that way.
+gdrender2d = { path = "../gdrender2d" }
+gdaudio = { path = "../gdaudio" }
+gdplatform = { path = "../gdplatform" }
 gdscript-interop = { path = "../gdscript-interop" }
 serde_json.workspace = true
 tracing.workspace = true

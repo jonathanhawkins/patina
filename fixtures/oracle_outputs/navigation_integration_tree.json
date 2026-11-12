@@ -1,0 +1,139 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "PlayerCollision",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Player/PlayerCollision"
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"groups": [],
+							"name": "PlayerNavAgent",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Player/PlayerNavAgent"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [],
+					"name": "Player",
+					"owner": "/root/NavWorld",
+					"path": "/root/NavWorld/Player"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "Enemy1Collision",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Enemy1/Enemy1Collision"
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"groups": [],
+							"name": "Enemy1NavAgent",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Enemy1/Enemy1NavAgent"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [],
+					"name": "Enemy1",
+					"owner": "/root/NavWorld",
+					"path": "/root/NavWorld/Enemy1"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "Enemy2Collision",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Enemy2/Enemy2Collision"
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"groups": [],
+							"name": "Enemy2NavAgent",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Enemy2/Enemy2NavAgent"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [],
+					"name": "Enemy2",
+					"owner": "/root/NavWorld",
+					"path": "/root/NavWorld/Enemy2"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Marker2D",
+							"groups": [],
+							"name": "Waypoint1",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Patrol/Waypoint1"
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"groups": [],
+							"name": "Waypoint2",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Patrol/Waypoint2"
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"groups": [],
+							"name": "Waypoint3",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Patrol/Waypoint3"
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"groups": [],
+							"name": "Waypoint4",
+							"owner": "/root/NavWorld",
+							"path": "/root/NavWorld/Patrol/Waypoint4"
+						}
+					],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Patrol",
+					"owner": "/root/NavWorld",
+					"path": "/root/NavWorld/Patrol"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "NavWorld",
+			"owner": "/root",
+			"path": "/root/NavWorld"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

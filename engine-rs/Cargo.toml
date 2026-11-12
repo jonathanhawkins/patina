@@ -12,8 +12,12 @@ members = [
     "crates/gdaudio",
     "crates/gdplatform",
     "crates/gdscript-interop",
+    "crates/gdphysics3d",
+    "crates/gdserver3d",
+    "crates/gdrender3d",
     "crates/gdeditor",
     "crates/patina-runner",
+    "crates/patina-web",
 ]
 
 [workspace.package]
@@ -49,8 +53,20 @@ gdaudio = { path = "crates/gdaudio" }
 gdobject = { path = "crates/gdobject" }
 gdresource = { path = "crates/gdresource" }
 gdscript-interop = { path = "crates/gdscript-interop" }
+gdphysics3d = { path = "crates/gdphysics3d" }
+gdserver3d = { path = "crates/gdserver3d" }
+gdrender3d = { path = "crates/gdrender3d" }
 gdeditor = { path = "crates/gdeditor" }
+patina-runner = { path = "crates/patina-runner" }
 serde_json.workspace = true
+
+[features]
+# Enables the wgpu GPU path in gdrender3d so the workspace-level GPU integration
+# tests (tests/render_3d_gpu_pipeline_test.rs, `#[cfg(feature = "gpu")]`) compile
+# and run — they skip themselves when no adapter is present. Non-default so plain
+# builds are unaffected (the editor already links wgpu via gdeditor's default
+# `gpu-render` feature). Run the GPU tests with `--features gpu`.
+gpu = ["gdrender3d/gpu"]
 
 [[example]]
 name = "demo_2d"
@@ -79,7 +95,38 @@ path = "examples/space_shooter_live.rs"
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
+proptest = "1"
+# pat-yuyqw: editor OpenAPI 3 spec validation
+openapiv3 = "2"
+serde_yaml = "0.9"
 
 [[example]]
 name = "editor"
 path = "examples/editor.rs"
+
+# pat-u3l8c.114: writes the deployable web export folder (the IO driver for
+# gdplatform::web_export). Driven by scripts/web-export.sh.
+[[example]]
+name = "web_export"
+path = "examples/web_export.rs"
+
+# Verifier-lane build speed: ~550 integration test binaries each link the full
+# engine, and full DWARF (debuginfo=2) dominates that link time. Line tables
+# keep file:line in panic backtraces — enough for swarm verify triage — while
+# cutting compile+link cost substantially. Set `debug = 2` locally if you need
+# full variable info under a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
+# RSA keygen cost (pat-s3rrv.195). `Crypto.generate_rsa(2048)` is a prime
+# search in `num-bigint-dig`, and an unoptimised bigint makes that tens of
+# times slower — slow enough that the script-level acceptance test looks hung
+# rather than slow. Optimising ONLY the bigint and RSA crates keeps every
+# first-party crate at `opt-level = 0`, so panic line numbers and step
+# debugging in engine code are unchanged; `profile.test` inherits `profile.dev`,
+# so this covers the test binaries too.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

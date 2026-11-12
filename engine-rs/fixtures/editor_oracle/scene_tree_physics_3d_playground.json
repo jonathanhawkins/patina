@@ -1,0 +1,121 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/physics_3d_playground.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Floor/FloorShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "FloorMesh",
+						"node_class": "MeshInstance3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Floor/FloorMesh",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Floor",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "BallShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Ball/BallShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "BallMesh",
+						"node_class": "MeshInstance3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Ball/BallMesh",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Ball",
+				"node_class": "RigidBody3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Ball",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "CrateShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Crate/CrateShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "CrateMesh",
+						"node_class": "MeshInstance3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Crate/CrateMesh",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Crate",
+				"node_class": "RigidBody3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Crate",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "RampShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Physics3DPlayground",
+						"path": "/root/Physics3DPlayground/Ramp/RampShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Ramp",
+				"node_class": "StaticBody3D",
+				"owner": "Physics3DPlayground",
+				"path": "/root/Physics3DPlayground/Ramp",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Physics3DPlayground",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Physics3DPlayground",
+		"scene_file_path": "res://scenes/physics_3d_playground.tscn"
+	}
+}

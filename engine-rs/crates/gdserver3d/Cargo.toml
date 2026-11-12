@@ -1,0 +1,15 @@
+[package]
+name = "gdserver3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gdcore = { path = "../gdcore" }
+gdvariant = { path = "../gdvariant" }
+# pat-s3rrv.36: the GDShader AST parser/evaluator. Not a cycle -- gdresource
+# depends only on gdcore/gdvariant/gdobject, none of which reach back here.
+gdresource = { path = "../gdresource" }
+thiserror.workspace = true
+tracing.workspace = true

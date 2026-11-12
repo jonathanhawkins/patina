@@ -1,0 +1,69 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/demo_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "BoxA",
+				"node_class": "MeshInstance3D",
+				"owner": "World",
+				"path": "/root/World/BoxA",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Ball",
+				"node_class": "MeshInstance3D",
+				"owner": "World",
+				"path": "/root/World/Ball",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Tube",
+				"node_class": "MeshInstance3D",
+				"owner": "World",
+				"path": "/root/World/Tube",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Donut",
+				"node_class": "MeshInstance3D",
+				"owner": "World",
+				"path": "/root/World/Donut",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Collider",
+				"node_class": "CollisionShape3D",
+				"owner": "World",
+				"path": "/root/World/Collider",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "World",
+				"path": "/root/World/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "World",
+				"path": "/root/World/Camera",
+				"scene_file_path": ""
+			}
+		],
+		"name": "World",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/World",
+		"scene_file_path": "res://scenes/demo_3d.tscn"
+	}
+}

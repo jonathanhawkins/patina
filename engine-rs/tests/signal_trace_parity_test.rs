@@ -8,8 +8,8 @@
 //! 5. Cross-node signal dispatch: emit on one node triggers method on another
 //! 6. .tscn-declared connections are wired and traced correctly
 
+#[path = "support/oracle_fixture.rs"]
 mod oracle_fixture;
-
 use gdscene::node::{Node, NodeId};
 use gdscene::scene_tree::SceneTree;
 use gdscene::scripting::GDScriptNodeInstance;

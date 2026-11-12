@@ -1,0 +1,239 @@
+<!doctype html>
+<!--
+  Dev harness for the canvas render path (pat-u3l8c.110) and the WebAudio
+  output backend (pat-u3l8c.112).
+
+  Build the wasm bundle first:
+
+      engine-rs/crates/patina-web/build-web.sh
+
+  then serve THIS directory over HTTP (file:// cannot instantiate wasm):
+
+      python3 -m http.server 8099 --directory engine-rs/crates/patina-web/web
+
+  and open http://localhost:8099/. The status line reports which backend was
+  selected — `BrowserWebGpu` when the browser has WebGPU, `Gl` when it fell
+  back to WebGL2 — which is the observable difference .110 is about.
+
+  For the frame loop and input (pat-u3l8c.111): the `engine` lines report the
+  rate requestAnimationFrame is actually driving MainLoop::step at, and the most
+  recent translated input event. Move the pointer, scroll, press keys, drag a
+  finger or move a standard-mapped gamepad stick over the canvas and `last`
+  should change; `fps` should sit near the display refresh rate, and `frames`
+  should keep climbing. Switch tabs and `hidden` flips — `elapsed` keeps
+  advancing, throttled rather than frozen, which is the clamping the driver is
+  for. Note the engine loop is deliberately independent of the clear-colour
+  animation below: the scene is an empty Node2D, since loading a project's
+  scene tree is the export pipeline's job (pat-u3l8c.114).
+
+  For audio (.112): click anywhere (or press a key) to resume the AudioContext,
+  then press "play tone". The `frames pulled` counter rising is the observable
+  proof that the AudioWorkletProcessor is draining the engine mixer's ring;
+  browsers refuse to start audio without that first gesture, so a silent page
+  with a flat counter means the context is still suspended.
+
+  This is a harness, not the shipping export pipeline; that is pat-u3l8c.114.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Patina — canvas render check</title>
+    <style>
+      body {
+        margin: 0;
+        background: #111;
+        color: #eee;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #status {
+        padding: 8px 12px;
+        white-space: pre-wrap;
+      }
+      #controls {
+        padding: 0 12px 8px;
+      }
+      button {
+        font: inherit;
+        background: #333;
+        color: #eee;
+        border: 1px solid #666;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      #patina-canvas {
+        display: block;
+        width: 100vw;
+        height: calc(100vh - 96px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">starting…</div>
+    <div id="controls"><button id="tone" disabled>play tone</button></div>
+    <canvas id="patina-canvas"></canvas>
+
+    <script type="module">
+      import init, {
+        startCanvasRenderer,
+        startEngine,
+        startWebAudio,
+      } from "./patina_web.js";
+
+      const status = document.getElementById("status");
+      const toneButton = document.getElementById("tone");
+
+      // A worklet module has to be fetched by URL, so the glue Rust emits is
+      // turned into a Blob URL and imported like any other ES module.
+      const importSource = (source) =>
+        import(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+
+      // Returns a getter for the audio status line, or null if audio failed to
+      // start — a page with no audio should still render.
+      async function startAudio(engine) {
+        // 44100 is Godot's audio/driver/mix_rate default; the AudioContext
+        // picks its own rate and the engine resamples to it. The channel count
+        // is the mixer's, reported back as audio.channels.
+        const audio = startWebAudio(44100);
+        // Route the SCENE's AudioServer -- the one every AudioStreamPlayer in
+        // the loaded tree mixes through -- into this same worklet. Without this
+        // the graph is built and only the demo tone is ever audible, because
+        // the MainLoop's AudioServerBridge has no output attached and throws
+        // its mix away (pat-mgixk.4).
+        audio.attachSceneAudio(engine);
+        // Let the engine play MP3 streams (pat-mgixk.4). gdaudio's ISO MP3
+        // decoder is minimp3, which builds C sources and is target-gated off
+        // wasm32, so without this every AudioStreamMP3 in a scene decodes to
+        // UnsupportedFormat. The browser has a decoder of its own; this routes
+        // decodeAudioData's output into the engine's loader, the same way
+        // Godot's web export leans on the browser for MP3.
+        audio.enableBrowserMp3Decoding();
+        const glue = await importSource(audio.workletGlue);
+
+        glue.patinaInstallGestureUnlock(audio.context, () => audio.markUnlocked());
+        // Each time the processor asks, hand it one render quantum mixed by the
+        // engine. This runs on the main thread because that is where the wasm
+        // module lives — the same arrangement Godot's web driver uses.
+        await glue.patinaRegisterWorklet(audio.context, () =>
+          audio.pullBlock(audio.renderQuantum),
+        );
+
+        toneButton.disabled = false;
+        toneButton.addEventListener("click", () => audio.playTone(440, 1.0, 0.4));
+
+        // Decode one MP3 asset with the browser and hand the PCM to the engine.
+        //
+        // This has to happen BEFORE the scene that names the file loads:
+        // decodeAudioData is async, while AudioServerBridge::process loads a
+        // stream synchronously inside a frame, so the PCM must already be
+        // registered when the scene asks for it. Preloading is what a web game
+        // does with its audio anyway -- a loading screen, then play.
+        //
+        // The BYTES are the key, not the path: the engine's decode hook is
+        // handed bytes and nothing else. So whatever is registered here must be
+        // byte-identical to what the scene loads.
+        async function preloadMp3(url) {
+          const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+          // decodeAudioData detaches the ArrayBuffer it is given, so hand it a
+          // copy and keep `bytes` intact to use as the key.
+          const decoded = await audio.context.decodeAudioData(bytes.slice().buffer);
+          // Channel-major, which is registerDecodedMp3's layout: the interleave
+          // happens on the Rust side, where it is unit-tested.
+          const planar = new Float32Array(decoded.length * decoded.numberOfChannels);
+          for (let c = 0; c < decoded.numberOfChannels; c += 1) {
+            planar.set(decoded.getChannelData(c), c * decoded.length);
+          }
+          return audio.registerDecodedMp3(
+            bytes,
+            planar,
+            Math.round(decoded.sampleRate),
+            decoded.numberOfChannels,
+          );
+        }
+
+        // The repo ships no binary MP3 for the demo, so the asset is named by
+        // the URL instead of hardcoded: `?mp3=<url>` exercises the whole
+        // fetch -> decodeAudioData -> registerDecodedMp3 path against any file
+        // the page can reach. Without it the engine simply has no MP3 to play.
+        //
+        // ⚠️ Registering here, after startEngine(), is only safe because this
+        // demo's scene names no audio stream. A real game must preload before
+        // loading the scene that references the .mp3: the engine's loader runs
+        // synchronously inside a frame and a miss is a silent player, not a
+        // retry.
+        const mp3Url = new URLSearchParams(location.search).get("mp3");
+        if (mp3Url) {
+          try {
+            await preloadMp3(mp3Url);
+          } catch (err) {
+            console.error(`mp3 preload of ${mp3Url} failed`, err);
+          }
+        }
+
+        return () =>
+          `audio:   ${audio.contextRate} Hz context / ${audio.mixRate} Hz mix, ` +
+          `${audio.channels}ch\n` +
+          `         ${audio.isUnlocked ? "unlocked" : "SUSPENDED — click or press a key"}, ` +
+          `${audio.framesPulled} frames pulled, ${audio.queuedFrames} queued\n` +
+          `scene:   ${audio.sceneAttached ? "audio attached" : "NOT ATTACHED — scene players are mute"}` +
+          `, ${audio.sceneQueuedFrames} frames queued from MainLoop\n` +
+          `mp3:     ${audio.decodedMp3Count} browser-decoded stream(s) registered`;
+      }
+
+      try {
+        await init();
+        const renderer = await startCanvasRenderer("patina-canvas");
+
+        // The engine owns its own requestAnimationFrame loop in Rust — the
+        // acceptance is that rAF drives MainLoop::step, not that JS pumps it —
+        // so this only reads the counters back out (pat-u3l8c.111).
+        const engine = startEngine("patina-canvas");
+        const engineLines = () =>
+          `engine:  ${engine.fps.toFixed(1)} fps, ${engine.frames} frames, ` +
+          `${engine.elapsed.toFixed(2)}s simulated` +
+          `${engine.hidden ? " (tab hidden — throttled)" : ""}\n` +
+          `input:   ${engine.events} events, ${engine.touches} touches, ` +
+          `${engine.gamepads} gamepads\n` +
+          `last:    ${engine.lastInput || "(none yet — press a key or move the pointer)"}`;
+        const renderLines =
+          `backend: ${renderer.backend}\n` +
+          `adapter: ${renderer.adapter}\n` +
+          `format:  ${renderer.format}\n` +
+          `size:    ${renderer.width}x${renderer.height}`;
+
+        // Audio must not take the page down with it: a browser that refuses to
+        // create an AudioContext should still show the render check.
+        let audioLine = () => "audio:   not started";
+        try {
+          audioLine = await startAudio(engine);
+        } catch (err) {
+          audioLine = () => `audio:   failed: ${err}`;
+        }
+
+        // Animate the clear color so a still frame is distinguishable from a
+        // dead loop: a frozen canvas means present() stopped working.
+        const start = performance.now();
+        let skipped = false;
+        const frame = () => {
+          renderer.syncSize();
+          const t = (performance.now() - start) / 1000;
+          const pulse = 0.25 + 0.2 * Math.sin(t);
+          if (!renderer.presentClear(0.05, pulse, 0.35)) {
+            skipped = true;
+          }
+          status.textContent =
+            renderLines +
+            "\n" +
+            audioLine() +
+            "\n" +
+            engineLines() +
+            (skipped ? "\nframe skipped (surface not ready)" : "");
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      } catch (err) {
+        status.textContent = `failed: ${err}`;
+        throw err;
+      }
+    </script>
+  </body>
+</html>

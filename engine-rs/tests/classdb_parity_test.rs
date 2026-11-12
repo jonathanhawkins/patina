@@ -370,6 +370,52 @@ fn register_core_classes() {
 // 1. All 17 classes are recognized after registration
 // ===========================================================================
 
+/// pat-p0s82.29: the high-use runtime classes previously flagged "absent" in
+/// the ClassDB inventory (XROrigin3D, VideoStreamPlayer, WebRTCMultiplayerPeer)
+/// are now registered by the real `register_*` passes with correct parents and
+/// defaults — closing the last gaps from CLASSDB_INVENTORY.md.
+#[test]
+fn high_use_runtime_classes_registered() {
+    let _g = TEST_LOCK.lock().unwrap();
+    clear_for_testing();
+    gdobject::class_db::register_3d_classes();
+    gdobject::class_db::register_2d_classes();
+    gdobject::class_db::register_networking_classes();
+
+    assert!(class_exists("XROrigin3D"), "XROrigin3D must be registered");
+    assert!(
+        is_parent_class("XROrigin3D", "Node3D"),
+        "XROrigin3D derives from Node3D"
+    );
+
+    assert!(
+        class_exists("VideoStreamPlayer"),
+        "VideoStreamPlayer must be registered"
+    );
+    assert!(
+        is_parent_class("VideoStreamPlayer", "Control"),
+        "VideoStreamPlayer derives from Control"
+    );
+
+    assert!(
+        class_exists("WebRTCMultiplayerPeer"),
+        "WebRTCMultiplayerPeer must be registered"
+    );
+    assert!(
+        is_parent_class("WebRTCMultiplayerPeer", "MultiplayerPeer"),
+        "WebRTCMultiplayerPeer derives from MultiplayerPeer"
+    );
+
+    // Registered with defaults (not bare name-only stubs).
+    let vsp = get_class_info("VideoStreamPlayer").expect("VideoStreamPlayer info");
+    assert!(
+        vsp.properties
+            .iter()
+            .any(|p| p.name.as_str() == "volume_db"),
+        "VideoStreamPlayer exposes a volume_db default"
+    );
+}
+
 #[test]
 fn all_17_classes_recognized() {
     let _g = TEST_LOCK.lock().unwrap();
@@ -655,8 +701,32 @@ fn unregistered_class_returns_none() {
     clear_for_testing();
     register_core_classes();
 
-    assert!(instantiate("AudioStreamPlayer").is_none());
-    assert!(!class_exists("AudioStreamPlayer"));
+    // Use a deliberately fake class name — AudioStreamPlayer is now registered
+    // via register_audio_classes (pat-0uov2).
+    assert!(instantiate("DefinitelyNotARealGodotClass_XYZ").is_none());
+    assert!(!class_exists("DefinitelyNotARealGodotClass_XYZ"));
+}
+
+#[test]
+fn audio_stream_player_is_registered() {
+    let _g = TEST_LOCK.lock().unwrap();
+    clear_for_testing();
+    register_core_classes();
+    gdobject::class_db::register_audio_classes();
+
+    assert!(class_exists("AudioStreamPlayer"));
+    assert!(class_exists("AudioStreamPlayer2D"));
+    assert!(class_exists("AudioStreamPlayer3D"));
+    assert!(is_parent_class("AudioStreamPlayer", "Node"));
+    assert!(is_parent_class("AudioStreamPlayer2D", "Node2D"));
+    assert!(is_parent_class("AudioStreamPlayer3D", "Node3D"));
+
+    let player = instantiate("AudioStreamPlayer").expect("AudioStreamPlayer should instantiate");
+    // GodotObject trait provides get_property (already imported in this file).
+    assert_eq!(player.get_property("volume_db"), Variant::Float(0.0));
+    assert_eq!(player.get_property("bus"), Variant::String("Master".into()));
+    assert_eq!(player.get_property("autoplay"), Variant::Bool(false));
+    assert_eq!(player.get_property("playing"), Variant::Bool(false));
 }
 
 // ===========================================================================

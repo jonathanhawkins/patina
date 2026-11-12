@@ -1,45 +1,49 @@
 {
-  "fixture_id": "scene_ui_menu",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_ui_menu",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "MenuRoot",
-      "class": "Node",
-      "path": "/root/MenuRoot",
       "children": [
         {
-          "name": "Title",
-          "class": "Node",
-          "path": "/root/MenuRoot/Title",
           "children": [],
+          "class": "Node",
+          "name": "Title",
+          "path": "/root/MenuRoot/Title",
           "properties": {
-            "text": { "type": "String", "value": "Main Menu" }
+            "text": {
+              "type": "String",
+              "value": "Main Menu"
+            }
           }
         },
         {
+          "children": [],
+          "class": "Node",
           "name": "PlayButton",
-          "class": "Node",
           "path": "/root/MenuRoot/PlayButton",
-          "children": [],
           "properties": {}
         },
         {
+          "children": [],
+          "class": "Node",
           "name": "SettingsButton",
-          "class": "Node",
           "path": "/root/MenuRoot/SettingsButton",
-          "children": [],
           "properties": {}
         },
         {
-          "name": "QuitButton",
-          "class": "Node",
-          "path": "/root/MenuRoot/QuitButton",
           "children": [],
+          "class": "Node",
+          "name": "QuitButton",
+          "path": "/root/MenuRoot/QuitButton",
           "properties": {}
         }
       ],
+      "class": "Node",
+      "name": "MenuRoot",
+      "path": "/root/MenuRoot",
       "properties": {}
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }

@@ -1,0 +1,53 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/signals_complex.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Emitter",
+				"node_class": "Node2D",
+				"owner": "SignalRoot",
+				"path": "/root/SignalRoot/Emitter",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "RelayA",
+				"node_class": "Node2D",
+				"owner": "SignalRoot",
+				"path": "/root/SignalRoot/RelayA",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "RelayB",
+				"node_class": "Node2D",
+				"owner": "SignalRoot",
+				"path": "/root/SignalRoot/RelayB",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "FinalReceiver",
+				"node_class": "Node2D",
+				"owner": "SignalRoot",
+				"path": "/root/SignalRoot/FinalReceiver",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Timer",
+				"node_class": "Timer",
+				"owner": "SignalRoot",
+				"path": "/root/SignalRoot/Timer",
+				"scene_file_path": ""
+			}
+		],
+		"name": "SignalRoot",
+		"node_class": "Node2D",
+		"owner": "",
+		"path": "/root/SignalRoot",
+		"scene_file_path": "res://scenes/signals_complex.tscn"
+	}
+}

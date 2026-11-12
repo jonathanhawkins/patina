@@ -12,12 +12,21 @@ pub enum PlaybackState {
 }
 
 /// How the stream behaves when it reaches the end.
+///
+/// Mirrors Godot's `AudioStreamWAV.LoopMode`
+/// (`LOOP_DISABLED/FORWARD/PINGPONG/BACKWARD`, `doc/classes/AudioStreamWAV.xml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopMode {
-    /// Stop when the end is reached.
+    /// Stop when the end is reached (`LOOP_DISABLED`).
     None,
-    /// Wrap back to the beginning and continue playing.
+    /// Wrap back to `loop_begin` and continue playing (`LOOP_FORWARD`).
     Forward,
+    /// Bounce between `loop_begin` and `loop_end`, reversing direction at each
+    /// bound (`LOOP_PINGPONG`) — the sample is read forwards, then backwards.
+    PingPong,
+    /// Play the loop region in reverse, wrapping from `loop_begin` back to
+    /// `loop_end` (`LOOP_BACKWARD`).
+    Backward,
 }
 
 /// Controls playback of a single audio stream.
@@ -30,9 +39,49 @@ pub struct AudioStreamPlayback {
     state: PlaybackState,
     volume_db: f32,
     loop_mode: LoopMode,
-    position_secs: f32,
+    /// ⚠️ f64, not f32. A music track minutes in sits millions of source
+    /// samples from the start; an f32 resolves ~8.8M samples (200 s at
+    /// 44.1 kHz) only to the nearest WHOLE sample, so the interpolation fraction
+    /// was lost and every sample snapped to a neighbour — gritty, crackling
+    /// distortion that grew with play time, on long streams only.
+    position_secs: f64,
     length_secs: f32,
     bus_name: String,
+    /// Pitch multiplier applied during mixing (Godot default 1.0). Values > 1.0
+    /// speed the stream up (higher pitch), < 1.0 slow it down (lower pitch).
+    pitch_scale: f32,
+    /// Per-channel gain for stereo panning: left channel gain. Default 1.0.
+    /// Positional players (2D/3D) push equal-power pan gains here so the mixer
+    /// spatializes the stream.
+    pan_left: f32,
+    /// Per-channel gain for stereo panning: right channel gain. Default 1.0.
+    pan_right: f32,
+    /// Extra linear gain multiplier applied on top of `volume_db`. Default 1.0.
+    /// Positional players push their computed distance-attenuated linear volume
+    /// here so spatial attenuation multiplies the mix without disturbing the
+    /// user-facing `volume_db`.
+    linear_gain: f32,
+    /// Loop start in seconds (Godot `loop_begin`); a forward loop wraps here
+    /// when playback reaches `loop_end`. Default 0.0.
+    loop_begin_secs: f32,
+    /// Loop end in seconds (Godot `loop_end`); 0.0 means "use `length_secs`".
+    /// A forward loop wraps back to `loop_begin_secs` upon reaching this point.
+    loop_end_secs: f32,
+    /// Ping-pong phase: `true` while travelling toward `loop_end`, `false` while
+    /// travelling back toward `loop_begin`. Meaningless for the other modes.
+    ping_pong_forward: bool,
+    /// High-shelf reduction in dB applied to this voice, `0.0` for none
+    /// (pat-s3rrv.55).
+    ///
+    /// Godot muffles a distant or off-axis 3D source rather than only
+    /// quietening it: `_update_panning` derives the attenuation and calls
+    /// `set_playback_highshelf_params`. Negative values cut the highs, which is
+    /// why Godot's `attenuation_filter_db` and
+    /// `emission_angle_filter_attenuation_db` default to -24 and -12.
+    highshelf_db: f32,
+    /// Cutoff for [`highshelf_db`](Self::highshelf_db) in Hz (Godot's
+    /// `attenuation_filter_cutoff_hz`, default 5000).
+    highshelf_cutoff_hz: f32,
 }
 
 impl AudioStreamPlayback {
@@ -45,6 +94,17 @@ impl AudioStreamPlayback {
             position_secs: 0.0,
             length_secs,
             bus_name: "Master".to_string(),
+            pitch_scale: 1.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
+            linear_gain: 1.0,
+            loop_begin_secs: 0.0,
+            loop_end_secs: 0.0,
+            ping_pong_forward: true,
+            // No filtering by default: an unspatialised voice must mix exactly
+            // as it did before the high-shelf existed (pat-s3rrv.55).
+            highshelf_db: 0.0,
+            highshelf_cutoff_hz: 5000.0,
         }
     }
 
@@ -68,7 +128,7 @@ impl AudioStreamPlayback {
 
     /// Seek to an absolute position in seconds, clamped to `[0, length]`.
     pub fn seek(&mut self, position: f32) {
-        self.position_secs = position.clamp(0.0, self.length_secs);
+        self.position_secs = f64::from(position.clamp(0.0, self.length_secs));
     }
 
     /// Return `true` if the stream is currently playing.
@@ -78,6 +138,12 @@ impl AudioStreamPlayback {
 
     /// Return the current playback position in seconds.
     pub fn get_playback_position(&self) -> f32 {
+        self.position_secs as f32
+    }
+
+    /// The playback position at full precision — what the mixer must use to
+    /// derive its read cursor (see `position_secs`).
+    pub fn playback_position_f64(&self) -> f64 {
         self.position_secs
     }
 
@@ -88,25 +154,99 @@ impl AudioStreamPlayback {
 
     /// Advance playback by `delta` seconds.
     ///
-    /// If the stream reaches the end:
-    /// - [`LoopMode::None`]: playback stops and position resets to 0.
-    /// - [`LoopMode::Forward`]: position wraps around modulo `length_secs`.
+    /// - [`LoopMode::None`]: playback stops when it reaches `length_secs`.
+    /// - [`LoopMode::Forward`]: playback wraps at `loop_end` (which defaults to
+    ///   `length_secs` when `loop_end_secs` is 0.0) back to `loop_begin`,
+    ///   preserving overshoot so it keeps producing audio past its nominal
+    ///   length.
     pub fn advance(&mut self, delta: f32) {
+        self.advance_f64(f64::from(delta));
+    }
+
+    /// [`advance`](Self::advance) at full precision, for the mixer.
+    pub fn advance_f64(&mut self, delta: f64) {
         if self.state != PlaybackState::Playing {
             return;
         }
 
-        self.position_secs += delta;
+        let (loop_begin, loop_end) = self.loop_window();
+        let (loop_begin, loop_end) = (f64::from(loop_begin), f64::from(loop_end));
 
-        if self.position_secs >= self.length_secs {
-            match self.loop_mode {
-                LoopMode::None => {
+        match self.loop_mode {
+            LoopMode::None => {
+                self.position_secs += delta;
+                if self.position_secs >= f64::from(self.length_secs) {
                     self.stop();
                 }
-                LoopMode::Forward => {
-                    self.position_secs %= self.length_secs;
+            }
+            LoopMode::Forward => {
+                self.position_secs += delta;
+                if self.position_secs >= loop_end {
+                    let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
+                    self.position_secs =
+                        loop_begin + (self.position_secs - loop_begin).rem_euclid(span);
                 }
             }
+            LoopMode::PingPong => {
+                // Travel toward whichever bound the current phase points at and
+                // reflect off it, so the sample plays forwards, then backwards,
+                // forever. `rem_euclid` over twice the span handles a `delta`
+                // large enough to cross the region more than once.
+                let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
+                if self.ping_pong_forward {
+                    self.position_secs += delta;
+                } else {
+                    self.position_secs -= delta;
+                }
+                let offset = (self.position_secs - loop_begin).rem_euclid(2.0 * span);
+                if offset <= span {
+                    self.position_secs = loop_begin + offset;
+                    self.ping_pong_forward = true;
+                } else {
+                    // Past the far bound: fold back down the return leg.
+                    self.position_secs = loop_begin + (2.0 * span - offset);
+                    self.ping_pong_forward = false;
+                }
+            }
+            LoopMode::Backward => {
+                // The region plays end-to-begin; reaching `loop_begin` wraps
+                // back up to `loop_end`.
+                self.position_secs -= delta;
+                if self.position_secs <= loop_begin {
+                    let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
+                    self.position_secs =
+                        loop_end - (loop_begin - self.position_secs).rem_euclid(span);
+                }
+            }
+        }
+    }
+
+    /// The resolved `[begin, end]` loop region in seconds.
+    ///
+    /// `loop_end_secs == 0.0` (or past the stream) means "to the end of the
+    /// stream", matching Godot's treatment of an unset `loop_end`. `loop_begin`
+    /// is clamped into the region so a malformed pair cannot invert it.
+    pub fn loop_window(&self) -> (f32, f32) {
+        let loop_end = if self.loop_end_secs > 0.0 && self.loop_end_secs <= self.length_secs {
+            self.loop_end_secs
+        } else {
+            self.length_secs
+        };
+        let loop_begin = self.loop_begin_secs.clamp(0.0, loop_end);
+        (loop_begin, loop_end)
+    }
+
+    /// Which way the read cursor travels through the sample right now: `1.0`
+    /// forwards, `-1.0` backwards.
+    ///
+    /// The mixer multiplies its per-frame step by this, so a `Backward` loop (or
+    /// the return leg of a `PingPong`) actually reads descending sample values
+    /// instead of merely moving the playback clock backwards (pat-0q2kx.58).
+    pub fn read_direction(&self) -> f32 {
+        match self.loop_mode {
+            LoopMode::Backward => -1.0,
+            LoopMode::PingPong if !self.ping_pong_forward => -1.0,
+            _ => 1.0,
         }
     }
 
@@ -120,6 +260,62 @@ impl AudioStreamPlayback {
         self.volume_db = db;
     }
 
+    /// Return the pitch scale multiplier.
+    pub fn pitch_scale(&self) -> f32 {
+        self.pitch_scale
+    }
+
+    /// Set the pitch scale multiplier. Clamped to a small positive minimum so a
+    /// zero/negative scale can never stall or reverse playback.
+    pub fn set_pitch_scale(&mut self, scale: f32) {
+        self.pitch_scale = scale.max(0.01);
+    }
+
+    /// Left/right stereo pan gains applied per output channel during mixing.
+    pub fn pan(&self) -> (f32, f32) {
+        (self.pan_left, self.pan_right)
+    }
+
+    /// Set the left/right stereo pan gains (clamped to `[0, 1]`). Positional
+    /// players push equal-power pan here from a spatial calculation.
+    pub fn set_pan(&mut self, left: f32, right: f32) {
+        self.pan_left = left.clamp(0.0, 1.0);
+        self.pan_right = right.clamp(0.0, 1.0);
+    }
+
+    /// Extra linear gain applied on top of `volume_db` during mixing.
+    pub fn linear_gain(&self) -> f32 {
+        self.linear_gain
+    }
+
+    /// Set the extra linear gain (clamped non-negative). Positional players push
+    /// their distance-attenuated linear volume here.
+    pub fn set_linear_gain(&mut self, gain: f32) {
+        self.linear_gain = gain.max(0.0);
+    }
+
+    /// The per-voice high-shelf reduction in dB and its cutoff in Hz.
+    pub fn highshelf(&self) -> (f32, f32) {
+        (self.highshelf_db, self.highshelf_cutoff_hz)
+    }
+
+    /// Set the per-voice high-shelf. `db` of `0.0` disables the filter
+    /// entirely — the mixer then leaves the signal untouched rather than
+    /// running a unity-gain biquad over it, so an unspatialised voice is
+    /// bit-identical to before this existed (pat-s3rrv.55).
+    ///
+    /// ⚠️ A non-finite or non-positive cutoff also disables it. A shelf at 0 Hz
+    /// is not "no filtering" — it is a degenerate one, and the coefficients go
+    /// to NaN, which would silence the voice and every bus it mixes into.
+    pub fn set_highshelf(&mut self, db: f32, cutoff_hz: f32) {
+        self.highshelf_db = if db.is_finite() { db } else { 0.0 };
+        self.highshelf_cutoff_hz = if cutoff_hz.is_finite() && cutoff_hz > 0.0 {
+            cutoff_hz
+        } else {
+            0.0
+        };
+    }
+
     /// Return the loop mode.
     pub fn loop_mode(&self) -> LoopMode {
         self.loop_mode
@@ -128,6 +324,39 @@ impl AudioStreamPlayback {
     /// Set the loop mode.
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
         self.loop_mode = mode;
+        // A backward loop plays the region END-to-begin, so its cursor starts at
+        // `loop_end` rather than at 0. Without this a stream switched to
+        // `Backward` while parked at the start reads frame 0 first and only then
+        // jumps to the end — an audible click, and the first sample ascends
+        // (pat-0q2kx.58).
+        if mode == LoopMode::Backward {
+            let (loop_begin, loop_end) = self.loop_window();
+            if self.position_secs <= f64::from(loop_begin) {
+                self.position_secs = f64::from(loop_end);
+            }
+        }
+        self.ping_pong_forward = true;
+    }
+
+    /// Loop start in seconds (Godot `loop_begin`).
+    pub fn loop_begin(&self) -> f32 {
+        self.loop_begin_secs
+    }
+
+    /// Set the loop start in seconds, clamped to `[0, length]`.
+    pub fn set_loop_begin(&mut self, secs: f32) {
+        self.loop_begin_secs = secs.clamp(0.0, self.length_secs);
+    }
+
+    /// Loop end in seconds (Godot `loop_end`); 0.0 means "use `length_secs`".
+    pub fn loop_end(&self) -> f32 {
+        self.loop_end_secs
+    }
+
+    /// Set the loop end in seconds, clamped to `[0, length]`; 0.0 disables it
+    /// (falls back to the full stream length).
+    pub fn set_loop_end(&mut self, secs: f32) {
+        self.loop_end_secs = secs.clamp(0.0, self.length_secs);
     }
 
     /// Set the target bus name for routing.

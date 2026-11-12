@@ -1,0 +1,12 @@
+{
+  "scene": "pong.tscn",
+  "keys": "wait:800,KeyW:1000,KeyS:1000,ArrowUp:1000",
+  "watch": ["/root/Pong/Left:position", "/root/Pong/Right:position", "/root/Pong/Ball:position"],
+  "min_fps": 45,
+  "expect": [
+    { "watch": "/root/Pong/Left:position", "after": "KeyW:1000", "axis": 1, "change": "decrease" },
+    { "watch": "/root/Pong/Left:position", "after": "KeyS:1000", "axis": 1, "change": "increase" },
+    { "watch": "/root/Pong/Right:position", "after": "ArrowUp:1000", "axis": 1, "change": "decrease" },
+    { "watch": "/root/Pong/Ball:position", "after": "KeyW:1000", "change": "change" }
+  ]
+}

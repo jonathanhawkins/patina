@@ -1,0 +1,70 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CSGBox3D",
+							"groups": [],
+							"name": "Box",
+							"owner": "/root/CSGWorld",
+							"path": "/root/CSGWorld/Combiner/Box"
+						},
+						{
+							"children": [],
+							"class": "CSGSphere3D",
+							"groups": [],
+							"name": "Sphere",
+							"owner": "/root/CSGWorld",
+							"path": "/root/CSGWorld/Combiner/Sphere"
+						},
+						{
+							"children": [],
+							"class": "CSGCylinder3D",
+							"groups": [],
+							"name": "Cylinder",
+							"owner": "/root/CSGWorld",
+							"path": "/root/CSGWorld/Combiner/Cylinder"
+						}
+					],
+					"class": "CSGCombiner3D",
+					"groups": [],
+					"name": "Combiner",
+					"owner": "/root/CSGWorld",
+					"path": "/root/CSGWorld/Combiner"
+				},
+				{
+					"children": [],
+					"class": "CSGBox3D",
+					"groups": [],
+					"name": "Standalone",
+					"owner": "/root/CSGWorld",
+					"path": "/root/CSGWorld/Standalone"
+				},
+				{
+					"children": [],
+					"class": "ReflectionProbe",
+					"groups": [],
+					"name": "Probe",
+					"owner": "/root/CSGWorld",
+					"path": "/root/CSGWorld/Probe"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "CSGWorld",
+			"owner": "/root",
+			"path": "/root/CSGWorld"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

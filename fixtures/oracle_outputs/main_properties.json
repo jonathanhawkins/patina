@@ -8,33 +8,7 @@
 					"name": "Player",
 					"path": "/root/World/Player",
 					"properties": {
-						"can_shoot": {
-							"class_type": "",
-							"hint": 0,
-							"type": "bool",
-							"value": true
-						},
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 100.0,
-								"y": 200.0
-							}
-						},
-						"shoot_cooldown": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 0.0
-						},
-						"speed": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 200.0
-						}
+
 					}
 				},
 				{
@@ -43,15 +17,7 @@
 					"name": "Enemy",
 					"path": "/root/World/Enemy",
 					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 400.0,
-								"y": 200.0
-							}
-						}
+
 					}
 				},
 				{
@@ -60,15 +26,7 @@
 					"name": "Ground",
 					"path": "/root/World/Ground",
 					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 0.0,
-								"y": 500.0
-							}
-						}
+
 					}
 				}
 			],

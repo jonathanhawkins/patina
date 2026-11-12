@@ -8,6 +8,12 @@
 					"name": "Mover",
 					"path": "/root/TestScene/Mover",
 					"properties": {
+						"direction": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 1.0
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -16,6 +22,12 @@
 								"x": 100.0,
 								"y": 200.0
 							}
+						},
+						"speed": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 50.0
 						}
 					}
 				},
@@ -25,6 +37,24 @@
 					"name": "VarTest",
 					"path": "/root/TestScene/VarTest",
 					"properties": {
+						"health": {
+							"class_type": "",
+							"hint": 0,
+							"type": "int",
+							"value": 100
+						},
+						"is_alive": {
+							"class_type": "",
+							"hint": 0,
+							"type": "bool",
+							"value": true
+						},
+						"name_str": {
+							"class_type": "",
+							"hint": 0,
+							"type": "String",
+							"value": "Player"
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -32,6 +62,15 @@
 							"value": {
 								"x": 300.0,
 								"y": 200.0
+							}
+						},
+						"velocity": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Vector2",
+							"value": {
+								"x": 0.0,
+								"y": 0.0
 							}
 						}
 					}

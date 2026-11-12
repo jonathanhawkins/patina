@@ -1,0 +1,29 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/render_test_camera.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera2D",
+				"owner": "Root",
+				"path": "/root/Root/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Player",
+				"node_class": "Node2D",
+				"owner": "Root",
+				"path": "/root/Root/Player",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Root",
+		"node_class": "Node",
+		"owner": "",
+		"path": "/root/Root",
+		"scene_file_path": "res://scenes/render_test_camera.tscn"
+	}
+}

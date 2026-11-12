@@ -1,0 +1,103 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Scene",
+					"path": "/root/Scene/Camera"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/Scene",
+					"path": "/root/Scene/Sun"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "FillLight",
+					"owner": "/root/Scene",
+					"path": "/root/Scene/FillLight"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Skeleton3D",
+							"groups": [],
+							"name": "Skeleton",
+							"owner": "/root/Scene",
+							"path": "/root/Scene/Character/Skeleton"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "BodyMesh",
+							"owner": "/root/Scene",
+							"path": "/root/Scene/Character/BodyMesh"
+						},
+						{
+							"children": [],
+							"class": "AnimationPlayer",
+							"groups": [],
+							"name": "AnimPlayer",
+							"owner": "/root/Scene",
+							"path": "/root/Scene/Character/AnimPlayer"
+						}
+					],
+					"class": "Node3D",
+					"groups": [],
+					"name": "Character",
+					"owner": "/root/Scene",
+					"path": "/root/Scene/Character"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "PlatformShape",
+							"owner": "/root/Scene",
+							"path": "/root/Scene/Platform/PlatformShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "PlatformMesh",
+							"owner": "/root/Scene",
+							"path": "/root/Scene/Platform/PlatformMesh"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Platform",
+					"owner": "/root/Scene",
+					"path": "/root/Scene/Platform"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Scene",
+			"owner": "/root",
+			"path": "/root/Scene"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

@@ -5,6 +5,16 @@ mod property_probe;
 mod resource_probe;
 mod scene_probe;
 mod signal_probe;
+mod api_surface_probe;
+mod enum_constants_probe;
+mod inheritance_probe;
+mod method_defaults_probe;
+mod node_defaults_probe;
+mod resource_roundtrip_probe;
+mod resource_subtype_probe;
+mod resource_validation_probe;
+mod singleton_probe;
+mod virtual_methods_probe;
 
 #[derive(GodotClass)]
 #[class(base = Node)]
@@ -53,6 +63,74 @@ impl PatinaSmokeProbe {
     #[func]
     fn run_classdb_probe(&self) {
         classdb_probe::emit();
+    }
+
+    /// Run `api_surface_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_api_surface_probe(&self) {
+        api_surface_probe::emit();
+    }
+
+    /// Run `enum_constants_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_enum_constants_probe(&self) {
+        enum_constants_probe::emit();
+    }
+
+    /// Run `inheritance_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_inheritance_probe(&self) {
+        inheritance_probe::emit();
+    }
+
+    /// Run `method_defaults_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_method_defaults_probe(&self) {
+        method_defaults_probe::emit();
+    }
+
+    /// Run `node_defaults_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_node_defaults_probe(&self) {
+        node_defaults_probe::emit();
+    }
+
+    /// Run `resource_subtype_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_resource_subtype_probe(&self) {
+        resource_subtype_probe::emit();
+    }
+
+    /// Run `singleton_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_singleton_probe(&self) {
+        singleton_probe::emit();
+    }
+
+    /// Run `virtual_methods_probe` (oracle capture; see apps/godot/README.md).
+    #[func]
+    fn run_virtual_methods_probe(&self) {
+        virtual_methods_probe::emit();
+    }
+
+    /// Round-trip a resource through save/load and report what changed.
+    #[func]
+    fn run_resource_roundtrip_probe(&self, path: GString, expected_class: GString) {
+        let class = expected_class.to_string();
+        resource_roundtrip_probe::emit_roundtrip(
+            &path.to_string(),
+            if class.is_empty() { None } else { Some(class.as_str()) },
+        );
+    }
+
+    /// Validate a resource's loaded class and properties.
+    #[func]
+    fn run_resource_validation_probe(&self, path: GString, expected_class: GString) {
+        let class = expected_class.to_string();
+        resource_validation_probe::emit_validation(
+            &path.to_string(),
+            if class.is_empty() { None } else { Some(class.as_str()) },
+        );
     }
 
     #[func]

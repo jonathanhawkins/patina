@@ -119,6 +119,74 @@ impl NodePath {
         self.subnames.join(":")
     }
 
+    /// Returns the concatenated NAME path (e.g. `"Player/Sprite"`), without the
+    /// subnames or the leading slash (pat-s3rrv.60).
+    ///
+    /// Godot's counterpart to [`get_concatenated_subnames`](Self::get_concatenated_subnames);
+    /// the separator is `/` because these are node names, not properties.
+    pub fn get_concatenated_names(&self) -> String {
+        self.names.join("/")
+    }
+
+    /// Godot `NodePath.hash()` — the value Godot's own hash maps key on
+    /// (pat-s3rrv.60).
+    ///
+    /// Transcribed from `core/string/node_path.cpp:35-41`:
+    /// ```text
+    /// StringName path    = get_concatenated_names();
+    /// StringName subpath = get_concatenated_subnames();
+    /// uint32_t hash = HashMapHasherDefault::hash(Pair<...>(path, subpath));
+    /// hash_cache = is_absolute() ? hash : ~hash;
+    /// ```
+    ///
+    /// ⚠️ NOTE THE BITWISE NOT for a RELATIVE path. It is one character in the
+    /// C++ and invisible to any test that only uses absolute paths, so both
+    /// cases are pinned below.
+    ///
+    /// ⚠️ Named `godot_hash`, not `hash`: this type derives [`Hash`], and an
+    /// inherent `hash` sitting beside `Hash::hash` is an ambiguity trap for
+    /// every later caller. The script-facing name is still `"hash"` — that is a
+    /// dispatch string, not this identifier.
+    pub fn godot_hash(&self) -> u32 {
+        let h1 = u64::from(godot_string_hash(&self.get_concatenated_names()));
+        let h2 = u64::from(godot_string_hash(&self.get_concatenated_subnames()));
+        let hash = hash_one_uint64((h1 << 32) | h2);
+        if self.absolute {
+            hash
+        } else {
+            !hash
+        }
+    }
+
+    /// Godot's `NodePath.slice(begin, end)` — a sub-path over the NAMES
+    /// (pat-s3rrv.60).
+    ///
+    /// Negative indices count from the end, and both bounds are clamped, so
+    /// `slice(1, -1)` drops the first and last name rather than panicking. The
+    /// result keeps this path's `absolute` flag only when it starts at 0 —
+    /// a slice that skips the root is by definition relative.
+    ///
+    /// Subnames ride along only on a slice that reaches the end, mirroring
+    /// Godot: they belong to the LAST name, so a slice that drops it drops them.
+    pub fn slice(&self, begin: i64, end: i64) -> NodePath {
+        let len = self.names.len() as i64;
+        let norm = |i: i64| -> usize {
+            let i = if i < 0 { len + i } else { i };
+            i.clamp(0, len) as usize
+        };
+        let start = norm(begin);
+        let stop = norm(end).max(start);
+        NodePath {
+            names: self.names[start..stop].to_vec(),
+            subnames: if stop == self.names.len() {
+                self.subnames.clone()
+            } else {
+                Vec::new()
+            },
+            absolute: self.absolute && start == 0,
+        }
+    }
+
     /// Returns a new `NodePath` representing only the property subpath.
     ///
     /// For example, if this path is `"Player:position:x"`, this returns
@@ -163,9 +231,112 @@ impl From<String> for NodePath {
     }
 }
 
+/// Godot's `String::hash` — djb2 (`core/string/ustring.cpp:2734`).
+///
+/// ⚠️ It walks **code points** (`char32_t`), not UTF-8 bytes. Hashing
+/// `s.bytes()` agrees with Godot for ASCII and silently diverges the moment a
+/// path contains a non-ASCII character, which is exactly the kind of bug that
+/// only shows up when a value crosses an engine boundary.
+fn godot_string_hash(s: &str) -> u32 {
+    let mut h: u32 = 5381;
+    for ch in s.chars() {
+        // `hashv = ((hashv << 5) + hashv) + c` — all uint32, wrapping.
+        h = h.wrapping_shl(5).wrapping_add(h).wrapping_add(ch as u32);
+    }
+    h
+}
+
+/// Godot's `hash_one_uint64` (`core/templates/hashfuncs.h:87-96`), the 64→32
+/// finaliser the Pair hasher ends with.
+fn hash_one_uint64(p_int: u64) -> u32 {
+    let mut v = p_int;
+    v = (!v).wrapping_add(v << 18);
+    v ^= v >> 31;
+    v = v.wrapping_mul(21);
+    v ^= v >> 11;
+    v = v.wrapping_add(v << 6);
+    v ^= v >> 22;
+    v as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔑 `NodePath.hash()` against values from an INDEPENDENT transcription.
+    ///
+    /// ⚠️ These constants were produced by re-transcribing Godot's chain
+    /// (`String::hash` djb2 → the `Pair` hasher → `hash_one_uint64`) into Python
+    /// and RUNNING it — not by printing what this implementation returns. A
+    /// wrong-but-stable hash satisfies every round-trip and self-consistency
+    /// test and only breaks when a value crosses an engine boundary, so
+    /// self-comparison would proves nothing here.
+    #[test]
+    fn godot_hash_matches_the_upstream_chain() {
+        assert_eq!(
+            NodePath::new("/root/Main").godot_hash(),
+            1_105_670_561,
+            "absolute path"
+        );
+        assert_eq!(
+            NodePath::new("Node:position:x").godot_hash(),
+            1_901_452_884,
+            "subnames participate as a separate StringName joined by ':'"
+        );
+    }
+
+    /// ⚠️ THE BITWISE NOT IS THE WHOLE TEST.
+    ///
+    /// Godot returns `hash` for an absolute path and `~hash` for a relative one
+    /// (`node_path.cpp:40`). It is one character upstream, and a port that drops
+    /// it passes every absolute-path assertion. Pinning both directions with the
+    /// SAME name content is what catches it.
+    #[test]
+    fn a_relative_path_hashes_to_the_complement_of_the_absolute_one() {
+        let rel = NodePath::new("Main/Sprite");
+        assert_eq!(rel.godot_hash(), 3_441_622_773, "relative path");
+
+        let abs = NodePath::new("/Main/Sprite");
+        assert_eq!(
+            rel.godot_hash(),
+            !abs.godot_hash(),
+            "the only difference between the two is the leading slash, so their \
+             hashes must be exact bitwise complements"
+        );
+        assert_ne!(
+            rel.godot_hash(),
+            abs.godot_hash(),
+            "a port that ignored is_absolute would make these equal"
+        );
+    }
+
+    /// The primitives, pinned separately so a failure says WHICH stage drifted.
+    #[test]
+    fn the_hash_primitives_match_godot() {
+        // `String::hash("")` is what Godot's `StringName::get_empty_hash`
+        // returns, so an empty path is not a special case.
+        assert_eq!(godot_string_hash(""), 5381, "djb2 seed");
+        assert_eq!(
+            godot_string_hash("a"),
+            5381 * 33 + 97,
+            "djb2 step is *33 + c"
+        );
+
+        // ⚠️ Code points, not bytes. 'Ü' is two UTF-8 bytes but ONE char32_t.
+        assert_eq!(
+            godot_string_hash("Ü"),
+            5381u32.wrapping_mul(33).wrapping_add(0xDC),
+            "the hash must consume the code point U+00DC, not its two UTF-8 bytes"
+        );
+
+        assert_eq!(NodePath::new("Ünï").godot_hash(), 1_261_690_316);
+    }
+
+    /// An empty path still hashes, and to the documented value.
+    #[test]
+    fn an_empty_path_hashes_without_special_casing() {
+        assert_eq!(NodePath::empty().godot_hash(), 2_757_153_842);
+    }
 
     #[test]
     fn parse_absolute_path() {
@@ -362,5 +533,153 @@ mod tests {
         let p = NodePath::new("A/B");
         let prop = p.get_as_property_path();
         assert!(prop.is_empty());
+    }
+}
+
+/// Property-based tests for NodePath parsing roundtrips.
+///
+/// Uses `proptest` to verify that `NodePath::new(s).to_string()` → `NodePath::new()`
+/// produces an equivalent path for all valid inputs.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for valid node name segments (no `/` or `:`).
+    fn node_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-zA-Z_][a-zA-Z0-9_]{0,15}",
+            Just("..".to_string()),
+            Just(".".to_string()),
+        ]
+    }
+
+    /// Strategy for a non-empty list of node name segments.
+    fn node_names() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(node_name(), 1..6)
+    }
+
+    /// Strategy for property subname segments.
+    fn subname() -> impl Strategy<Value = String> {
+        "[a-zA-Z_][a-zA-Z0-9_]{0,10}"
+    }
+
+    /// Strategy for optional subnames.
+    fn subnames() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(subname(), 0..4)
+    }
+
+    proptest! {
+        /// Roundtrip: parse → display → parse produces an equivalent NodePath.
+        #[test]
+        fn roundtrip_parse_display(
+            abs in any::<bool>(),
+            names in node_names(),
+            subs in subnames(),
+        ) {
+            let mut path_str = String::new();
+            if abs {
+                path_str.push('/');
+            }
+            path_str.push_str(&names.join("/"));
+            for s in &subs {
+                path_str.push(':');
+                path_str.push_str(s);
+            }
+
+            let p1 = NodePath::new(&path_str);
+            let displayed = format!("{p1}");
+            let p2 = NodePath::new(&displayed);
+
+            prop_assert_eq!(p1.is_absolute(), p2.is_absolute(),
+                "Absolute flag mismatch after roundtrip: {:?} vs {:?}", path_str, displayed);
+            prop_assert_eq!(p1.get_name_count(), p2.get_name_count(),
+                "Name count mismatch after roundtrip");
+            for i in 0..p1.get_name_count() {
+                prop_assert_eq!(p1.get_name(i), p2.get_name(i),
+                    "Name mismatch at index {}", i);
+            }
+            prop_assert_eq!(p1.get_subname_count(), p2.get_subname_count(),
+                "Subname count mismatch after roundtrip");
+            for i in 0..p1.get_subname_count() {
+                prop_assert_eq!(p1.get_subname(i), p2.get_subname(i),
+                    "Subname mismatch at index {}", i);
+            }
+        }
+
+        /// Display output is idempotent: displaying twice gives the same string.
+        #[test]
+        fn display_idempotent(
+            abs in any::<bool>(),
+            names in node_names(),
+            subs in subnames(),
+        ) {
+            let mut path_str = String::new();
+            if abs {
+                path_str.push('/');
+            }
+            path_str.push_str(&names.join("/"));
+            for s in &subs {
+                path_str.push(':');
+                path_str.push_str(s);
+            }
+
+            let p = NodePath::new(&path_str);
+            let s1 = format!("{p}");
+            let s2 = format!("{}", NodePath::new(&s1));
+            prop_assert_eq!(&s1, &s2,
+                "Display not idempotent: first={:?}, second={:?}", s1, s2);
+        }
+
+        /// Empty path always produces is_empty() = true.
+        #[test]
+        fn empty_is_empty(_dummy in 0u8..1) {
+            let p = NodePath::new("");
+            prop_assert!(p.is_empty());
+            prop_assert!(!p.is_absolute());
+        }
+
+        /// Absolute paths always start with `/` in display.
+        #[test]
+        fn absolute_display_starts_with_slash(
+            names in node_names(),
+        ) {
+            let path_str = format!("/{}", names.join("/"));
+            let p = NodePath::new(&path_str);
+            let displayed = format!("{p}");
+            prop_assert!(displayed.starts_with('/'),
+                "Absolute path display should start with /: {:?}", displayed);
+        }
+
+        /// Relative paths never start with `/` in display.
+        #[test]
+        fn relative_display_no_leading_slash(
+            names in node_names(),
+        ) {
+            let path_str = names.join("/");
+            let p = NodePath::new(&path_str);
+            let displayed = format!("{p}");
+            prop_assert!(!displayed.starts_with('/'),
+                "Relative path display should not start with /: {:?}", displayed);
+        }
+
+        /// Subname count matches the number of `:` separated segments after the path.
+        #[test]
+        fn subname_count_matches_input(
+            names in node_names(),
+            subs in prop::collection::vec(subname(), 1..5),
+        ) {
+            let path_str = format!("{}:{}", names.join("/"), subs.join(":"));
+            let p = NodePath::new(&path_str);
+            prop_assert_eq!(p.get_subname_count(), subs.len(),
+                "Expected {} subnames, got {}", subs.len(), p.get_subname_count());
+        }
+
+        /// Fuzz: arbitrary byte strings never cause a panic in NodePath::new.
+        #[test]
+        fn no_panic_on_arbitrary_input(s in "\\PC{0,100}") {
+            let _p = NodePath::new(&s);
+            // Just verifying no panic occurs
+        }
     }
 }

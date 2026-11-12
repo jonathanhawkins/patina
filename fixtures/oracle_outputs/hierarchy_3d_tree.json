@@ -1,0 +1,63 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "MeshInstance3D",
+									"groups": [],
+									"name": "Hand",
+									"owner": "/root/World",
+									"path": "/root/World/Arm/Forearm/Hand"
+								}
+							],
+							"class": "Node3D",
+							"groups": [],
+							"name": "Forearm",
+							"owner": "/root/World",
+							"path": "/root/World/Arm/Forearm"
+						}
+					],
+					"class": "Node3D",
+					"groups": [],
+					"name": "Arm",
+					"owner": "/root/World",
+					"path": "/root/World/Arm"
+				},
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/World",
+					"path": "/root/World/Camera"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Light",
+					"owner": "/root/World",
+					"path": "/root/World/Light"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

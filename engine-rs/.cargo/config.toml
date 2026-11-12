@@ -1,0 +1,7 @@
+[build]
+jobs = 2
+
+# Selects getrandom's browser backend for the web build (see gdcore/Cargo.toml).
+# Scoped to the wasm target so native builds keep their cached artifacts.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

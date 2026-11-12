@@ -1,0 +1,33 @@
+[gd_scene format=3]
+
+[node name="Indoor3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 2, 6)
+
+[node name="Table" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.5, 0)
+
+[node name="Chair" type="MeshInstance3D" parent="."]
+position = Vector3(1.5, 0.4, 0)
+
+[node name="Lamp" type="MeshInstance3D" parent="."]
+position = Vector3(-1, 1.5, 0)
+
+[node name="CeilingLight" type="OmniLight3D" parent="."]
+position = Vector3(0, 3, 0)
+
+[node name="Floor" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="FloorShape" type="CollisionShape3D" parent="Floor"]
+
+[node name="WallLeft" type="StaticBody3D" parent="."]
+position = Vector3(-4, 1.5, 0)
+
+[node name="WallLeftShape" type="CollisionShape3D" parent="WallLeft"]
+
+[node name="WallRight" type="StaticBody3D" parent="."]
+position = Vector3(4, 1.5, 0)
+
+[node name="WallRightShape" type="CollisionShape3D" parent="WallRight"]

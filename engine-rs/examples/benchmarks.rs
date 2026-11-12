@@ -152,7 +152,7 @@ fn bench_variant_conversion() -> BenchResult {
         Variant::Vector2(Vector2::new(1.0, 2.0)),
         Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
         Variant::Color(Color::new(1.0, 0.5, 0.25, 0.8)),
-        Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)]),
+        Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into()),
         Variant::Nil, // pad to 10
     ];
 

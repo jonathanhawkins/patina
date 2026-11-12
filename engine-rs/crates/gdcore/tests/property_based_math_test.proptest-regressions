@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a05e963de5f1333f3187c04cb50a55b5884fd4d45c841fbed6f82e70c520d457 # shrinks to angle = -2.7624643, v = Vector2 { x: -9332.014, y: 4063.0364 }
+cc 5652db7f4e6386632ac265dc5b4b42a334d50ea6a322340596f07cce69dd1fe3 # shrinks to q = Quaternion { x: 0.42634523, y: -0.50065374, z: 0.71041435, w: -0.25077337 }, v = Vector3 { x: -9443.845, y: -5656.585, z: 7485.567 }

@@ -1,0 +1,83 @@
+{
+  "fixture_id": "scene_vehicle_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "Vehicle3D",
+        "class": "Node3D",
+        "path": "/root/Vehicle3D",
+        "children": ["Camera", "Sun", "Chassis", "Road"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Vehicle3D/Camera",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/Vehicle3D/Sun",
+        "children": []
+      },
+      {
+        "name": "Chassis",
+        "class": "RigidBody3D",
+        "path": "/root/Vehicle3D/Chassis",
+        "children": ["Body", "ChassisShape", "WheelFL", "WheelFR", "WheelRL", "WheelRR"]
+      },
+      {
+        "name": "Body",
+        "class": "MeshInstance3D",
+        "path": "/root/Vehicle3D/Chassis/Body",
+        "children": []
+      },
+      {
+        "name": "ChassisShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Vehicle3D/Chassis/ChassisShape",
+        "children": []
+      },
+      {
+        "name": "WheelFL",
+        "class": "MeshInstance3D",
+        "path": "/root/Vehicle3D/Chassis/WheelFL",
+        "children": []
+      },
+      {
+        "name": "WheelFR",
+        "class": "MeshInstance3D",
+        "path": "/root/Vehicle3D/Chassis/WheelFR",
+        "children": []
+      },
+      {
+        "name": "WheelRL",
+        "class": "MeshInstance3D",
+        "path": "/root/Vehicle3D/Chassis/WheelRL",
+        "children": []
+      },
+      {
+        "name": "WheelRR",
+        "class": "MeshInstance3D",
+        "path": "/root/Vehicle3D/Chassis/WheelRR",
+        "children": []
+      },
+      {
+        "name": "Road",
+        "class": "StaticBody3D",
+        "path": "/root/Vehicle3D/Road",
+        "children": ["RoadShape"]
+      },
+      {
+        "name": "RoadShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Vehicle3D/Road/RoadShape",
+        "children": []
+      }
+    ]
+  }
+}

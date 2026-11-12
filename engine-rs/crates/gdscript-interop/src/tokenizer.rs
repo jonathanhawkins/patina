@@ -60,6 +60,12 @@ pub enum Token {
     Export,
     /// `await`
     Await,
+    /// `is` — type-test operator.
+    Is,
+    /// `as` — type-cast operator.
+    As,
+    /// `when` — match pattern guard.
+    When,
 
     // Literals
     /// Integer literal.
@@ -112,6 +118,38 @@ pub enum Token {
     PlusAssign,
     /// `-=`
     MinusAssign,
+    /// `*=`
+    StarAssign,
+    /// `/=`
+    SlashAssign,
+    /// `%=`
+    PercentAssign,
+    /// `**`
+    StarStar,
+    /// `**=`
+    StarStarAssign,
+    /// `&`
+    Amp,
+    /// `|`
+    Pipe,
+    /// `^`
+    Caret,
+    /// `~`
+    Tilde,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
+    /// `&=`
+    AmpAssign,
+    /// `|=`
+    PipeAssign,
+    /// `^=`
+    CaretAssign,
+    /// `<<=`
+    ShlAssign,
+    /// `>>=`
+    ShrAssign,
     /// `->`
     Arrow,
     /// `@`
@@ -138,6 +176,8 @@ pub enum Token {
     Comma,
     /// `.`
     Dot,
+    /// `..` — rest pattern in `match`.
+    DotDot,
     /// `;`
     Semicolon,
 
@@ -180,6 +220,9 @@ impl fmt::Display for Token {
             Token::Onready => write!(f, "onready"),
             Token::Export => write!(f, "export"),
             Token::Await => write!(f, "await"),
+            Token::Is => write!(f, "is"),
+            Token::As => write!(f, "as"),
+            Token::When => write!(f, "when"),
             Token::IntLit(v) => write!(f, "{v}"),
             Token::FloatLit(v) => write!(f, "{v}"),
             Token::StringLit(v) => write!(f, "\"{v}\""),
@@ -203,6 +246,22 @@ impl fmt::Display for Token {
             Token::Assign => write!(f, "="),
             Token::PlusAssign => write!(f, "+="),
             Token::MinusAssign => write!(f, "-="),
+            Token::StarAssign => write!(f, "*="),
+            Token::SlashAssign => write!(f, "/="),
+            Token::PercentAssign => write!(f, "%="),
+            Token::StarStar => write!(f, "**"),
+            Token::StarStarAssign => write!(f, "**="),
+            Token::Amp => write!(f, "&"),
+            Token::Pipe => write!(f, "|"),
+            Token::Caret => write!(f, "^"),
+            Token::Tilde => write!(f, "~"),
+            Token::Shl => write!(f, "<<"),
+            Token::Shr => write!(f, ">>"),
+            Token::AmpAssign => write!(f, "&="),
+            Token::PipeAssign => write!(f, "|="),
+            Token::CaretAssign => write!(f, "^="),
+            Token::ShlAssign => write!(f, "<<="),
+            Token::ShrAssign => write!(f, ">>="),
             Token::Arrow => write!(f, "->"),
             Token::AtSign => write!(f, "@"),
             Token::Dollar => write!(f, "$"),
@@ -215,6 +274,7 @@ impl fmt::Display for Token {
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
             Token::Dot => write!(f, "."),
+            Token::DotDot => write!(f, ".."),
             Token::Semicolon => write!(f, ";"),
             Token::Indent => write!(f, "INDENT"),
             Token::Dedent => write!(f, "DEDENT"),
@@ -270,6 +330,77 @@ pub enum LexError {
     },
 }
 
+/// One open nesting level while tokenizing (pat-rp4bp).
+///
+/// Godot's tokenizer is driven by the parser: `(`/`[`/`{` switch it into
+/// multiline mode (no NEWLINE, no indentation), and `parse_lambda` switches it
+/// BACK for the lambda body with `push_expression_indented_block` /
+/// `pop_expression_indented_block` (`gdscript_parser.cpp`). This tokenizer runs
+/// ahead of the parser, so it recognises the lambda body itself: a `func`
+/// inside brackets followed by its `:` at the same nesting level.
+enum Nest {
+    /// An open bracket: newlines and indentation are suppressed.
+    Bracket,
+    /// A lambda body inside brackets: newlines and indentation are live again.
+    Lambda {
+        /// The indent stack when the body began; restored when it ends, which
+        /// is what Godot's `pop_expression_indented_block` does.
+        saved_indent: Vec<usize>,
+        /// Indentation of the body's first line (multi-line bodies only).
+        body_indent: Option<usize>,
+        /// `func(x): return x` — the body is the rest of the header line.
+        single_line: bool,
+    },
+}
+
+/// Ends the innermost lambda body: emits the Dedents that close its block and
+/// restores the indent stack it started from.
+fn end_lambda(
+    nest: &mut Vec<Nest>,
+    indent_stack: &mut Vec<usize>,
+    tokens: &mut Vec<TokenSpan>,
+    line: usize,
+    col: usize,
+) {
+    if let Some(Nest::Lambda { saved_indent, .. }) = nest.pop() {
+        if indent_stack.len() > saved_indent.len() {
+            // The closer sits on the body's last line (`x = 1)`): the block
+            // still needs its terminating Newline before the Dedents.
+            if !matches!(tokens.last().map(|t| &t.token), Some(Token::Newline)) {
+                tokens.push(TokenSpan {
+                    token: Token::Newline,
+                    line,
+                    col,
+                });
+            }
+            while indent_stack.len() > saved_indent.len() {
+                indent_stack.pop();
+                tokens.push(TokenSpan {
+                    token: Token::Dedent,
+                    line,
+                    col,
+                });
+            }
+        }
+        *indent_stack = saved_indent;
+    }
+}
+
+/// A closing bracket: ends any lambda bodies opened inside it, then pops the
+/// bracket itself. Saturates on a stray closer so it cannot underflow.
+fn close_bracket(
+    nest: &mut Vec<Nest>,
+    indent_stack: &mut Vec<usize>,
+    tokens: &mut Vec<TokenSpan>,
+    line: usize,
+    col: usize,
+) {
+    while matches!(nest.last(), Some(Nest::Lambda { .. })) {
+        end_lambda(nest, indent_stack, tokens, line, col);
+    }
+    nest.pop();
+}
+
 /// Tokenizes GDScript source code into a sequence of [`TokenSpan`]s.
 ///
 /// Handles indentation tracking, producing `Indent` and `Dedent` tokens as
@@ -283,6 +414,21 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
     let mut col: usize = 1;
     let mut indent_stack: Vec<usize> = vec![0];
     let mut at_line_start = true;
+    // Open `(`/`[`/`{` nesting. Godot's tokenizer suppresses NEWLINE and all
+    // indentation changes while this is non-zero
+    // (`gdscript_tokenizer.cpp`, paren-depth newline suppression), which is what
+    // makes a multi-line array literal, dictionary or call argument list legal.
+    // Without it `var a = [\n 1,\n 2\n]` emitted a Newline mid-expression and
+    // died in `parse_primary`, which never skips Newline/Indent (pat-mgixk.17).
+    //
+    // A lambda body inside brackets re-enables both (see [`Nest`]), so the
+    // nesting is a stack rather than a counter (pat-rp4bp): truck_town's
+    // `t.finished.connect(func() -> void:` + indented body + `)` died with
+    // "unexpected token =" because the body's Newline/Indent were swallowed.
+    let mut nest: Vec<Nest> = Vec::new();
+    // `nest.len()` at a `func` keyword seen inside brackets: the `:` at that
+    // same level opens the lambda's body.
+    let mut pending_lambda: Option<usize> = None;
 
     while pos < len {
         // Handle line-start indentation
@@ -325,6 +471,37 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 continue;
             }
 
+            // Inside brackets, indentation carries no structure: the line is a
+            // continuation of the expression, so neither Indent/Dedent nor the
+            // indent stack may move. Leaving the stack alone matters as much as
+            // skipping the tokens — a pushed level would desync every Dedent
+            // after the closing bracket.
+            match nest.last_mut() {
+                Some(Nest::Bracket) => continue,
+                Some(Nest::Lambda {
+                    saved_indent,
+                    body_indent,
+                    ..
+                }) => {
+                    // A line indented less than the body's first line ends the
+                    // body (Godot: the DEDENT that ends `parse_suite`); the rest
+                    // of the line is bracket continuation again.
+                    let outer = *saved_indent.last().unwrap();
+                    let ends = match *body_indent {
+                        Some(b) => indent < b,
+                        None => indent <= outer,
+                    };
+                    if ends {
+                        end_lambda(&mut nest, &mut indent_stack, &mut tokens, line, 1);
+                        continue;
+                    }
+                    if body_indent.is_none() {
+                        *body_indent = Some(indent);
+                    }
+                }
+                None => {}
+            }
+
             let current_indent = *indent_stack.last().unwrap();
             if indent > current_indent {
                 indent_stack.push(indent);
@@ -364,13 +541,46 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             continue;
         }
 
+        // A trailing backslash joins the next line onto this one, so no Newline
+        // is emitted and the continuation's indentation is not structural.
+        if ch == '\\' {
+            let mut peek = pos + 1;
+            while peek < len && (chars[peek] == ' ' || chars[peek] == '\t') {
+                peek += 1;
+            }
+            if peek < len && (chars[peek] == '\n' || chars[peek] == '\r') {
+                pos = if chars[peek] == '\r' && peek + 1 < len && chars[peek + 1] == '\n' {
+                    peek + 2
+                } else {
+                    peek + 1
+                };
+                line += 1;
+                col = 1;
+                // Deliberately NOT `at_line_start = true`: the joined line must
+                // not produce Indent/Dedent. Leading whitespace on it is eaten
+                // by the mid-line space skip above.
+                continue;
+            }
+        }
+
         // Newlines
         if ch == '\n' || ch == '\r' {
-            tokens.push(TokenSpan {
-                token: Token::Newline,
-                line,
-                col,
-            });
+            // Suppressed inside brackets — see `nest`.
+            match nest.last() {
+                Some(Nest::Bracket) => {}
+                // A one-line lambda body ends with its line; what follows is
+                // bracket continuation (Godot's parser skips the NEWLINE).
+                Some(Nest::Lambda {
+                    single_line: true, ..
+                }) => {
+                    nest.pop();
+                }
+                _ => tokens.push(TokenSpan {
+                    token: Token::Newline,
+                    line,
+                    col,
+                }),
+            }
             if ch == '\r' && pos + 1 < len && chars[pos + 1] == '\n' {
                 pos += 2;
             } else {
@@ -382,13 +592,28 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             continue;
         }
 
-        // Strings
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
+        // Strings, in Godot's three forms (`string()`,
+        // `gdscript_tokenizer.cpp`): ordinary, triple-quoted (newlines allowed)
+        // and `r`-prefixed raw (no escape processing).
+        //
+        // ⚠️ The raw check has to happen HERE, before the identifier scanner
+        // below, because `r"..."` begins with an alphabetic char. It fires only
+        // when a quote immediately follows, so a variable actually named `r`
+        // still lexes as an identifier.
+        let raw_prefix =
+            ch == 'r' && pos + 1 < len && (chars[pos + 1] == '"' || chars[pos + 1] == '\'');
+        if ch == '"' || ch == '\'' || raw_prefix {
+            let is_raw = raw_prefix;
+            let qpos = if is_raw { pos + 1 } else { pos };
+            let quote = chars[qpos];
+            // Three identical quotes open a triple-quoted string, inside which
+            // a bare newline is content rather than the error it used to be.
+            let is_triple = qpos + 2 < len && chars[qpos + 1] == quote && chars[qpos + 2] == quote;
             let start_line = line;
             let start_col = col;
-            pos += 1;
-            col += 1;
+            let opener = if is_triple { 3 } else { 1 };
+            col += (qpos - pos) + opener;
+            pos = qpos + opener;
             let mut s = String::new();
             loop {
                 if pos >= len {
@@ -399,11 +624,23 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 }
                 let c = chars[pos];
                 if c == quote {
+                    if !is_triple {
+                        pos += 1;
+                        col += 1;
+                        break;
+                    }
+                    if pos + 2 < len && chars[pos + 1] == quote && chars[pos + 2] == quote {
+                        pos += 3;
+                        col += 3;
+                        break;
+                    }
+                    // A lone quote inside a triple is ordinary content.
+                    s.push(c);
                     pos += 1;
                     col += 1;
-                    break;
+                    continue;
                 }
-                if c == '\\' {
+                if c == '\\' && !is_raw {
                     pos += 1;
                     col += 1;
                     if pos >= len {
@@ -417,10 +654,43 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                         'n' => s.push('\n'),
                         't' => s.push('\t'),
                         'r' => s.push('\r'),
+                        'a' => s.push('\u{07}'),
+                        'b' => s.push('\u{08}'),
+                        'f' => s.push('\u{0C}'),
+                        'v' => s.push('\u{0B}'),
                         '\\' => s.push('\\'),
                         '\'' => s.push('\''),
                         '"' => s.push('"'),
                         '0' => s.push('\0'),
+                        // `\uXXXX` (4 hex) and `\UXXXXXX` (6 hex).
+                        'u' | 'U' => {
+                            let want = if esc == 'u' { 4 } else { 6 };
+                            let mut cp: u32 = 0;
+                            let mut taken = 0;
+                            while taken < want
+                                && pos + 1 + taken < len
+                                && chars[pos + 1 + taken].is_ascii_hexdigit()
+                            {
+                                cp = cp * 16 + chars[pos + 1 + taken].to_digit(16).unwrap_or(0);
+                                taken += 1;
+                            }
+                            if taken == 0 {
+                                return Err(LexError::InvalidEscape { ch: esc, line, col });
+                            }
+                            // A surrogate half or out-of-range value has no
+                            // `char`; U+FFFD keeps the script lexable rather
+                            // than failing it all on one bad escape.
+                            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            pos += taken;
+                            col += taken;
+                        }
+                        // A newline right after a backslash is a continuation
+                        // inside the string: contributes nothing, but the line
+                        // counter still has to advance.
+                        '\n' => {
+                            line += 1;
+                            col = 0;
+                        }
                         _ => {
                             return Err(LexError::InvalidEscape { ch: esc, line, col });
                         }
@@ -428,10 +698,18 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                     pos += 1;
                     col += 1;
                 } else if c == '\n' {
-                    return Err(LexError::UnterminatedString {
-                        line: start_line,
-                        col: start_col,
-                    });
+                    // Legal in a triple-quoted string; still an error in a
+                    // single-quoted one, as in Godot.
+                    if !is_triple {
+                        return Err(LexError::UnterminatedString {
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                    s.push(c);
+                    pos += 1;
+                    line += 1;
+                    col = 1;
                 } else {
                     s.push(c);
                     pos += 1;
@@ -444,6 +722,49 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 col: start_col,
             });
             continue;
+        }
+
+        // Radix-prefixed integers: `0xFF`, `0b1010` (Godot's `number()`,
+        // `gdscript_tokenizer.cpp`). Must precede the decimal scanner, which
+        // consumes only digits/`.`/`_` and so lexed `0xFF` as `IntLit(0)`
+        // followed by the identifier `xFF` — a silently wrong value rather than
+        // an error (pat-mgixk.17).
+        if ch == '0' && pos + 1 < len && matches!(chars[pos + 1], 'x' | 'X' | 'b' | 'B') {
+            let radix = if matches!(chars[pos + 1], 'x' | 'X') {
+                16
+            } else {
+                2
+            };
+            let start_col = col;
+            let mut digits = String::new();
+            let mut scan = pos + 2;
+            while scan < len
+                && (chars[scan] == '_'
+                    || if radix == 16 {
+                        chars[scan].is_ascii_hexdigit()
+                    } else {
+                        chars[scan] == '0' || chars[scan] == '1'
+                    })
+            {
+                if chars[scan] != '_' {
+                    digits.push(chars[scan]);
+                }
+                scan += 1;
+            }
+            // A bare `0x` with no digits is not a number; leave it to the
+            // decimal scanner so the `0` still lexes and the stray letter
+            // reports itself, rather than pushing IntLit(0) and swallowing it.
+            if !digits.is_empty() {
+                let val = i64::from_str_radix(&digits, radix).unwrap_or(0);
+                col += scan - pos;
+                pos = scan;
+                tokens.push(TokenSpan {
+                    token: Token::IntLit(val),
+                    line,
+                    col: start_col,
+                });
+                continue;
+            }
         }
 
         // Numbers
@@ -469,6 +790,34 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 }
                 pos += 1;
                 col += 1;
+            }
+            // Exponent suffix: `1e3`, `1.5e-3`, `2E+8`. Previously `1e3` lexed
+            // as `IntLit(1)` plus the identifier `e3`.
+            //
+            // ⚠️ Only consumed when at least one digit follows the optional
+            // sign. `1.e` or `1e` alone must leave the `e` to the identifier
+            // scanner, or a member access like `1.0.exp` would be swallowed.
+            if pos < len && matches!(chars[pos], 'e' | 'E') {
+                let mut scan = pos + 1;
+                if scan < len && (chars[scan] == '+' || chars[scan] == '-') {
+                    scan += 1;
+                }
+                if scan < len && chars[scan].is_ascii_digit() {
+                    num_str.push('e');
+                    if chars[pos + 1] == '+' || chars[pos + 1] == '-' {
+                        num_str.push(chars[pos + 1]);
+                    }
+                    while scan < len && (chars[scan].is_ascii_digit() || chars[scan] == '_') {
+                        if chars[scan] != '_' {
+                            num_str.push(chars[scan]);
+                        }
+                        scan += 1;
+                    }
+                    col += scan - pos;
+                    pos = scan;
+                    // An exponent makes it a float even without a '.'.
+                    is_float = true;
+                }
             }
             if is_float {
                 let val: f64 = num_str.parse().unwrap_or(0.0);
@@ -496,6 +845,9 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 ident.push(chars[pos]);
                 pos += 1;
                 col += 1;
+            }
+            if ident == "func" && matches!(nest.last(), Some(Nest::Bracket)) {
+                pending_lambda = Some(nest.len());
             }
             let token = match ident.as_str() {
                 "var" => Token::Var,
@@ -529,6 +881,9 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 "or" => Token::Or,
                 "not" => Token::Not,
                 "await" => Token::Await,
+                "is" => Token::Is,
+                "as" => Token::As,
+                "when" => Token::When,
                 _ => Token::Ident(ident),
             };
             tokens.push(TokenSpan {
@@ -541,8 +896,65 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
 
         // Multi-character operators
         let start_col = col;
+        // Three-character operators first (maximal munch): `**=`, `<<=`, `>>=`.
+        if pos + 2 < len {
+            let three: String = chars[pos..pos + 3].iter().collect();
+            let three_tok = match three.as_str() {
+                "**=" => Some(Token::StarStarAssign),
+                "<<=" => Some(Token::ShlAssign),
+                ">>=" => Some(Token::ShrAssign),
+                _ => None,
+            };
+            if let Some(tok) = three_tok {
+                tokens.push(TokenSpan {
+                    token: tok,
+                    line,
+                    col: start_col,
+                });
+                pos += 3;
+                col += 3;
+                continue;
+            }
+        }
         if pos + 1 < len {
             let two: String = chars[pos..pos + 2].iter().collect();
+            // Two-character operators with a single token mapping.
+            let two_tok = match two.as_str() {
+                "**" => Some(Token::StarStar),
+                "*=" => Some(Token::StarAssign),
+                "/=" => Some(Token::SlashAssign),
+                "%=" => Some(Token::PercentAssign),
+                "&=" => Some(Token::AmpAssign),
+                "|=" => Some(Token::PipeAssign),
+                "^=" => Some(Token::CaretAssign),
+                "<<" => Some(Token::Shl),
+                ">>" => Some(Token::Shr),
+                ".." => Some(Token::DotDot),
+                // Godot emits distinct AMPERSAND_AMPERSAND / PIPE_PIPE tokens,
+                // but its parser maps them to the same precedence rules as the
+                // `and` / `or` keywords (`gdscript_parser.cpp`: PREC_LOGIC_AND /
+                // PREC_LOGIC_OR). Mapping them onto the existing keyword tokens
+                // here reuses the parser and type-checker arms that already
+                // handle `and`/`or`, rather than adding variants every
+                // exhaustive match on `Token` would have to grow.
+                //
+                // ⚠️ Must stay AHEAD of the single-char table, or `a && b`
+                // lexes as two `Amp`s and dies in `parse_primary`'s
+                // `&"StringName"` arm.
+                "&&" => Some(Token::And),
+                "||" => Some(Token::Or),
+                _ => None,
+            };
+            if let Some(tok) = two_tok {
+                tokens.push(TokenSpan {
+                    token: tok,
+                    line,
+                    col: start_col,
+                });
+                pos += 2;
+                col += 2;
+                continue;
+            }
             match two.as_str() {
                 "==" => {
                     tokens.push(TokenSpan {
@@ -625,17 +1037,87 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             '*' => Token::Star,
             '/' => Token::Slash,
             '%' => Token::Percent,
+            '&' => Token::Amp,
+            '|' => Token::Pipe,
+            '^' => Token::Caret,
+            '~' => Token::Tilde,
+            // `!=` is consumed by the two-char table above, so a `!` reaching
+            // here is the unary logical not. Mapped onto the `not` keyword's
+            // token for the same reason as `&&`/`||`. Before this it fell
+            // through to `UnexpectedChar`, so `if !ready:` was a lex error.
+            '!' => Token::Not,
             '<' => Token::Lt,
             '>' => Token::Gt,
             '=' => Token::Assign,
-            '(' => Token::LParen,
-            ')' => Token::RParen,
-            '[' => Token::LBracket,
-            ']' => Token::RBracket,
-            '{' => Token::LBrace,
-            '}' => Token::RBrace,
-            ':' => Token::Colon,
-            ',' => Token::Comma,
+            // The bracket counters drive the Newline/Indent suppression above.
+            // `)`/`]`/`}` saturate at zero so a stray closer cannot drive the
+            // depth negative and silently re-enable suppression later.
+            '(' => {
+                nest.push(Nest::Bracket);
+                Token::LParen
+            }
+            ')' => {
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
+                Token::RParen
+            }
+            '[' => {
+                nest.push(Nest::Bracket);
+                Token::LBracket
+            }
+            ']' => {
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
+                Token::RBracket
+            }
+            '{' => {
+                nest.push(Nest::Bracket);
+                Token::LBrace
+            }
+            '}' => {
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
+                Token::RBrace
+            }
+            ':' => {
+                if pending_lambda == Some(nest.len()) && matches!(nest.last(), Some(Nest::Bracket))
+                {
+                    pending_lambda = None;
+                    let mut peek = pos + 1;
+                    while peek < len && (chars[peek] == ' ' || chars[peek] == '\t') {
+                        peek += 1;
+                    }
+                    let single_line = !(peek >= len
+                        || chars[peek] == '\n'
+                        || chars[peek] == '\r'
+                        || chars[peek] == '#');
+                    nest.push(Nest::Lambda {
+                        saved_indent: indent_stack.clone(),
+                        body_indent: None,
+                        single_line,
+                    });
+                }
+                Token::Colon
+            }
+            ',' => {
+                // `call(func(x): return x, 2)`: the comma ends a one-line body.
+                if matches!(
+                    nest.last(),
+                    Some(Nest::Lambda {
+                        single_line: true,
+                        ..
+                    })
+                ) {
+                    nest.pop();
+                }
+                Token::Comma
+            }
             '.' => Token::Dot,
             ';' => Token::Semicolon,
             '@' => Token::AtSign,
@@ -875,8 +1357,8 @@ mod tests {
 
     #[test]
     fn unexpected_char_error() {
-        let err = tokenize("~").unwrap_err();
-        assert!(matches!(err, LexError::UnexpectedChar { ch: '~', .. }));
+        let err = tokenize("`").unwrap_err();
+        assert!(matches!(err, LexError::UnexpectedChar { ch: '`', .. }));
     }
 
     #[test]
@@ -897,6 +1379,73 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::ClassName, Token::Ident("MyClass".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn tokenize_bitwise_and_compound_operators() {
+        let tokens = tok_types("& | ^ ~ << >> ** *= /= %= **= &= |= ^= <<= >>=");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Amp,
+                Token::Pipe,
+                Token::Caret,
+                Token::Tilde,
+                Token::Shl,
+                Token::Shr,
+                Token::StarStar,
+                Token::StarAssign,
+                Token::SlashAssign,
+                Token::PercentAssign,
+                Token::StarStarAssign,
+                Token::AmpAssign,
+                Token::PipeAssign,
+                Token::CaretAssign,
+                Token::ShlAssign,
+                Token::ShrAssign,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_is_as_when_keywords() {
+        let tokens = tok_types("x is int as float when");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".into()),
+                Token::Is,
+                Token::Ident("int".into()),
+                Token::As,
+                Token::Ident("float".into()),
+                Token::When,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_maximal_munch_star_star() {
+        // `**` must not be split into two `*`, and `**=` must win over `**`.
+        assert_eq!(
+            tok_types("2**3"),
+            vec![
+                Token::IntLit(2),
+                Token::StarStar,
+                Token::IntLit(3),
+                Token::Eof
+            ]
+        );
+        assert_eq!(
+            tok_types("x**=2"),
+            vec![
+                Token::Ident("x".into()),
+                Token::StarStarAssign,
+                Token::IntLit(2),
+                Token::Eof
+            ]
         );
     }
 

@@ -1,0 +1,111 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Camera"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Sun"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "TerrainShape",
+							"owner": "/root/Outdoor",
+							"path": "/root/Outdoor/Terrain/TerrainShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "TerrainMesh",
+							"owner": "/root/Outdoor",
+							"path": "/root/Outdoor/Terrain/TerrainMesh"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Terrain",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Terrain"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Tree1",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Tree1"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Tree2",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Tree2"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "RockShape",
+							"owner": "/root/Outdoor",
+							"path": "/root/Outdoor/Rock/RockShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "RockMesh",
+							"owner": "/root/Outdoor",
+							"path": "/root/Outdoor/Rock/RockMesh"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "Rock",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/Rock"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "AmbientLight",
+					"owner": "/root/Outdoor",
+					"path": "/root/Outdoor/AmbientLight"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Outdoor",
+			"owner": "/root",
+			"path": "/root/Outdoor"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

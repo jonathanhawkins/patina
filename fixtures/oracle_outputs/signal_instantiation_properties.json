@@ -1,0 +1,178 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node2D",
+							"name": "Hitbox",
+							"path": "/root/GameWorld/Player/Hitbox",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "Node2D",
+					"name": "Player",
+					"path": "/root/GameWorld/Player",
+					"properties": {
+						"position": {
+							"class_type": "",
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 100.0,
+								"y": 200.0
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"name": "Enemy",
+					"path": "/root/GameWorld/Enemy",
+					"properties": {
+						"position": {
+							"class_type": "",
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 500.0,
+								"y": 200.0
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node",
+							"name": "ScoreLabel",
+							"path": "/root/GameWorld/HUD/ScoreLabel",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "Node",
+					"name": "HUD",
+					"path": "/root/GameWorld/HUD",
+					"properties": {
+
+					}
+				}
+			],
+			"class": "Node2D",
+			"name": "GameWorld",
+			"path": "/root/GameWorld",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

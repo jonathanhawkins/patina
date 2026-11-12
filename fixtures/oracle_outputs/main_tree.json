@@ -8,8 +8,7 @@
 					"groups": [],
 					"name": "Player",
 					"owner": "/root/World",
-					"path": "/root/World/Player",
-					"script": "res://scripts/player.gd"
+					"path": "/root/World/Player"
 				},
 				{
 					"children": [],

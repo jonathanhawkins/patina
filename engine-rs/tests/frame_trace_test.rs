@@ -7,8 +7,8 @@
 //! - Frame numbers are monotonically increasing
 //! - The output matches the stored golden trace
 
+#[path = "support/oracle_fixture.rs"]
 mod oracle_fixture;
-
 use oracle_fixture::fixtures_dir;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -277,12 +277,21 @@ fn patina_trace_matches_golden() {
     let golden: Value = serde_json::from_str(&golden_str).expect("golden should be valid JSON");
 
     // Compare event traces.
-    let output_events = output["event_trace"]
-        .as_array()
-        .expect("output event_trace");
     let golden_events = golden["event_trace"]
         .as_array()
         .expect("golden event_trace");
+    // The golden is a Patina snapshot of the notification + script-call stream;
+    // signal emits and PARENTED/CHILD_ORDER_CHANGED were added to the trace
+    // later (real Godot events). Compare only the kinds it recorded — a missing
+    // `_ready` or a doubled ENTER_TREE still fails.
+    let kind = |e: &Value| (e["event_type"].to_string(), e["detail"].to_string());
+    let recorded: std::collections::BTreeSet<_> = golden_events.iter().map(kind).collect();
+    let output_events: Vec<&Value> = output["event_trace"]
+        .as_array()
+        .expect("output event_trace")
+        .iter()
+        .filter(|e| recorded.contains(&kind(e)))
+        .collect();
 
     assert_eq!(
         output_events.len(),
@@ -304,4 +313,37 @@ fn patina_trace_matches_golden() {
         assert_eq!(got["detail"], want["detail"], "event {i}: detail mismatch");
         assert_eq!(got["frame"], want["frame"], "event {i}: frame mismatch");
     }
+}
+
+/// The runner's main scene enters the tree and readies EXACTLY ONCE per node
+/// (Godot: `instantiate()` off-tree, then one `add_child`). Mounting under the
+/// live root and then running `LifecycleManager::enter_tree` again doubled
+/// every ENTER_TREE and READY — and a script attached after the pass missed
+/// its `_ready` entirely.
+#[test]
+fn each_node_enters_and_readies_exactly_once() {
+    let output = run_with_event_trace("test_scripts.tscn", 1);
+    let events = output["event_trace"].as_array().expect("event_trace");
+    for path in [
+        "/root/TestScene",
+        "/root/TestScene/Mover",
+        "/root/TestScene/VarTest",
+    ] {
+        for detail in ["ENTER_TREE", "READY"] {
+            let n = events
+                .iter()
+                .filter(|e| {
+                    e["event_type"] == "notification"
+                        && e["detail"] == detail
+                        && e["node_path"] == path
+                })
+                .count();
+            assert_eq!(n, 1, "{path} {detail} fired {n} times");
+        }
+    }
+    let ready_calls = events
+        .iter()
+        .filter(|e| e["event_type"] == "script_call" && e["detail"] == "_ready")
+        .count();
+    assert_eq!(ready_calls, 1, "VarTest's script `_ready` runs once");
 }

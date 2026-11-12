@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://simple_2d"]
+
+[node name="Level" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+
+[node name="Sprite" type="Sprite2D" parent="Player"]
+offset = Vector2(0, -16)
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Player"]
+
+[node name="Camera" type="Camera2D" parent="Player"]
+zoom = Vector2(2, 2)

@@ -69,6 +69,21 @@ impl From<&str> for Variant {
     }
 }
 
+impl From<&String> for Variant {
+    fn from(v: &String) -> Self {
+        Self::String(v.clone())
+    }
+}
+
+/// Convenience: a `&Variant` converts to an owned `Variant` by cloning. Lets
+/// APIs that take `impl Into<Variant>` (e.g. `Dictionary::get`) accept borrowed
+/// keys without an explicit `.clone()` at the call site.
+impl From<&Variant> for Variant {
+    fn from(v: &Variant) -> Self {
+        v.clone()
+    }
+}
+
 impl From<gdcore::math::Vector2> for Variant {
     fn from(v: gdcore::math::Vector2) -> Self {
         Self::Vector2(v)
@@ -131,7 +146,7 @@ impl From<gdcore::NodePath> for Variant {
 
 impl From<Vec<Variant>> for Variant {
     fn from(v: Vec<Variant>) -> Self {
-        Self::Array(v)
+        Self::Array(v.into())
     }
 }
 
@@ -343,7 +358,7 @@ mod tests {
 
     #[test]
     fn try_from_bool_error_on_array() {
-        assert!(bool::try_from(Variant::Array(vec![])).is_err());
+        assert!(bool::try_from(Variant::Array(Default::default())).is_err());
     }
 
     #[test]

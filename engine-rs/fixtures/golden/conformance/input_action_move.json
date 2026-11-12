@@ -1,0 +1,91 @@
+{
+  "frames": 12,
+  "prints": [
+    "pressed=true"
+  ],
+  "project": "input_action_move",
+  "signals": [],
+  "tree": [
+    {
+      "class": "Node2D",
+      "path": "Main",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "CanvasLayer",
+      "path": "Main/HUD",
+      "properties": {
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Label",
+      "path": "Main/HUD/Readout",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "text": "x=12",
+        "visible": true
+      }
+    },
+    {
+      "class": "CharacterBody2D",
+      "path": "Main/Player",
+      "properties": {
+        "position": [
+          12.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "velocity": [
+          60.0,
+          0.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "CollisionShape2D",
+      "path": "Main/Player/Collision",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    }
+  ]
+}

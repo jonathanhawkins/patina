@@ -1,0 +1,44 @@
+{
+  "fixture_id": "scene_simple_2d",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Level",
+      "class": "Node2D",
+      "path": "/root/Level",
+      "children": [
+        {
+          "name": "Player",
+          "class": "CharacterBody2D",
+          "path": "/root/Level/Player",
+          "children": [
+            {
+              "name": "Sprite",
+              "class": "Sprite2D",
+              "path": "/root/Level/Player/Sprite",
+              "children": [],
+              "properties": {}
+            },
+            {
+              "name": "CollisionShape",
+              "class": "CollisionShape2D",
+              "path": "/root/Level/Player/CollisionShape",
+              "children": [],
+              "properties": {}
+            },
+            {
+              "name": "Camera",
+              "class": "Camera2D",
+              "path": "/root/Level/Player/Camera",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

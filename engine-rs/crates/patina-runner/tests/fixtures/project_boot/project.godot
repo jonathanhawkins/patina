@@ -1,0 +1,26 @@
+; Test fixture project for pat-nzgdu.17 (boot from project.godot).
+; Minimal project exercising main_scene, an autoload, an input action, and a
+; ProjectSettings value the runtime should honor.
+
+config_version=5
+
+[application]
+
+config/name="BootFixture"
+run/main_scene="res://scenes/main.tscn"
+
+[autoload]
+
+GlobalAutoload="*res://autoloads/global.tscn"
+
+[physics]
+
+common/physics_ticks_per_second=72
+
+[input]
+
+test_jump={
+"dead_zone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":32,"physical_keycode":0,"key_label":0,"unicode":32,"location":0,"echo":false,"script":null)
+]
+}

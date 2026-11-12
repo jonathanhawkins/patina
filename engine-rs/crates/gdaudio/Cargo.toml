@@ -9,5 +9,35 @@ repository.workspace = true
 gdcore = { path = "../gdcore" }
 hound = "3"
 lewton = "0.10"
+# Ogg transport demuxing for OggPacketSequence (pat-nzgdu.188); already in the
+# lock as a lewton dependency, so this pins no new version.
+ogg = "0.8"
 thiserror.workspace = true
 tracing.workspace = true
+
+# Native-only device/codec layer. Everything else in this crate — mixer, server,
+# bus/effects, the wav/ogg decoders — is portable Rust, so gating just these two
+# lets the whole audio stack compile to wasm32 and feed an AudioWorklet instead
+# (pat-0q2kx.59, pat-u3l8c.112).
+#
+# * cpal drives the system audio device and has no wasm32-unknown-unknown backend.
+# * minimp3 wraps the C `minimp3` sources through `cc`, which needs a clang that
+#   can target wasm32. Rather than drag a C toolchain into the wasm build, the
+#   web build borrows the decoder the browser already has: `decode::decode_mp3`
+#   consults a host-installed `Mp3Decoder` first, and `patina-web`'s
+#   `mp3_bridge::BrowserMp3Decoder` fills it from `AudioContext.decodeAudioData`
+#   — the same arrangement Godot's own web export uses (pat-mgixk.4). With no
+#   decoder installed the wasm build still reports `UnsupportedFormat`, which is
+#   the honest answer for a page that never preloaded its audio. The `PATMP3`
+#   fixture path stays available on every target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.15"
+# Real ISO MP3 decoding (pat-p0s82.13); Godot uses the same minimp3 decoder.
+minimp3 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+# ClassDB lookups in the effect-registration test (pat-0q2kx.158). DEV-only and
+# acyclic: gdobject depends on gdcore/gdvariant, never on gdaudio, so this adds
+# no edge to the build graph.
+gdobject = { path = "../gdobject" }

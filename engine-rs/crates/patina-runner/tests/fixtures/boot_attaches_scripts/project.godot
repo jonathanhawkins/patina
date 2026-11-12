@@ -1,0 +1,13 @@
+; pat-mgixk.414 fixture: a project whose MAIN SCENE carries a script.
+;
+; The seam under test is `project_boot::boot_project` attaching that script at
+; all. Before the fix the project-directory boot path instanced the main scene
+; and never attached anything to it, so `_ready` never ran and the node behaved
+; like a scriptless Node2D.
+
+config_version=5
+
+[application]
+
+config/name="Boot Attaches Scripts"
+run/main_scene="res://main.tscn"

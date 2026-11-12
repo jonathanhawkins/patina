@@ -1,0 +1,39 @@
+[gd_scene format=3]
+
+[node name="Vehicle3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 3, 8)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(5, 10, 5)
+
+[node name="Chassis" type="RigidBody3D" parent="."]
+position = Vector3(0, 1, 0)
+
+[node name="Body" type="MeshInstance3D" parent="Chassis"]
+position = Vector3(0, 0.5, 0)
+scale = Vector3(2, 0.5, 4)
+
+[node name="ChassisShape" type="CollisionShape3D" parent="Chassis"]
+
+[node name="WheelFL" type="MeshInstance3D" parent="Chassis"]
+position = Vector3(-1, -0.3, 1.5)
+scale = Vector3(0.4, 0.4, 0.4)
+
+[node name="WheelFR" type="MeshInstance3D" parent="Chassis"]
+position = Vector3(1, -0.3, 1.5)
+scale = Vector3(0.4, 0.4, 0.4)
+
+[node name="WheelRL" type="MeshInstance3D" parent="Chassis"]
+position = Vector3(-1, -0.3, -1.5)
+scale = Vector3(0.4, 0.4, 0.4)
+
+[node name="WheelRR" type="MeshInstance3D" parent="Chassis"]
+position = Vector3(1, -0.3, -1.5)
+scale = Vector3(0.4, 0.4, 0.4)
+
+[node name="Road" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="RoadShape" type="CollisionShape3D" parent="Road"]

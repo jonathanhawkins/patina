@@ -1,78 +1,108 @@
 # Compatibility Dashboard
 
-**Last updated**: 2026-03-19 (pat-0l5: oracle parity updated from 37.4% to 90.5%)
-**Test suite**: 3,200+ tests passing across workspace (integration + crate units)
-**Golden files**: 49 (8 physics, 16 traces, 11 scenes, 5 resources, 9 render)
+**Last updated**: 2026-07-12 (fresh-eyes source audit correction)
+**Test suite**: 15,700 tests passing across workspace (6,355 crate units + 9,338 integration tests in 393 files)
+**Golden files**: 150 (17 physics, 23 traces, 37 scenes, 5 resources, 64 render, 3 signals, 1 version)
+**Oracle outputs**: 115 files (measured against Godot 4.6.1)
+
+> **⚠️ Audit 2026-07-11** ([docs/PARITY_AUDIT_2026-07-11.md](docs/PARITY_AUDIT_2026-07-11.md),
+> epic `pat-u3l8c`): the table below reports **library/unit-test status**, not runtime parity.
+> At runtime, `MainLoop::step` wires only 2D physics — 3D physics, audio, navigation,
+> particles, AnimationTree, GUI, and node-driven 2D rendering do not execute in a running
+> game; custom shaders don't load; real exported Godot projects can't be read; there is no
+> wasm/browser build. See the "Runtime reality" column added below.
 
 ---
 
 ## Subsystem Status at a Glance
 
-| Subsystem | Status | Test Count | Goldens | Parity |
-|-----------|--------|------------|---------|--------|
-| Core Runtime | Measured | 142 | — | ~100% |
-| Variant System | Measured | 93 | — | ~100% |
-| Object Model | Measured | 100 | — | ~80% |
-| Signals | Measured | 28 | — | ~60% |
-| Notifications | Measured | 30 | — | ~85% |
-| Resources | Measured | 189 | 5 | ~95% |
-| Scene System | Measured | 746 | 11 | ~90% |
-| GDScript Interop | Measured | 381 | — | ~85% |
-| 2D Rendering | Measured | 150 | 9 | Golden-based |
-| 2D Physics | Measured | 140 | 8 | Deterministic |
-| Input | Measured | 146 | — | Measured |
-| Vertical Slice | Measured | 16 | — | End-to-end |
-| Audio | Claimed | 17 | — | Stub only |
-| Platform | Claimed | 24 | — | Stub only |
-| Editor | Claimed | 291 | — | Maintenance |
-| 3D Runtime | Deferred | — | — | N/A |
+| Subsystem | Status | Test Count | Goldens | Parity | Runtime reality (audit 2026-07-11) |
+|-----------|--------|------------|---------|--------|-------------------------------------|
+| Core Runtime | Measured | 828 | — | ~100% | Solid; Packed*Array/int-vector Variants missing (`.11/.16`) |
+| Variant System | Measured | 131 | — | ~100% | Common types OK; no Packed arrays, RID, Signal-as-value |
+| Object Model | Measured | 75+ | — | ~80% | Solid backend; much never exposed to scripts (`.21`) |
+| Signals | Measured | integration | 3 | ~60% | Backend solid; Godot-4 connect style + flags missing (`.17`) |
+| Notifications | Measured | integration | — | ~85% | Solid |
+| Resources | Measured | 319+ | 5 | ~95% | Text subset only — binary .res/.scn, real .pck, .ctex, UID codec all fail (`.83–.87`) |
+| Scene System | Measured | 959+ | 37 | ~90% | Lifecycle solid; Timer node missing; most 3D nodes shells (`.3`, audit §scene) |
+| GDScript Interop | Measured | 464+ | — | ~85% | const/*=/is/as/assert rejected; match broken; ~10-15% method surface (`.7–.15`) |
+| 2D Rendering | Measured | 168+ | 64 | Golden-based | Scene nodes emit no draw commands; rotation→AABB; no TileMap render (`.23–.25`) |
+| 2D Rendering Server | Measured | 108 | — | Measured | Library only; WgpuRenderer2D is software in disguise |
+| 2D Physics | Measured | 111+ | 17 | Deterministic | **No gravity**; no rotated collision; no floor snap (`.46–.48`) |
+| Input / Platform | Measured | 504 | — | Measured | State machine solid; InputEvent not exposed to _input (`.22`) |
+| Vertical Slice | Measured | integration | — | End-to-end | Exercises the narrow wired path only |
+| Audio | Claimed | 88+ | — | Library-only | **Orphaned crate — no runtime wiring, no sound in games** (`.2`) |
+| Editor | Measured | 1963+ | — | Parity | Editor shell real; its web UI ≠ runtime GUI |
+| 3D Rendering | Measured | 95+ | 64 | Golden-based | No texture sampling; no skinning; GPU path lacks fog/omni shadows (`.32–.35`) |
+| 3D Rendering Server | Measured | 338 | — | Measured | Library only |
+| 3D Physics | Measured | 124+ | — | Deterministic | **Never stepped by MainLoop**; capsule/plane don't collide (`.1`, `.54`) |
+| 3D Comparison Tooling | Measured | 44 | — | Tooling | Solid |
+| Networking | Measured | integration | — | HTTP/WS/TcpMultiplayerPeer | Not wired to SceneTree/GDScript; zero Godot wire compat; no TLS (`.75–.78`) |
+| Runner | Measured | 80 | — | N/A | Headless JSON dumper — no render/audio/input loop |
+| GUI (runtime) | Deferred | 0 | — | 0 functional controls | No draw-from-tree/input/signals/TTF (`.67–.70`) |
+| Shaders | Deferred | tokenizer only | — | Non-functional | .gdshader doesn't load; bodies never execute (`.43–.44`) |
+| Navigation | Claimed | unit | — | Library-only | No AStar classes; centroid paths; never stepped (`.61–.64`) |
+| Animation | Measured | unit | — | Library-only | Tracks only animate the player's own node; AnimationTree dead (`.94–.96`) |
+| Web / Browser | Deferred | 0 | — | ~0% | No wasm build exists; browser shows streamed BMPs (`.109–.115`) |
+
+Bead ids `.N` = `pat-u3l8c.N`.
 
 ---
 
 ## Oracle Parity Results
 
-Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner across 9 fixture scenes. The runner uses `class_defaults.rs` filtering to compare only explicitly-set and semantically-meaningful properties (excluding Godot-internal defaults that Patina does not emit). Tests: `oracle_parity_test.rs` (32) + `oracle_regression_test.rs` (43).
+All oracle golden outputs regenerated against **Godot 4.6.1** (v4.6.1.stable.official.14d19694e). Comparison uses `class_defaults.rs` filtering to compare only explicitly-set and semantically-meaningful properties. Tests: `oracle_parity_test.rs` (32) + `oracle_regression_test.rs` (43).
 
 | Scene | Comparisons | Matched | Parity | Notes |
 |-------|-------------|---------|--------|-------|
 | `minimal.tscn` | 1 | 1 | **100.0%** | Single Node, perfect match |
 | `hierarchy.tscn` | 3 | 3 | **100.0%** | Full node/class/property match |
 | `with_properties.tscn` | 5 | 5 | **100.0%** | Player position/modulate match |
-| `space_shooter.tscn` | 8 | 8 | **100.0%** | Player/EnemySpawner positions match |
+| `space_shooter.tscn` | 13 | 13 | **100.0%** | All properties match including script-exported vars |
 | `platformer.tscn` | 12 | 12 | **100.0%** | Node structure and properties match |
-| `physics_playground.tscn` | 15 | 10 | **66.7%** | Physics node classes match; simulation gaps remain |
+| `physics_playground.tscn` | 12 | 12 | **100.0%** | All physics node classes, positions, and collision_mask match |
 | `signals_complex.tscn` | 9 | 9 | **100.0%** | Signal node structure matches |
-| `test_scripts.tscn` | 5 | 4 | **80.0%** | Script vars mostly match; one frame-accumulated value diverges |
+| `test_scripts.tscn` | 11 | 11 | **100.0%** | All script vars match; Mover position within f32 tolerance |
 | `ui_menu.tscn` | 5 | 5 | **100.0%** | Complete match |
-| **Overall** | **63** | **57** | **90.5%** | Up from 37.4% baseline |
+| **Overall** | **71** | **71** | **100.0%** | Measured against Godot 4.6.1 |
 
-**Improvement drivers** (from 37.4% → 90.5%):
-- `class_defaults.rs` filtering: removes false-negative comparisons on Godot-internal default properties that Patina does not serialize
-- Bare var sync: script variable initial values now correctly propagate
-- `self.position.x` fix: member-access expressions in GDScript correctly resolve
+**Parity change notes** (4.6.1 repin, historical):
+- `physics_playground`: improved from 66.7% → 100% (Godot 4.6.1 oracle outputs now align with Patina's collision_mask handling)
+- `space_shooter`: resolved — was 61.5%, now 100.0% (script-exported vars implemented)
+- `test_scripts`: resolved — was 36.4%, now 100.0% (script-exported vars implemented)
+- Overall property count increased from 63 → 71 due to richer oracle capture in 4.6.1; all 71 now match
+- See `fixtures/oracle_outputs/PARITY_REPORT.md` for per-property detail
 
 ---
 
 ## Property Gap Analysis
 
 ### Measured Properties (test-backed)
-- Node names and class names: **100%** across all scenes (75 oracle tests)
-- Node hierarchy (parent/child structure): **100%** (746 scene system tests)
+- Node names and class names: **100%** across all scenes (oracle tests)
+- Node hierarchy (parent/child structure): **100%** (959 scene system unit tests + integration)
 - Explicitly-set Vector2 positions: **Match** (oracle parity tests)
-- Script variable initial values: **Match** for Int/Float types (381 GDScript tests)
-- Lifecycle ordering: **85%** (30 notification tests + 14 lifecycle trace tests)
-- Signal dispatch: **60%** (28 signal tests — declaration + emit verified)
-- Physics stepping: **Deterministic** (140 physics tests + 8 goldens)
-- 2D rendering: **Golden-based** (150 render tests + 9 golden images)
-- Input routing: **Measured** (146 input tests — snapshot, map loading, action coverage)
+- Script variable initial values: **Match** for Int/Float types (464 GDScript tests)
+- Lifecycle ordering: **85%** (notification + lifecycle trace tests)
+- Signal dispatch: **60%** (signal dispatch + trace parity tests)
+- 2D Physics stepping: **Deterministic** (111 unit tests + 17 physics goldens)
+- 3D Physics stepping: **Deterministic** (124 unit tests + trace comparison tooling)
+- 2D rendering: **Golden-based** (168 render tests + 64 golden images)
+- 3D rendering: **Golden-based** (95 render tests + framebuffer comparison)
+- Input routing: **Measured** (504 platform tests — snapshot, map loading, action coverage)
+- Editor-facing compatibility layer: **Measured for bounded slice** (1859 tests — browser shell, script editor, menus, server, selected tooling)
 
-### Known Gaps (not yet test-backed)
+### Resolved Gaps (historical)
+
+| Gap | Category | Resolution |
+|-----|----------|------------|
+| Script variable export in space_shooter (5 vars) | Resolved | speed, can_shoot, shoot_cooldown, spawn_interval, spawn_timer — all now emitted and verified |
+| Script variable export in test_scripts (7 vars) | Resolved | direction, speed, health, is_alive, name_str, velocity — all now emitted; Mover position within f32 tolerance |
+
+### Remaining Gaps
 
 | Gap | Category | Impact |
 |-----|----------|--------|
-| Physics playground properties (5 mismatches) | Partial | Medium — physics simulation parity for playground scene not yet complete |
-| Script frame-accumulated values (1 mismatch) | Partial | Low — initial values match, one frame-accumulated divergence in test_scripts |
-| Audio playback | Deferred | Low — stub only, no Godot behavior to compare |
+| Device audio backend | Partial | Mixer/server measured; OS device output varies by platform |
 
 ---
 
@@ -82,28 +112,42 @@ Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner a
 
 | Subsystem | Test files |
 |-----------|-----------|
-| Core Runtime | `gdcore` unit tests |
-| Variant System | `gdvariant` unit tests |
-| Object Model | `gdobject` units, `object_property_reflection_test`, `classdb_parity_test` |
+| Core Runtime | `gdcore` unit tests (828) |
+| Variant System | `gdvariant` unit tests (103) |
+| Object Model | `gdobject` units (75), `object_property_reflection_test`, `classdb_parity_test` |
 | Signals | `signal_dispatch_parity_test`, `signal_trace_parity_test` |
 | Notifications | `notification_coverage_test`, `lifecycle_trace_parity_test` |
-| Resources | `gdresource` units, `cache_regression_test`, `unified_loader_test`, `resource_uid_cache_test` |
-| Scene System | `gdscene` units, `golden_tests`, `instancing_ownership_test`, `packed_scene_edge_cases_test`, `frame_processing_semantics_test` |
-| GDScript Interop | `gdscript_interop` units, `demo_scenes_test` |
+| Resources | `gdresource` units (319), `cache_regression_test`, `unified_loader_test`, `resource_uid_cache_test` |
+| Scene System | `gdscene` units (959), `golden_tests`, `instancing_ownership_test`, `packed_scene_edge_cases_test`, `frame_processing_semantics_test` |
+| GDScript Interop | `gdscript_interop` units (464), `demo_scenes_test` |
 | Trace Parity | `trace_parity_test`, `multi_scene_trace_parity_test`, `frame_trace_test` |
 | Oracle Parity | `oracle_parity_test`, `oracle_regression_test` |
-| 2D Rendering | `gdrender2d` units, `render_pipeline`, `render_golden_test` |
-| 2D Physics | `gdphysics2d` units, `physics_integration_test` |
-| Input | `gdplatform` units, `input_map_loading_test`, `input_action_coverage_test` |
+| 2D Rendering | `gdrender2d` units (168), `render_pipeline`, `render_golden_test` |
+| 2D Rendering Server | `gdserver2d` units (108) |
+| 2D Physics | `gdphysics2d` units (111), `physics_integration_test` |
+| Input / Platform | `gdplatform` units (504), `input_map_loading_test`, `input_action_coverage_test`, `platform_first_stable_layer_test`, `platform_targets_validation_test`, `startup_runtime_packaging_flow_test` |
 | Vertical Slice | `vertical_slice_test` |
+| Editor-Facing Compatibility Layer | `gdeditor` units (1859), `editor_smoke_test`, `editor_461_revalidation_test`, `editor_interface_compat_test`, `editor_menu_parity_test`, `editor_systems_parity_test` |
+
+Editor note: the strongest measured `gdeditor` evidence is the browser-served
+editor shell, compatibility-layer APIs, and selected tooling slices. That is
+substantial, but it is still narrower than blanket parity with the full Godot
+editor feature surface.
+| 3D Rendering | `gdrender3d` units (95), `render_3d_parity_test`, `comparison_tooling_3d_test` |
+| 3D Rendering Server | `gdserver3d` units (338) |
+| 3D Physics | `gdphysics3d` units (124), `physics_integration_test` |
+| 3D Comparison Tooling | `compare3d` units (34), `comparison_tooling_3d_test` (10) |
+
+Platform note: the strongest measured `gdplatform` evidence is the bounded
+headless/stable-layer slice plus target-matrix and startup/packaging coverage.
+Native Linux/macOS/Windows shell behavior is implemented and partly tested, but
+is still narrower than full platform parity.
 
 ### Claimed subsystems — what's missing
 
 | Subsystem | Has | Needs |
 |-----------|-----|-------|
-| Audio | 17 stub tests | Godot audio behavior comparison |
-| Platform | 24 lifecycle tests | Godot windowing behavior comparison |
-| Editor | 291 tests | No parity target (maintenance-only) |
+| Audio | 88 tests (bus routing, WAV decode, playback) | Godot audio behavior comparison |
 
 ---
 

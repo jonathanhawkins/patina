@@ -1,0 +1,115 @@
+{
+  "fixture_id": "scene_spotlight_gallery_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "Gallery with 3 spot lights illuminating statues — tests SpotLight3D node class",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-25T09:40:00+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "Gallery",
+        "class": "Node3D",
+        "path": "/root/Gallery",
+        "children": ["Camera", "SpotRed", "SpotGreen", "SpotBlue", "Statue1", "Statue2", "Statue3", "Floor"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Gallery/Camera",
+        "children": [],
+        "properties": {
+          "fov": 55.0,
+          "near": 0.1,
+          "far": 100.0
+        }
+      },
+      {
+        "name": "SpotRed",
+        "class": "SpotLight3D",
+        "path": "/root/Gallery/SpotRed",
+        "children": [],
+        "properties": {
+          "light_energy": 2.0,
+          "spot_range": 15.0,
+          "spot_angle": 30.0
+        }
+      },
+      {
+        "name": "SpotGreen",
+        "class": "SpotLight3D",
+        "path": "/root/Gallery/SpotGreen",
+        "children": [],
+        "properties": {
+          "light_energy": 1.5,
+          "spot_range": 12.0,
+          "spot_angle": 25.0
+        }
+      },
+      {
+        "name": "SpotBlue",
+        "class": "SpotLight3D",
+        "path": "/root/Gallery/SpotBlue",
+        "children": [],
+        "properties": {
+          "light_energy": 1.8,
+          "spot_range": 10.0,
+          "spot_angle": 35.0
+        }
+      },
+      {
+        "name": "Statue1",
+        "class": "MeshInstance3D",
+        "path": "/root/Gallery/Statue1",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 0, 0)"
+        }
+      },
+      {
+        "name": "Statue2",
+        "class": "MeshInstance3D",
+        "path": "/root/Gallery/Statue2",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Statue3",
+        "class": "MeshInstance3D",
+        "path": "/root/Gallery/Statue3",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, 0)"
+        }
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Gallery/Floor",
+        "children": ["FloorShape", "FloorMesh"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)"
+        }
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Gallery/Floor/FloorShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "FloorMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Gallery/Floor/FloorMesh",
+        "children": [],
+        "properties": {}
+      }
+    ]
+  }
+}

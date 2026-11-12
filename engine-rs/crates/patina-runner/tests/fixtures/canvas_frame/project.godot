@@ -1,0 +1,19 @@
+; pat-mgixk.46 fixture: a project whose main scene is pure 2D canvas content.
+;
+; The seam under test is the runner WRITING that canvas out as a PNG. The scene
+; holds one ColorRect, one textured Sprite2D and one Label, so a frame that
+; reaches disk must contain the rect's colour and the sprite's texture pixels —
+; not merely "something non-black".
+;
+; Entered as a PROJECT DIRECTORY rather than a loose `.tscn` because that is how
+; a shipped game boots, and it is the entry point this bead's wiring requirement
+; names. The loose-`.tscn` path renders this same scene identically; an earlier
+; version of this comment claimed otherwise (blaming an unseeded ClassDB) and
+; that was a confounded measurement which does not reproduce.
+
+config_version=5
+
+[application]
+
+config/name="Canvas Frame"
+run/main_scene="res://main.tscn"

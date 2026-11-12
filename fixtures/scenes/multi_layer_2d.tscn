@@ -1,0 +1,25 @@
+[gd_scene format=3 uid="uid://multi_layer_2d"]
+
+[node name="World2D" type="Node2D"]
+
+[node name="Background" type="Sprite2D" parent="."]
+position = Vector2(512, 300)
+
+[node name="TileLayer" type="TileMapLayer" parent="."]
+
+[node name="PlayerSprite" type="Sprite2D" parent="."]
+position = Vector2(100, 400)
+
+[node name="AnimSprite" type="AnimatedSprite2D" parent="."]
+position = Vector2(300, 400)
+
+[node name="Trail" type="Line2D" parent="."]
+
+[node name="MovePath" type="Path2D" parent="."]
+
+[node name="Follower" type="PathFollow2D" parent="MovePath"]
+
+[node name="NavRegion" type="NavigationRegion2D" parent="."]
+
+[node name="Camera" type="Camera2D" parent="."]
+position = Vector2(512, 300)

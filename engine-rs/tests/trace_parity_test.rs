@@ -4,8 +4,8 @@
 //! trace and the upstream golden (mock or real), runs structural comparison, and
 //! reports all parity differences.
 
+#[path = "support/trace_compare.rs"]
 mod trace_compare;
-
 use std::path::PathBuf;
 use trace_compare::{compare_traces, format_report, parse_events, TraceDiff};
 
