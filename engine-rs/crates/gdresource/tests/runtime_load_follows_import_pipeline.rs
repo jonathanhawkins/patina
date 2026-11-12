@@ -157,10 +157,7 @@ fn loader_claims_compiled_formats_and_declines_the_rest() {
             "{claimed} must be claimed by a registered format loader",
         );
     }
-    for unclaimed in [
-        "res://notes.xyz",
-        "res://noextension",
-    ] {
+    for unclaimed in ["res://notes.xyz", "res://noextension"] {
         assert!(
             !loader.can_load_path(unclaimed),
             "{unclaimed} must not be claimed",

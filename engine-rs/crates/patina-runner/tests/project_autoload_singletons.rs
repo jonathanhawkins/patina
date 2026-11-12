@@ -98,7 +98,11 @@ fn project_autoload_singletons() {
     );
 
     let boot = boot_project(&dir);
-    assert_eq!(boot.autoloads_instantiated(), 1, "one autoload instantiated");
+    assert_eq!(
+        boot.autoloads_instantiated(),
+        1,
+        "one autoload instantiated"
+    );
 
     let tree = boot.main_loop().expect("main loop built").tree();
 

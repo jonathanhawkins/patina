@@ -87,5 +87,8 @@ fn the_lamp_gltf_material_uses_its_own_base_color_image() {
     let direct = cache
         .get_or_load("res://town/lamp/textures/Palette_baseColor.png")
         .expect("the palette PNG decodes");
-    assert_eq!(tex.pixels, direct.pixels, "the image the glTF names, resolved relative to it");
+    assert_eq!(
+        tex.pixels, direct.pixels,
+        "the image the glTF names, resolved relative to it"
+    );
 }

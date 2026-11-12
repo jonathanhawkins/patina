@@ -64,7 +64,10 @@ fn subtween_tweener_nested_test() {
     );
     match find(&after, "phase") {
         Some(Variant::Float(p)) => {
-            assert!(p > 0.0, "the chained 'phase' step should have started, got {p}");
+            assert!(
+                p > 0.0,
+                "the chained 'phase' step should have started, got {p}"
+            );
         }
         other => panic!("expected a Float 'phase' value, got {other:?}"),
     }

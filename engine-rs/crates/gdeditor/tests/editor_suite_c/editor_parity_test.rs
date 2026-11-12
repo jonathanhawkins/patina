@@ -1411,9 +1411,17 @@ fn test_e0heb_close_last_tab_opens_fresh_empty_scene() {
     let after: serde_json::Value =
         serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
     let tabs = after["tabs"].as_array().unwrap();
-    assert_eq!(tabs.len(), 1, "still exactly one tab after closing the last: {after}");
+    assert_eq!(
+        tabs.len(),
+        1,
+        "still exactly one tab after closing the last: {after}"
+    );
     assert_eq!(after["active_tab_index"].as_u64(), Some(0));
-    assert_eq!(tabs[0]["path"].as_str(), Some(""), "the replacement scene is unsaved");
+    assert_eq!(
+        tabs[0]["path"].as_str(),
+        Some(""),
+        "the replacement scene is unsaved"
+    );
     assert!(
         tabs[0]["name"].as_str().unwrap().starts_with("Untitled"),
         "the replacement scene is Untitled: {after}"
@@ -1524,7 +1532,13 @@ fn test_x8i15_godot_dialog_layout() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    for label in ["Favorites:", "Recent:", "Search:", "Matches:", "Description:"] {
+    for label in [
+        "Favorites:",
+        "Recent:",
+        "Search:",
+        "Matches:",
+        "Description:",
+    ] {
         assert!(b.contains(label), "Dialog must have the {label} pane label");
     }
     for id in ["add-node-favorites", "add-node-recent", "add-node-list"] {

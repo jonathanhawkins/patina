@@ -210,7 +210,10 @@ fn signal_after_enter_tree_traced() {
         .iter()
         .position(|e| e.event_type == TraceEventType::SignalEmit && e.detail == "ready_sig")
         .unwrap();
-    let last_enter = events.iter().rposition(|e| e.detail == "ENTER_TREE").unwrap();
+    let last_enter = events
+        .iter()
+        .rposition(|e| e.detail == "ENTER_TREE")
+        .unwrap();
 
     assert!(enter_count >= 3); // root + E + R
     assert!(signal_idx > last_enter, "ready_sig after every ENTER_TREE");

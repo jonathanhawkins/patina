@@ -21,7 +21,8 @@ const DT: f64 = 1.0 / 60.0;
 // Fixture sources
 // ---------------------------------------------------------------------------
 
-const AUDIO_INTEGRATION_TSCN: &str = include_str!("../../../fixtures/scenes/audio_integration.tscn");
+const AUDIO_INTEGRATION_TSCN: &str =
+    include_str!("../../../fixtures/scenes/audio_integration.tscn");
 const NAVIGATION_INTEGRATION_TSCN: &str =
     include_str!("../../../fixtures/scenes/navigation_integration.tscn");
 const UI_COMPLEX_TSCN: &str = include_str!("../../../fixtures/scenes/ui_complex.tscn");

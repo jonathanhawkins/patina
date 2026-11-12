@@ -118,7 +118,11 @@ mod tests {
             MainView::GamePreview,
             MainView::AssetLibBrowser,
         ] {
-            assert!(view.is_implemented(), "{} is implemented", view.display_name());
+            assert!(
+                view.is_implemented(),
+                "{} is implemented",
+                view.display_name()
+            );
             match view.pane_content() {
                 PaneContent::View(c) => assert_eq!(c.view, view),
                 PaneContent::Placeholder(_) => {
@@ -155,7 +159,10 @@ mod tests {
         // The placeholder shape itself is unchanged for a future partial view.
         let p = PlaceholderPane {
             view: MainView::GamePreview,
-            message: format!("{} is not available yet", MainView::GamePreview.display_name()),
+            message: format!(
+                "{} is not available yet",
+                MainView::GamePreview.display_name()
+            ),
         };
         assert!(PaneContent::Placeholder(p.clone()).is_placeholder());
         assert!(p.message.contains("Game view"));

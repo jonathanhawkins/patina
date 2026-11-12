@@ -25,14 +25,19 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
     let port = free_port();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("Player", "AnimationPlayer")).unwrap();
+    tree.add_child(root, Node::new("Player", "AnimationPlayer"))
+        .unwrap();
     let handle = EditorServerHandle::start(port, EditorState::new(tree));
     thread::sleep(Duration::from_millis(100));
     (handle, port)
@@ -57,15 +62,15 @@ fn animation_panel_renders_all_five_playback_buttons() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"anim-play-bw-from-btn\"",              // play_bw_from
+        "id=\"anim-play-bw-from-btn\"", // play_bw_from
         "Play Animation Backwards (A)",
-        "id=\"anim-play-bw-btn\"",                   // play_bw
+        "id=\"anim-play-bw-btn\"", // play_bw
         "Play Animation Backwards from End (Shift+A)",
-        "id=\"anim-stop-btn\"",                      // stop
+        "id=\"anim-stop-btn\"", // stop
         "Pause/Stop Animation (S)",
-        "id=\"anim-play-btn\"",                      // play
+        "id=\"anim-play-btn\"", // play
         "Play Animation from Start (Shift+D)",
-        "id=\"anim-play-from-btn\"",                 // play_from
+        "id=\"anim-play-from-btn\"", // play_from
         "Play Animation (D)",
     ] {
         assert!(
@@ -91,7 +96,10 @@ fn animation_panel_renders_frame_spinbox_and_hidden_scale_field() {
         "id=\"anim-scale\"",
         "Scale animation playback globally for the node.",
     ] {
-        assert!(html.contains(needle), "served Animation toolbar is missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "served Animation toolbar is missing `{needle}`"
+        );
     }
     // Godot hides `scale` at construction; the served field must be hidden too,
     // or the toolbar gains a control Godot's never shows.
@@ -147,7 +155,10 @@ fn animation_panel_renders_autoplay_pin_and_animation_selector() {
         "id=\"anim-select\"",
         "Display list of animations in player.",
     ] {
-        assert!(html.contains(needle), "served Animation toolbar is missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "served Animation toolbar is missing `{needle}`"
+        );
     }
     handle.stop();
 }

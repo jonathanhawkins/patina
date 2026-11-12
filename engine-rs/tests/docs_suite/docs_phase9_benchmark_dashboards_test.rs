@@ -29,12 +29,8 @@ fn dashboard_module_source_exists() {
 #[test]
 fn committed_benchmark_baseline_data_exists() {
     let p = repo_root().join("fixtures/golden/render/benchmark_baselines.json");
-    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| {
-        panic!(
-            "benchmark baseline data must exist at {}: {e}",
-            p.display()
-        )
-    });
+    let body = std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("benchmark baseline data must exist at {}: {e}", p.display()));
     assert!(
         body.contains("fixtures") && body.contains("per_frame_ms"),
         "benchmark_baselines.json must publish per-fixture timing data"

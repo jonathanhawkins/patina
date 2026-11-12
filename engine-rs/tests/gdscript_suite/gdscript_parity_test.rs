@@ -147,10 +147,7 @@ fn type_checker_errors() {
     );
 
     // Return-type mismatch: func `-> int` returns a string literal.
-    let bad_return = concat!(
-        "func number() -> int:\n",
-        "    return \"forty-two\"\n",
-    );
+    let bad_return = concat!("func number() -> int:\n", "    return \"forty-two\"\n",);
     let errors = type_check(bad_return).expect("parse bad_return");
     assert!(
         errors.iter().any(|e| matches!(
@@ -162,10 +159,7 @@ fn type_checker_errors() {
     );
 
     // Duplicate class_name declaration.
-    let dup_class = concat!(
-        "class_name Alpha\n",
-        "class_name Beta\n",
-    );
+    let dup_class = concat!("class_name Alpha\n", "class_name Beta\n",);
     let errors = type_check(dup_class).expect("parse dup_class");
     assert!(
         errors
@@ -212,11 +206,7 @@ extends Node2D
     // -- 1. Compile: @export annotations captured by the interpreter.
     let mut interp = Interpreter::new();
     let class_def = interp.run_class(src).expect("class parse failed");
-    let export_names: Vec<&str> = class_def
-        .exports
-        .iter()
-        .map(|e| e.name.as_str())
-        .collect();
+    let export_names: Vec<&str> = class_def.exports.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         export_names,
         vec!["speed", "health", "player_name", "alive"],
@@ -227,7 +217,10 @@ extends Node2D
     let instance = interp
         .instantiate_class(&class_def)
         .expect("instantiate failed");
-    assert_eq!(instance.properties.get("speed"), Some(&Variant::Float(100.0)));
+    assert_eq!(
+        instance.properties.get("speed"),
+        Some(&Variant::Float(100.0))
+    );
     assert_eq!(instance.properties.get("health"), Some(&Variant::Int(75)));
     assert_eq!(
         instance.properties.get("player_name"),

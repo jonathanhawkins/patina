@@ -28,7 +28,10 @@ fn caster(id: u64, at: Vector3, size: f32) -> Instance3D {
 /// Stands in for the renderer's per-caster key: changes when the caster moves.
 fn key(inst: &Instance3D) -> u64 {
     let o = inst.transform.origin;
-    (inst.id.0 << 40) ^ ((o.x.to_bits() as u64) << 20) ^ (o.y.to_bits() as u64) ^ ((o.z.to_bits() as u64) << 7)
+    (inst.id.0 << 40)
+        ^ ((o.x.to_bits() as u64) << 20)
+        ^ (o.y.to_bits() as u64)
+        ^ ((o.z.to_bits() as u64) << 7)
 }
 
 fn sun() -> Light3D {
@@ -58,15 +61,27 @@ fn scene(frame: u32) -> Vec<Instance3D> {
     let mut id = 1;
     for x in -6..6 {
         for z in -6..6 {
-            out.push(caster(id, Vector3::new(x as f32 * 2.0, -1.0, z as f32 * 2.0), 1.0));
+            out.push(caster(
+                id,
+                Vector3::new(x as f32 * 2.0, -1.0, z as f32 * 2.0),
+                1.0,
+            ));
             id += 1;
         }
     }
     let t = frame as f32 * 0.1;
-    out.push(caster(1000, Vector3::new(t.sin() * 4.0, 1.0, t.cos() * 4.0), 0.8));
+    out.push(caster(
+        1000,
+        Vector3::new(t.sin() * 4.0, 1.0, t.cos() * 4.0),
+        0.8,
+    ));
     out.push(caster(1001, Vector3::new(-3.0, 0.5 + t, 2.0), 0.6));
     let paused = frame / 3;
-    out.push(caster(1002, Vector3::new(paused as f32 * 0.25, 0.0, -2.0), 0.7));
+    out.push(caster(
+        1002,
+        Vector3::new(paused as f32 * 0.25, 0.0, -2.0),
+        0.7,
+    ));
     out
 }
 
@@ -78,14 +93,19 @@ fn incremental_maps_equal_a_full_redraw_every_frame() {
         let instances = scene(frame);
         let refs: Vec<&Instance3D> = instances.iter().collect();
         let keys: Vec<u64> = instances.iter().map(key).collect();
-        let incremental =
-            generate_shadow_maps_incremental(&lights, &refs, &keys, 7, &mut cache);
+        let incremental = generate_shadow_maps_incremental(&lights, &refs, &keys, 7, &mut cache);
         let full = generate_shadow_maps(&lights, &instances);
-        assert!(same_maps(&incremental, &full), "frame {frame}: the maps differ");
+        assert!(
+            same_maps(&incremental, &full),
+            "frame {frame}: the maps differ"
+        );
         let written = (0..SHADOW_MAP_SIZE * SHADOW_MAP_SIZE)
             .filter(|i| full[0].depth.get(i % SHADOW_MAP_SIZE, i / SHADOW_MAP_SIZE) < f32::MAX)
             .count();
-        assert!(written > 1000, "the casters must land in the map ({written} texels)");
+        assert!(
+            written > 1000,
+            "the casters must land in the map ({written} texels)"
+        );
     }
     // Once the floor has settled, only the bodies that move are redrawn.
     assert!(
@@ -93,7 +113,11 @@ fn incremental_maps_equal_a_full_redraw_every_frame() {
         "{} casters redrawn per frame — the static floor is not being reused",
         cache.last_redrawn
     );
-    assert!(cache.base_rebuilds <= 4, "{} base rebuilds in 80 frames", cache.base_rebuilds);
+    assert!(
+        cache.base_rebuilds <= 4,
+        "{} base rebuilds in 80 frames",
+        cache.base_rebuilds
+    );
 }
 
 #[test]
@@ -101,12 +125,16 @@ fn a_changed_light_or_a_vanished_static_caster_rebuilds_the_base() {
     let mut lights = vec![sun()];
     let mut cache = ShadowCasterCache::default();
     let mut instances = scene(0);
-    let mut render = |lights: &[Light3D], instances: &[Instance3D], sig: u64, cache: &mut ShadowCasterCache| {
-        let refs: Vec<&Instance3D> = instances.iter().collect();
-        let keys: Vec<u64> = instances.iter().map(key).collect();
-        let incremental = generate_shadow_maps_incremental(lights, &refs, &keys, sig, cache);
-        assert!(same_maps(&incremental, &generate_shadow_maps(lights, instances)));
-    };
+    let mut render =
+        |lights: &[Light3D], instances: &[Instance3D], sig: u64, cache: &mut ShadowCasterCache| {
+            let refs: Vec<&Instance3D> = instances.iter().collect();
+            let keys: Vec<u64> = instances.iter().map(key).collect();
+            let incremental = generate_shadow_maps_incremental(lights, &refs, &keys, sig, cache);
+            assert!(same_maps(
+                &incremental,
+                &generate_shadow_maps(lights, instances)
+            ));
+        };
     for _ in 0..40 {
         render(&lights, &instances, 7, &mut cache);
     }
@@ -142,7 +170,10 @@ fn recycled_maps_equal_a_full_redraw_and_dirty_covers_every_change() {
             std::mem::take(&mut previous),
         );
         let full = generate_shadow_maps(&lights, &instances);
-        assert!(same_maps(&maps, &full), "frame {frame}: the recycled maps differ");
+        assert!(
+            same_maps(&maps, &full),
+            "frame {frame}: the recycled maps differ"
+        );
         if let (Some(dirty), Some(prev)) = (&cache.last_dirty, &last_full) {
             let rects = &dirty[0];
             for ty in 0..SHADOW_MAP_SIZE {
@@ -160,5 +191,9 @@ fn recycled_maps_equal_a_full_redraw_and_dirty_covers_every_change() {
         last_full = Some(full);
         previous = maps;
     }
-    assert!(cache.recycled_maps >= 40, "only {} maps were recycled in 80 frames", cache.recycled_maps);
+    assert!(
+        cache.recycled_maps >= 40,
+        "only {} maps were recycled in 80 frames",
+        cache.recycled_maps
+    );
 }

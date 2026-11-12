@@ -534,11 +534,8 @@ impl ParticleCollider3D {
 
                 if abs_pos.x > e.x || abs_pos.y > e.y || abs_pos.z > e.z {
                     // Outside the box: measure to the closest surface point.
-                    let closest = Vector3::new(
-                        abs_pos.x.min(e.x),
-                        abs_pos.y.min(e.y),
-                        abs_pos.z.min(e.z),
-                    );
+                    let closest =
+                        Vector3::new(abs_pos.x.min(e.x), abs_pos.y.min(e.y), abs_pos.z.min(e.z));
                     let rel_out = abs_pos - closest;
                     let depth = rel_out.length() - particle_size;
                     if depth > EPSILON {
@@ -564,11 +561,7 @@ impl ParticleCollider3D {
                         + n_local.y * axis_len.y
                         + n_local.z * axis_len.z
                         + particle_size;
-                    let n = Vector3::new(
-                        n_local.x * sgn.x,
-                        n_local.y * sgn.y,
-                        n_local.z * sgn.z,
-                    );
+                    let n = Vector3::new(n_local.x * sgn.x, n_local.y * sgn.y, n_local.z * sgn.z);
                     Some(ParticleContact3D {
                         normal: safe_normalize(self.transform.basis.xform(n)),
                         depth,
@@ -916,8 +909,7 @@ impl ParticleSimulator3D {
                         None => hit,
                         Some(prev) => {
                             let acc = prev.normal * prev.depth;
-                            let acc =
-                                acc + hit.normal * (hit.depth - hit.normal.dot(acc)).max(0.0);
+                            let acc = acc + hit.normal * (hit.depth - hit.normal.dot(acc)).max(0.0);
                             ParticleContact3D {
                                 normal: safe_normalize(acc),
                                 depth: acc.length(),
@@ -927,8 +919,7 @@ impl ParticleSimulator3D {
                 }
 
                 if let Some(hit) = contact {
-                    if self.emitter.material.collision_mode
-                        == ParticleCollisionMode::HideOnContact
+                    if self.emitter.material.collision_mode == ParticleCollisionMode::HideOnContact
                     {
                         // Godot sets `ACTIVE = false`; the retain below reaps it.
                         p.lifetime_remaining = 0.0;
@@ -936,9 +927,7 @@ impl ParticleSimulator3D {
                         // particle_process_material.cpp:1021-1031.
                         let response = hit.normal.dot(p.velocity);
                         let bounce = self.emitter.material.collision_bounce;
-                        let trigger = if response.abs()
-                            >= 2.0 / (bounce + 1.0).clamp(1.0, 2.0)
-                        {
+                        let trigger = if response.abs() >= 2.0 / (bounce + 1.0).clamp(1.0, 2.0) {
                             1.0
                         } else {
                             0.0
@@ -947,8 +936,7 @@ impl ParticleSimulator3D {
                         // Remove the normal component, damp what is left
                         // tangentially, then add the bounce back along it.
                         p.velocity = p.velocity - hit.normal * response;
-                        let friction =
-                            self.emitter.material.collision_friction.clamp(0.0, 1.0);
+                        let friction = self.emitter.material.collision_friction.clamp(0.0, 1.0);
                         p.velocity = p.velocity * (1.0 - friction);
                         p.velocity = p.velocity - hit.normal * response * (bounce * trigger);
                     }

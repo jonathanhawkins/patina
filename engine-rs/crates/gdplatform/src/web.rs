@@ -148,7 +148,7 @@ impl JsBridge {
         self.stubs
             .get(&key)
             .cloned()
-            .ok_or_else(|| JsError::PropertyNotFound(key))
+            .ok_or(JsError::PropertyNotFound(key))
     }
 
     /// Evaluate a JavaScript expression (stub).

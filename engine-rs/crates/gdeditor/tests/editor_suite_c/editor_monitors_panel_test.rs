@@ -17,7 +17,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,10 +54,10 @@ fn monitors_renders_tree_and_graph() {
         "id=\"monitors-split\"",
         "id=\"monitor-tree\"",
         "id=\"monitor-tree-head\"",
-        ">Monitor<",                       // column 0 (editor_performance_profiler.cpp:420)
-        ">Value<",                         // column 1 (422)
+        ">Monitor<", // column 0 (editor_performance_profiler.cpp:420)
+        ">Value<",   // column 1 (422)
         "id=\"monitor-tree-body\"",
-        "id=\"monitor-graph-canvas\"",     // graph (kept id)
+        "id=\"monitor-graph-canvas\"", // graph (kept id)
         "id=\"monitor-graph-empty\"",
         "Pick one or more items from the list to display the graph.", // info_message (441)
     ] {
@@ -75,11 +79,22 @@ fn monitors_spec_covers_godot_categories() {
         "function buildMonitorTree",
         "function drawMonitorGraph",
         // categories
-        "'Time'", "'Memory'", "'Object'", "'Raster'", "'Video'",
-        "'Physics 2D'", "'Physics 3D'", "'Navigation'", "'Audio'",
+        "'Time'",
+        "'Memory'",
+        "'Object'",
+        "'Raster'",
+        "'Video'",
+        "'Physics 2D'",
+        "'Physics 3D'",
+        "'Navigation'",
+        "'Audio'",
         // representative monitors
-        "time/fps", "object/nodes", "object/orphan_nodes",
-        "raster/total_draw_calls", "physics_3d/active_objects", "navigation/regions",
+        "time/fps",
+        "object/nodes",
+        "object/orphan_nodes",
+        "raster/total_draw_calls",
+        "physics_3d/active_objects",
+        "navigation/regions",
     ] {
         assert!(
             html.contains(needle),

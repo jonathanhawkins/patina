@@ -3370,7 +3370,7 @@ impl PhysicsServer {
         // Godot moves from the NODE's global transform: the server body of a
         // kinematic body only catches up at the physics step.
         let from = crate::node2d::get_global_position(tree, node_id);
-        let mut character = PhysicsCharacterBody2D::new(from, body.shape.clone());
+        let mut character = PhysicsCharacterBody2D::new(from, body.shape);
         character.rotation = crate::node2d::get_global_rotation(tree, node_id);
         // The CollisionShape2D's offset inside the body — without it the
         // character collided as if its shape were centred on the origin.
@@ -3547,7 +3547,7 @@ impl PhysicsServer {
         // body: `sync_to_physics` does that at the end of the tick, exactly
         // when Godot's step would.
         let start_position = crate::node2d::get_global_position(tree, node_id);
-        let mut character = PhysicsCharacterBody2D::new(start_position, body.shape.clone());
+        let mut character = PhysicsCharacterBody2D::new(start_position, body.shape);
         character.rotation = crate::node2d::get_global_rotation(tree, node_id);
         // The CollisionShape2D's offset inside the body — without it the
         // character collided as if its shape were centred on the origin.

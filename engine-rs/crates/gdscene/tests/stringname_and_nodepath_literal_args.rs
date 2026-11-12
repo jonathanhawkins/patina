@@ -41,7 +41,9 @@ fn stringname_and_nodepath_literals_are_accepted_as_action_and_path_args() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let main = tree.add_child(root, Node::new("Main", "Node")).unwrap();
-    let path = tree.add_child(main, Node::new("MobPath", "Path2D")).unwrap();
+    let path = tree
+        .add_child(main, Node::new("MobPath", "Path2D"))
+        .unwrap();
     tree.add_child(path, Node::new("MobSpawnLocation", "PathFollow2D"))
         .unwrap();
     tree.attach_script(

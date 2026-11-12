@@ -566,7 +566,7 @@ impl RuntimeDashboard {
         let physics_ok = self
             .physics_metrics
             .as_ref()
-            .map_or(true, |p| p.budget_ratio() <= 1.0);
+            .is_none_or(|p| p.budget_ratio() <= 1.0);
         no_regressions && physics_ok
     }
 

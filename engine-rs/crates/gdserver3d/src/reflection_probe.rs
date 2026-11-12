@@ -239,7 +239,9 @@ pub fn roughness_level_resolution(base: u32, level: usize) -> u32 {
     if level == 0 {
         return base.max(1);
     }
-    (base >> level).max(MIN_ROUGHNESS_LEVEL_RESOLUTION).min(base.max(1))
+    (base >> level)
+        .max(MIN_ROUGHNESS_LEVEL_RESOLUTION)
+        .min(base.max(1))
 }
 
 /// One cubemap level: six square faces of `resolution` texels.
@@ -269,6 +271,7 @@ pub struct RoughnessChain {
 
 /// The face and its `[0,1]` texture coordinates a direction lands on, with
 /// the conventions of [`ReflectionCubemap::sample_direction`].
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0)` also rejects NaN on purpose
 fn cube_face_uv(dir: Vector3) -> Option<(usize, f32, f32)> {
     let (ax, ay, az) = (dir.x.abs(), dir.y.abs(), dir.z.abs());
     if !(ax + ay + az > 0.0) {
@@ -321,7 +324,12 @@ fn bilinear_face(face: &[Color], res: u32, u: f32, v: f32) -> Color {
     let fx = x - x0f;
     let fy = y - y0f;
     let cl = |i: i32| i.clamp(0, res_i - 1);
-    let (x0, x1, y0, y1) = (cl(x0f as i32), cl(x0f as i32 + 1), cl(y0f as i32), cl(y0f as i32 + 1));
+    let (x0, x1, y0, y1) = (
+        cl(x0f as i32),
+        cl(x0f as i32 + 1),
+        cl(y0f as i32),
+        cl(y0f as i32 + 1),
+    );
     let at = |xx: i32, yy: i32| {
         face.get((yy * res_i + xx) as usize)
             .copied()
@@ -385,7 +393,12 @@ impl CubeLevel {
                 .copied()
                 .unwrap_or(Color::new(0.0, 0.0, 0.0, 1.0))
         };
-        let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+        let (a, b, c, d) = (
+            at(x0, y0),
+            at(x0 + 1, y0),
+            at(x0, y0 + 1),
+            at(x0 + 1, y0 + 1),
+        );
         let mix = |p: f32, q: f32, r: f32, s: f32| {
             (p * (1.0 - fx) + q * fx) * (1.0 - fy) + (r * (1.0 - fx) + s * fx) * fy
         };
@@ -433,7 +446,10 @@ impl CubeLevel {
             }
             out
         });
-        CubeLevel { resolution: half, faces }
+        CubeLevel {
+            resolution: half,
+            faces,
+        }
     }
 }
 
@@ -470,19 +486,24 @@ impl RoughnessChain {
             let pushed = p * p; // copy_effects.cpp: `p_roughness * p_roughness`
             let roughness2 = pushed * pushed;
             let roughness4 = roughness2 * roughness2; // GGX alpha²
-            // Godot scales its 32 GGX samples by `4 * roughness`; a little more
-            // here keeps the tiny low-resolution levels free of banding.
+                                                      // Godot scales its 32 GGX samples by `4 * roughness`; a little more
+                                                      // here keeps the tiny low-resolution levels free of banding.
             let total = ((256.0 * pushed) as u32).max(32);
             let mut samples: Vec<(Vector3, usize)> = Vec::with_capacity(total as usize);
             for i in 0..total {
                 let xi = (i as f32 / total as f32, radical_inverse_vdc(i));
                 let phi = 2.0 * std::f32::consts::PI * xi.0;
-                let cos_t =
-                    ((1.0 - xi.1) / (1.0 + (roughness4 - 1.0) * xi.1)).max(0.0).sqrt();
+                let cos_t = ((1.0 - xi.1) / (1.0 + (roughness4 - 1.0) * xi.1))
+                    .max(0.0)
+                    .sqrt();
                 let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
                 let h = Vector3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
                 let n_dot_h = h.z;
-                let l = Vector3::new(2.0 * n_dot_h * h.x, 2.0 * n_dot_h * h.y, 2.0 * n_dot_h * h.z - 1.0);
+                let l = Vector3::new(
+                    2.0 * n_dot_h * h.x,
+                    2.0 * n_dot_h * h.y,
+                    2.0 * n_dot_h * h.z - 1.0,
+                );
                 if l.z <= 0.0 {
                     continue;
                 }
@@ -541,7 +562,11 @@ impl RoughnessChain {
     /// Trilinear sample at `lod` in `0..=MAX_ROUGHNESS_LOD`.
     pub fn sample_lod(&self, dir: Vector3, lod: f32) -> Color {
         let max = (self.levels.len().max(1) - 1) as f32;
-        let lod = if lod.is_finite() { lod.clamp(0.0, max) } else { 0.0 };
+        let lod = if lod.is_finite() {
+            lod.clamp(0.0, max)
+        } else {
+            0.0
+        };
         let i = lod.floor() as usize;
         let f = lod - i as f32;
         let a = self.levels[i].sample(dir);
@@ -614,7 +639,8 @@ impl ReflectionCubemap {
 
     /// The GGX-prefiltered levels (built once, then cached).
     pub fn roughness_chain(&self) -> &RoughnessChain {
-        self.roughness_chain.get_or_init(|| RoughnessChain::build(self))
+        self.roughness_chain
+            .get_or_init(|| RoughnessChain::build(self))
     }
 
     /// Roughness-filtered lookup: Godot's
@@ -852,7 +878,7 @@ pub fn probe_index_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Option<
             continue;
         }
         let size = (probe.size * 0.5).length();
-        if best.map_or(true, |(_, s)| size < s) {
+        if best.is_none_or(|(_, s)| size < s) {
             best = Some((i, size));
         }
     }
@@ -943,7 +969,9 @@ impl SkyRadiance {
         let ref_vec = mirror + (n - mirror) * t;
         let horizon = (1.0 + ref_vec.dot(n)).min(1.0);
         let k = horizon * horizon * self.energy;
-        let c = self.cubemap.sample_lod(ref_vec, r.sqrt() * MAX_ROUGHNESS_LOD);
+        let c = self
+            .cubemap
+            .sample_lod(ref_vec, r.sqrt() * MAX_ROUGHNESS_LOD);
         Color::new(c.r * k, c.g * k, c.b * k, 1.0)
     }
 }
@@ -1118,13 +1146,19 @@ mod tests {
         let res = 8;
         let mut faces: [Vec<Color>; 6] = std::array::from_fn(|_| vec![Color::BLACK; 64]);
         faces[CubeFace::PosX as usize] = vec![Color::WHITE; 64];
-        let level = CubeLevel { resolution: res, faces };
+        let level = CubeLevel {
+            resolution: res,
+            faces,
+        };
         // On +Y, u = 0.99 (x = 1, z = 0 is the +X edge): the last texel's
         // centre is at u = 0.9375, so the right-hand tap is past the edge.
         let dir = Vector3::new(0.98, 1.0, 0.0);
         let seamless = level.sample(dir);
         let clamped = level.sample_clamped(dir);
-        assert_eq!(clamped.r, 0.0, "control: the clamped lookup sees only black +Y");
+        assert_eq!(
+            clamped.r, 0.0,
+            "control: the clamped lookup sees only black +Y"
+        );
         assert!(
             seamless.r > 0.2 && seamless.r < 0.8,
             "the seamless lookup must blend in the white +X face: {seamless:?}"
@@ -1160,18 +1194,34 @@ mod tests {
         let red = Color::new(1.0, 0.0, 0.0, 1.0);
         let blue = Color::new(0.0, 0.0, 1.0, 1.0);
         // Big blue box listed FIRST, small red box inside it.
-        let probes = [captured(1, Vector3::ZERO, 20.0, blue), captured(2, Vector3::ZERO, 4.0, red)];
+        let probes = [
+            captured(1, Vector3::ZERO, 20.0, blue),
+            captured(2, Vector3::ZERO, 4.0, red),
+        ];
         let set = ProbeSet::new(&probes, None).unwrap();
         let n = Vector3::new(0.0, 1.0, 0.0);
         let base = Color::new(0.5, 0.5, 0.5, 1.0);
         let (amb_in, spec_in) = set.indirect(Vector3::ZERO, n, n, 0.0, base);
-        assert!(spec_in.r > 0.99 && spec_in.b < 1e-4, "the smaller box wins: {spec_in:?}");
-        assert!(amb_in.r > 0.99 && amb_in.b < 1e-4, "its ambient too: {amb_in:?}");
+        assert!(
+            spec_in.r > 0.99 && spec_in.b < 1e-4,
+            "the smaller box wins: {spec_in:?}"
+        );
+        assert!(
+            amb_in.r > 0.99 && amb_in.b < 1e-4,
+            "its ambient too: {amb_in:?}"
+        );
         let (amb_out, spec_out) = set.indirect(Vector3::new(5.0, 0.0, 0.0), n, n, 0.0, base);
-        assert!(spec_out.b > 0.99 && spec_out.r < 1e-4, "outside the small box, the big one: {spec_out:?}");
+        assert!(
+            spec_out.b > 0.99 && spec_out.r < 1e-4,
+            "outside the small box, the big one: {spec_out:?}"
+        );
         assert!(amb_out.b > 0.99, "{amb_out:?}");
         let (amb_far, spec_far) = set.indirect(Vector3::new(50.0, 0.0, 0.0), n, n, 0.0, base);
-        assert_eq!(spec_far, Color::new(0.0, 0.0, 0.0, 1.0), "no probe, no sky: black");
+        assert_eq!(
+            spec_far,
+            Color::new(0.0, 0.0, 0.0, 1.0),
+            "no probe, no sky: black"
+        );
         assert_eq!(amb_far, base, "no probe: the environment ambient");
     }
 

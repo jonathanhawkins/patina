@@ -17,8 +17,8 @@
 
 use gdcore::math::Color;
 use gdeditor::scene_renderer::{render_runtime_frame, render_scene_with_zoom_pan, scene_is_3d};
-use gdeditor::viewport_3d_render::render_editor_3d_frame;
 use gdeditor::viewport_3d::Viewport3D;
+use gdeditor::viewport_3d_render::render_editor_3d_frame;
 use gdrender2d::renderer::FrameBuffer;
 use gdscene::node::Node;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
@@ -50,7 +50,8 @@ fn scene_3d() -> SceneTree {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let world = tree.add_child(root, Node::new("World", "Node3D")).unwrap();
-    tree.add_child(world, Node::new("Mesh", "MeshInstance3D")).unwrap();
+    tree.add_child(world, Node::new("Mesh", "MeshInstance3D"))
+        .unwrap();
     tree
 }
 
@@ -78,8 +79,10 @@ fn scene_is_3d_classifies_by_godot_main_plugin_rule() {
     let mut t3 = SceneTree::new();
     let r = t3.root_id();
     let lvl = t3.add_child(r, Node::new("Level", "Node")).unwrap();
-    t3.add_child(lvl, Node::new("M1", "MeshInstance3D")).unwrap();
-    t3.add_child(lvl, Node::new("M2", "MeshInstance3D")).unwrap();
+    t3.add_child(lvl, Node::new("M1", "MeshInstance3D"))
+        .unwrap();
+    t3.add_child(lvl, Node::new("M2", "MeshInstance3D"))
+        .unwrap();
     assert!(scene_is_3d(&t3), "bare-Node root with 3D descendants is 3D");
 
     // Bare-`Node` root with 2D descendants → 2D.
@@ -87,7 +90,10 @@ fn scene_is_3d_classifies_by_godot_main_plugin_rule() {
     let r = t2.root_id();
     let lvl = t2.add_child(r, Node::new("Level", "Node")).unwrap();
     t2.add_child(lvl, Node::new("S", "Sprite2D")).unwrap();
-    assert!(!scene_is_3d(&t2), "bare-Node root with 2D descendants is 2D");
+    assert!(
+        !scene_is_3d(&t2),
+        "bare-Node root with 2D descendants is 2D"
+    );
 }
 
 /// The core regression: a running 3D scene must render real 3D content in the
@@ -167,7 +173,6 @@ fn runtime_2d_scene_uses_canvas_rasterizer() {
         "the running Game view is not the editor's class-glyph/grid preview"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // pat-mgixk.36: the Game view composites the canvas OVER the 3D world
@@ -285,7 +290,11 @@ fn play3d_composites_canvas_hud() {
     // non-background pixels can only be the MeshInstance3D — the "shows mesh
     // pixels" half of the acceptance.
     let bg = pure_3d.get_pixel(0, 0);
-    let mesh_px = pure_3d.pixels.iter().filter(|c| !same_color(c, &bg)).count();
+    let mesh_px = pure_3d
+        .pixels
+        .iter()
+        .filter(|c| !same_color(c, &bg))
+        .count();
     // Threshold kept well under the mesh's expected footprint (a 4x-scaled
     // placeholder cube) and well over incidental pixels, because the exact count
     // depends on the editor camera's default framing. A failure here is a FIXTURE
@@ -364,7 +373,6 @@ fn play3d_composites_canvas_hud() {
         frame.pixels.len()
     );
 }
-
 
 /// The BGRA half of the composite (pat-mgixk.36).
 ///

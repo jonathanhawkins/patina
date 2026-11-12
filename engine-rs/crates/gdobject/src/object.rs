@@ -215,7 +215,8 @@ impl ObjectBase {
         // Bounded like `gdscene::Node`'s log: drop the oldest half at the cap
         // so a long-lived object cannot grow its log without end.
         if self.notification_log.len() >= OBJECT_NOTIFICATION_LOG_CAP {
-            self.notification_log.drain(..OBJECT_NOTIFICATION_LOG_CAP / 2);
+            self.notification_log
+                .drain(..OBJECT_NOTIFICATION_LOG_CAP / 2);
         }
         self.notification_log.push(what);
     }

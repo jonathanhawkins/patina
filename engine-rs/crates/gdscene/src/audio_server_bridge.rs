@@ -405,10 +405,7 @@ impl AudioServerBridge {
     }
 
     pub fn set_stream_buffer(&mut self, node_id: NodeId, buffer: AudioBuffer) {
-        self.players
-            .entry(node_id)
-            .or_insert_with(AudioStreamPlayer::new)
-            .set_stream(buffer);
+        self.players.entry(node_id).or_default().set_stream(buffer);
     }
 
     /// Per-bus `(left, right)` peak levels in dB, mixer bus order.
@@ -1146,10 +1143,7 @@ impl AudioServerBridge {
             _ => Vec::new(),
         };
 
-        let player = self
-            .players
-            .entry(id)
-            .or_insert_with(AudioStreamPlayer::new);
+        let player = self.players.entry(id).or_default();
         player.set_bus(bus);
         player.set_volume_db(volume_db);
 
@@ -1534,7 +1528,8 @@ fn randomizer_spec_from_node(node: &crate::node::Node) -> Option<RandomizerSpec>
     };
     let entries = (0..count)
         .filter_map(|i| {
-            let path = match node.get_property(&format!("__extres____subres__stream__stream_{i}/stream"))
+            let path = match node
+                .get_property(&format!("__extres____subres__stream__stream_{i}/stream"))
             {
                 Variant::String(p) if !p.is_empty() => p,
                 _ => return None,
@@ -2139,8 +2134,14 @@ mod tests {
         let picks: Vec<usize> = (0..60)
             .map(|_| slot(&draw_randomized(&mut state, &mut rng).unwrap()))
             .collect();
-        assert!(picks.windows(2).all(|w| w[0] != w[1]), "no repeats: {picks:?}");
-        assert!((0..3).all(|s| picks.contains(&s)), "every slot plays: {picks:?}");
+        assert!(
+            picks.windows(2).all(|w| w[0] != w[1]),
+            "no repeats: {picks:?}"
+        );
+        assert!(
+            (0..3).all(|s| picks.contains(&s)),
+            "every slot plays: {picks:?}"
+        );
 
         let mut state = randomizer(3, 2, 1.0);
         let picks: Vec<usize> = (0..7)

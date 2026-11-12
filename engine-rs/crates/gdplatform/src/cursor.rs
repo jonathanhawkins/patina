@@ -14,8 +14,10 @@ use crate::window::WindowIcon;
 /// Standard cursor shapes matching Godot's `DisplayServer.CursorShape` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum CursorShape {
     /// Default arrow cursor.
+    #[default]
     Arrow = 0,
     /// I-beam text cursor.
     Ibeam = 1,
@@ -132,12 +134,6 @@ impl CursorShape {
             16 => Some(CursorShape::Help),
             _ => None,
         }
-    }
-}
-
-impl Default for CursorShape {
-    fn default() -> Self {
-        CursorShape::Arrow
     }
 }
 

@@ -81,7 +81,10 @@ fn play_frame(w: u32, h: u32) -> (PreparedPlay3DFrame, std::collections::HashMap
         // engine). Moved in the TREE, before the frame is prepared, so
         // billboards face it too.
         if let Ok(pose) = std::env::var("PATINA_PLATFORMER_CAMERA") {
-            let v: Vec<f32> = pose.split_whitespace().map(|x| x.parse().unwrap()).collect();
+            let v: Vec<f32> = pose
+                .split_whitespace()
+                .map(|x| x.parse().unwrap())
+                .collect();
             let eye = gdcore::math::Vector3::new(v[0], v[1], v[2]);
             let target = gdcore::math::Vector3::new(v[3], v[4], v[5]);
             let basis = gdcore::math3d::Basis::looking_at(
@@ -145,11 +148,8 @@ fn maybe_dump(prepared: &PreparedPlay3DFrame) {
         return;
     };
     let img = prepared.render();
-    let mut fb = gdrender2d::renderer::FrameBuffer::new(
-        img.width,
-        img.height,
-        gdcore::math::Color::BLACK,
-    );
+    let mut fb =
+        gdrender2d::renderer::FrameBuffer::new(img.width, img.height, gdcore::math::Color::BLACK);
     for (i, px) in img.data.chunks_exact(4).enumerate() {
         fb.pixels[i] = gdcore::math::Color::new(
             px[2] as f32 / 255.0,
@@ -189,7 +189,9 @@ fn level_tiles_carry_their_array_mesh_surface_material() {
     );
     let tile_meshes: Vec<&Render3DItem> = items
         .iter()
-        .filter(|i| matches!(&i.kind, Render3DKind::Mesh { path } if path.contains("stage/meshes/")))
+        .filter(
+            |i| matches!(&i.kind, Render3DKind::Mesh { path } if path.contains("stage/meshes/")),
+        )
         .collect();
     let untextured: Vec<String> = tile_meshes
         .iter()
@@ -242,7 +244,10 @@ fn play_uses_the_inline_world_environment_and_its_cubemap_sky() {
         panic!("game.tscn has a current Camera3D");
     };
     let env = &vp.environment.environment;
-    assert!(vp.environment.authored, "the scene's environment, not the preview");
+    assert!(
+        vp.environment.authored,
+        "the scene's environment, not the preview"
+    );
     assert_eq!(env.background_mode, BackgroundMode::Sky);
     assert_eq!(env.tone_mapper, ToneMapper::Agx, "tonemap_mode = 4");
     assert!(env.fog_enabled);
@@ -270,9 +275,15 @@ fn play_uses_the_inline_world_environment_and_its_cubemap_sky() {
         (up.r - face_centre.r).abs() < 0.02 && (up.b - face_centre.b).abs() < 0.02,
         "sky() up = {up:?}, +Y face centre = {face_centre:?}"
     );
-    assert!(up.b > 0.05 && up.b > up.r, "the zenith of this sky is blue, got {up:?}");
+    assert!(
+        up.b > 0.05 && up.b > up.r,
+        "the zenith of this sky is blue, got {up:?}"
+    );
     // The GPU sky pass samples the CPU bake.
-    let baked = mat.baked.as_ref().expect("baked panorama for the GPU sky pass");
+    let baked = mat
+        .baked
+        .as_ref()
+        .expect("baked panorama for the GPU sky pass");
     assert_eq!((baked.width, baked.height), (1024, 512));
 }
 
@@ -308,7 +319,10 @@ fn the_coin_glow_is_an_additive_billboard_with_its_gradient_texture() {
     assert_eq!(mat.blend_mode, BlendMode::Add);
     assert_eq!(mat.transparency, Transparency::Alpha);
     assert_eq!(mat.shading_mode, ShadingMode::Unlit);
-    let tex = mat.albedo_texture.as_ref().expect("GradientTexture2D albedo");
+    let tex = mat
+        .albedo_texture
+        .as_ref()
+        .expect("GradientTexture2D albedo");
     assert_eq!((tex.width, tex.height), (64, 64));
     let at = |x: u32, y: u32| tex.pixels[(y * tex.width + x) as usize];
     assert!(at(32, 32).a > 0.95, "opaque centre: {:?}", at(32, 32));
@@ -326,7 +340,12 @@ fn the_coin_glow_is_an_additive_billboard_with_its_gradient_texture() {
 
     // The one-shot CPUParticles3D burst is not emitting: Godot draws nothing.
     assert!(
-        items_at(&inputs.items, &paths, "/root/Game/Coins/Coin1/CPUParticles3D").is_empty(),
+        items_at(
+            &inputs.items,
+            &paths,
+            "/root/Game/Coins/Coin1/CPUParticles3D"
+        )
+        .is_empty(),
         "a non-emitting particle system must not draw its draw-pass mesh"
     );
 }
@@ -412,7 +431,10 @@ fn level_tiles_sample_nearest_and_clamped_as_their_material_authors() {
     let floors = mesh_items(&inputs.items, "stage/meshes/floor.res");
     assert!(!floors.is_empty(), "floor tiles in the render list");
     let mat = floors[0].material.as_ref().expect("tile material");
-    assert_eq!(mat.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+    assert_eq!(
+        mat.texture_filter,
+        TextureFilter::NearestWithMipmapsAnisotropic
+    );
     assert!(!mat.texture_repeat, "texture_repeat = false");
 
     #[cfg(feature = "gpu-render")]
@@ -420,7 +442,10 @@ fn level_tiles_sample_nearest_and_clamped_as_their_material_authors() {
         use gdrender3d::wgpu::{AddressMode, FilterMode, MipmapFilterMode};
         use gdrender3d::wgpu_pipeline::{material_sampler_descriptor, MaterialSamplerKey};
         let d = material_sampler_descriptor(MaterialSamplerKey::of(mat));
-        assert_eq!((d.mag_filter, d.min_filter), (FilterMode::Nearest, FilterMode::Nearest));
+        assert_eq!(
+            (d.mag_filter, d.min_filter),
+            (FilterMode::Nearest, FilterMode::Nearest)
+        );
         assert_eq!(d.mipmap_filter, MipmapFilterMode::Linear);
         assert_eq!(d.address_mode_u, AddressMode::ClampToEdge);
         // CONTROL: a material that authors nothing keeps Godot's default
@@ -429,7 +454,10 @@ fn level_tiles_sample_nearest_and_clamped_as_their_material_authors() {
         let def = material_sampler_descriptor(MaterialSamplerKey::of(
             &gdserver3d::material::Material3D::default(),
         ));
-        assert_eq!((def.mag_filter, def.min_filter), (FilterMode::Linear, FilterMode::Linear));
+        assert_eq!(
+            (def.mag_filter, def.min_filter),
+            (FilterMode::Linear, FilterMode::Linear)
+        );
         assert_eq!(def.address_mode_u, AddressMode::Repeat);
     }
 }
@@ -450,10 +478,18 @@ fn the_coin_counter_label_is_alpha_blended_text_with_a_thin_outline() {
     let Play3DScene::Camera { inputs, .. } = &prepared.scene else {
         panic!("game.tscn has a current Camera3D");
     };
-    let label = items_at(&inputs.items, &paths, "/root/Game/Player/Player/Skeleton/CoinCount");
+    let label = items_at(
+        &inputs.items,
+        &paths,
+        "/root/Game/Player/Player/Skeleton/CoinCount",
+    );
     assert_eq!(label.len(), 1, "CoinCount in the render list");
     let mat = label[0].material.as_ref().expect("label material");
-    assert_eq!(mat.transparency, Transparency::Alpha, "alpha_cut DISABLED = alpha blending");
+    assert_eq!(
+        mat.transparency,
+        Transparency::Alpha,
+        "alpha_cut DISABLED = alpha blending"
+    );
     assert!(mat.no_depth_test, "player.tscn sets no_depth_test = true");
 
     let tex = mat.albedo_texture.as_ref().expect("label text texture");
@@ -467,7 +503,10 @@ fn the_coin_counter_label_is_alpha_blended_text_with_a_thin_outline() {
     assert!(glyph > 0, "the digit draws in its modulate colour");
     // Godot: stroke radius = outline_size / 4 font px = 3 px at 48 pt, i.e.
     // 3 * 42/48 = 2.6 -> 3 texels of this 42-texel-tall glyph.
-    assert_eq!(gdeditor::sprite3d_render::label3d_outline_texels(12, 48, 6), 3);
+    assert_eq!(
+        gdeditor::sprite3d_render::label3d_outline_texels(12, 48, 6),
+        3
+    );
     // Since pat-3ljz4 the digit is the real TTF face (one texel per font px),
     // so the clear margin around and inside the "0" is most of the quad.
     assert!(

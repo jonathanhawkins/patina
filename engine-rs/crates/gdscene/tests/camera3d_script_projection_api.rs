@@ -101,9 +101,7 @@ fn vec2_of(got: &Variant, what: &str) -> Vector2 {
 fn vec3_of(got: &Variant, what: &str) -> Vector3 {
     match got {
         Variant::Vector3(v) => *v,
-        Variant::Nil => panic!(
-            "{what}: got Nil — registered in ClassDB but never dispatched."
-        ),
+        Variant::Nil => panic!("{what}: got Nil — registered in ClassDB but never dispatched."),
         other => panic!("{what}: expected a Vector3, got {other:?}"),
     }
 }
@@ -181,14 +179,20 @@ func _ready():
     // planes: the centre of the frustum is the centre whatever its shape, so
     // this assertion isolates the WIRING from the projection maths.
     near_vec2(
-        vec2_of(&script_var(ml.tree(), scene_root, "screen"), "unproject_position"),
+        vec2_of(
+            &script_var(ml.tree(), scene_root, "screen"),
+            "unproject_position",
+        ),
         Vector2::new(VIEW_W as f32 / 2.0, VIEW_H as f32 / 2.0),
         0.5,
         "unproject_position(Vector3(0, 0, -5))",
     );
 
     // -- (b) the ray through the screen centre points straight ahead --------
-    let ray = vec3_of(&script_var(ml.tree(), scene_root, "ray"), "project_ray_normal");
+    let ray = vec3_of(
+        &script_var(ml.tree(), scene_root, "ray"),
+        "project_ray_normal",
+    );
     assert!(
         (ray - Vector3::new(0.0, 0.0, -1.0)).length() < 1e-3,
         "project_ray_normal(Vector2(320, 240)) must be about (0, 0, -1), got {ray:?}",

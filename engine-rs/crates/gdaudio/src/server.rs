@@ -1127,14 +1127,18 @@ bus/2/send = "Master"
         server.play(make_ramp_buffer(64, 22050));
 
         let out = server.mix(8); // stereo interleaved
-        // The resampler is Godot's 4-point cubic Hermite, which reproduces a
-        // straight line exactly — except at the very start, where the frame
-        // before frame 0 is silence (Godot seeds `CUBIC_INTERP_HISTORY` zeros,
-        // servers/audio/audio_stream.cpp), so frame 1 (cursor 0.5) bends to
-        // Hermite(0, 0, 1, 2; 0.5) = 0.4375 rather than the lerp's 0.5.
+                                 // The resampler is Godot's 4-point cubic Hermite, which reproduces a
+                                 // straight line exactly — except at the very start, where the frame
+                                 // before frame 0 is silence (Godot seeds `CUBIC_INTERP_HISTORY` zeros,
+                                 // servers/audio/audio_stream.cpp), so frame 1 (cursor 0.5) bends to
+                                 // Hermite(0, 0, 1, 2; 0.5) = 0.4375 rather than the lerp's 0.5.
         for frame in 0..8 {
             let got = out[frame * 2];
-            let expected = if frame == 1 { 0.4375 } else { 0.5 * frame as f32 };
+            let expected = if frame == 1 {
+                0.4375
+            } else {
+                0.5 * frame as f32
+            };
             assert!(
                 (got - expected).abs() < 1e-4,
                 "frame {frame}: got {got}, want {expected}"

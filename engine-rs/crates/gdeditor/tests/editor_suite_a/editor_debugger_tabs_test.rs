@@ -19,7 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -81,20 +85,20 @@ fn debugger_stack_trace_tab_has_toolbar_and_panes() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"debug-headrow\"",       // Godot: Thread + Filter + toolbar on ONE row
-        "id=\"debug-btn-skip-bp\"",   // Skip Breakpoints
+        "id=\"debug-headrow\"",     // Godot: Thread + Filter + toolbar on ONE row
+        "id=\"debug-btn-skip-bp\"", // Skip Breakpoints
         "id=\"debug-btn-ignore-errors\"", // Ignore Error Breaks (Godot has this too)
-        "id=\"debug-btn-copy-error\"",// Copy Error
-        "id=\"debug-btn-step-in\"",   // Step Into
+        "id=\"debug-btn-copy-error\"", // Copy Error
+        "id=\"debug-btn-step-in\"", // Step Into
         "id=\"debug-btn-step-over\"", // Step Over
-        "id=\"debug-btn-step-out\"",  // Step Out
-        "id=\"debug-btn-break\"",     // Break
-        "id=\"debug-btn-continue\"",  // Continue
-        "id=\"debug-thread\"",                 // Thread: dropdown
+        "id=\"debug-btn-step-out\"", // Step Out
+        "id=\"debug-btn-break\"",   // Break
+        "id=\"debug-btn-continue\"", // Continue
+        "id=\"debug-thread\"",      // Thread: dropdown
         "placeholder=\"Filter Stack Variables\"", // stack variables filter
-        "id=\"debug-stack-frames\"",   // Stack Frames
+        "id=\"debug-stack-frames\"", // Stack Frames
         "id=\"debug-breakpoints-list\"", // Breakpoints
-        "id=\"debugger-expand\"",      // Expand Bottom Panel icon (sub-tab row right)
+        "id=\"debugger-expand\"",   // Expand Bottom Panel icon (sub-tab row right)
         "function setupDebuggerSubtabs", // wired
         "setupDebuggerSubtabs()",
     ] {
@@ -111,7 +115,8 @@ fn debugger_stack_trace_tab_has_toolbar_and_panes() {
     );
     // ...but their content (canvases) still exists, inside the debugger.
     assert!(
-        html.contains("id=\"profiler-graph-canvas\"") && html.contains("id=\"monitor-graph-canvas\""),
+        html.contains("id=\"profiler-graph-canvas\"")
+            && html.contains("id=\"monitor-graph-canvas\""),
         "Monitors/Profiler canvases must still be served (relocated into the debugger)"
     );
     handle.stop();

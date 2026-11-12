@@ -95,8 +95,7 @@ fn project_settings_physics_honored() {
     for _ in 0..30 {
         control.step(dt);
     }
-    let fell_980 =
-        gdscene::node2d::get_position(control.tree(), control_faller).y - control_start;
+    let fell_980 = gdscene::node2d::get_position(control.tree(), control_faller).y - control_start;
 
     assert!(fell_980 > 0.0, "control (980) should also fall");
     assert!(

@@ -19,17 +19,27 @@ fn anim_name(v: &Variant) -> String {
 #[test]
 fn play_without_a_name_advances_the_scene_authored_stringname_animation() {
     gdobject::class_db::register_all_classes();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/dodge_the_creeps");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../games/dodge_the_creeps");
     gdcore::file_access::set_path_roots(Some(dir.clone()), None);
-    let tscn = std::fs::read_to_string(dir.join("player.tscn")).expect("Dodge the Creeps player.tscn");
-    assert!(tscn.contains("animation = &\"right\""), "fixture authors a StringName animation");
+    let tscn =
+        std::fs::read_to_string(dir.join("player.tscn")).expect("Dodge the Creeps player.tscn");
+    assert!(
+        tscn.contains("animation = &\"right\""),
+        "fixture authors a StringName animation"
+    );
     let packed = gdscene::packed_scene::PackedScene::from_tscn(&tscn).unwrap();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     gdscene::packed_scene::add_packed_scene_to_tree_from_res(&mut tree, root, &packed).unwrap();
-    let spr = tree.get_node_by_path("/root/Player/AnimatedSprite2D").expect("sprite");
+    let spr = tree
+        .get_node_by_path("/root/Player/AnimatedSprite2D")
+        .expect("sprite");
     let src = "extends AnimatedSprite2D\nfunc _ready():\n\tplay()\n";
-    tree.attach_script(spr, Box::new(GDScriptNodeInstance::from_source(src, spr).unwrap()));
+    tree.attach_script(
+        spr,
+        Box::new(GDScriptNodeInstance::from_source(src, spr).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, spr);
 
     assert_eq!(
@@ -42,7 +52,11 @@ fn play_without_a_name_advances_the_scene_authored_stringname_animation() {
     for _ in 0..15 {
         ml.step(1.0 / 60.0);
     }
-    assert_eq!(ml.tree().get_node(spr).unwrap().get_property("frame"), Variant::Int(1), "the clip must advance");
+    assert_eq!(
+        ml.tree().get_node(spr).unwrap().get_property("frame"),
+        Variant::Int(1),
+        "the clip must advance"
+    );
 }
 
 /// Calling `play()` every frame on the clip that is already running keeps the
@@ -51,15 +65,24 @@ fn play_without_a_name_advances_the_scene_authored_stringname_animation() {
 #[test]
 fn play_every_frame_on_the_running_clip_keeps_advancing() {
     gdobject::class_db::register_all_classes();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/dodge_the_creeps");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../games/dodge_the_creeps");
     gdcore::file_access::set_path_roots(Some(dir.clone()), None);
-    let packed = gdscene::packed_scene::PackedScene::from_tscn(&std::fs::read_to_string(dir.join("player.tscn")).unwrap()).unwrap();
+    let packed = gdscene::packed_scene::PackedScene::from_tscn(
+        &std::fs::read_to_string(dir.join("player.tscn")).unwrap(),
+    )
+    .unwrap();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     gdscene::packed_scene::add_packed_scene_to_tree_from_res(&mut tree, root, &packed).unwrap();
-    let spr = tree.get_node_by_path("/root/Player/AnimatedSprite2D").unwrap();
+    let spr = tree
+        .get_node_by_path("/root/Player/AnimatedSprite2D")
+        .unwrap();
     let src = "extends AnimatedSprite2D\nfunc _process(_d):\n\tplay()\n\tanimation = &\"right\"\n";
-    tree.attach_script(spr, Box::new(GDScriptNodeInstance::from_source(src, spr).unwrap()));
+    tree.attach_script(
+        spr,
+        Box::new(GDScriptNodeInstance::from_source(src, spr).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, spr);
     let mut ml = gdscene::main_loop::MainLoop::new(tree);
     let mut seen = std::collections::BTreeSet::new();
@@ -69,5 +92,8 @@ fn play_every_frame_on_the_running_clip_keeps_advancing() {
             seen.insert(f);
         }
     }
-    assert!(seen.contains(&1), "re-calling play() each frame must not pin frame 0: saw {seen:?}");
+    assert!(
+        seen.contains(&1),
+        "re-calling play() each frame must not pin frame 0: saw {seen:?}"
+    );
 }

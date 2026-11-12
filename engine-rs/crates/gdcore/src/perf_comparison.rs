@@ -264,7 +264,7 @@ impl ComparisonReport {
         if self.benchmarks.is_empty() {
             return OverallVerdict::NoData;
         }
-        let (faster, comparable, slower) = self.verdict_counts();
+        let (faster, _comparable, slower) = self.verdict_counts();
         if slower == 0 && faster > 0 {
             OverallVerdict::PatinaWins
         } else if slower == 0 {

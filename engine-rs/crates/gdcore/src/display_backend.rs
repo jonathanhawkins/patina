@@ -28,24 +28,43 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// `DisplayServer.Feature` values, from `doc/classes/DisplayServer.xml`.
 /// Only the ones a backend is likely to answer are named here.
 pub mod feature {
+    /// Application-wide (global) menus, e.g. the macOS menu bar.
     pub const GLOBAL_MENU: i64 = 0;
+    /// Native subwindows; without it popups are embedded in the main window.
     pub const SUBWINDOWS: i64 = 1;
+    /// Touchscreen input.
     pub const TOUCHSCREEN: i64 = 2;
+    /// Mouse input.
     pub const MOUSE: i64 = 3;
+    /// Warping the mouse cursor to a position.
     pub const MOUSE_WARP: i64 = 4;
+    /// Reading and writing the system clipboard.
     pub const CLIPBOARD: i64 = 5;
+    /// An on-screen virtual keyboard.
     pub const VIRTUAL_KEYBOARD: i64 = 6;
+    /// Setting the mouse cursor shape.
     pub const CURSOR_SHAPE: i64 = 7;
+    /// Custom images as the mouse cursor.
     pub const CUSTOM_CURSOR_SHAPE: i64 = 8;
+    /// Native dialog boxes.
     pub const NATIVE_DIALOG: i64 = 9;
+    /// Input Method Editor for composed text input.
     pub const IME: i64 = 10;
+    /// Per-pixel transparent windows.
     pub const WINDOW_TRANSPARENCY: i64 = 11;
+    /// Hi-DPI (scaled) displays.
     pub const HIDPI: i64 = 12;
+    /// Setting the window icon from an image.
     pub const ICON: i64 = 13;
+    /// Setting the window icon from a native icon file.
     pub const NATIVE_ICON: i64 = 14;
+    /// Changing screen orientation.
     pub const ORIENTATION: i64 = 15;
+    /// Explicit control of buffer swapping.
     pub const SWAP_BUFFERS: i64 = 16;
+    /// The X11/Wayland primary-selection clipboard.
     pub const CLIPBOARD_PRIMARY: i64 = 18;
+    /// Text-to-speech synthesis.
     pub const TEXT_TO_SPEECH: i64 = 19;
 }
 
@@ -65,36 +84,46 @@ pub trait DisplayBackend: Send + Sync {
         self.window_size()
     }
 
+    /// Screen dots per inch; defaults to 96.
     fn screen_dpi(&self) -> i64 {
         96
     }
 
+    /// Screen scale factor (device pixel ratio); defaults to 1.0.
     fn screen_scale(&self) -> f64 {
         1.0
     }
 
+    /// Number of connected screens; defaults to 1.
     fn screen_count(&self) -> i64 {
         1
     }
 
+    /// Current clipboard text; defaults to empty.
     fn clipboard_get(&self) -> String {
         String::new()
     }
 
+    /// Replaces the clipboard text; a no-op by default.
     fn clipboard_set(&self, _text: &str) {}
 
+    /// Whether the clipboard holds text.
     fn clipboard_has(&self) -> bool {
         !self.clipboard_get().is_empty()
     }
 
+    /// Queues an utterance for text-to-speech; a no-op by default.
     fn tts_speak(&self, _text: &str) {}
 
+    /// Stops speech and clears the TTS queue; a no-op by default.
     fn tts_stop(&self) {}
 
+    /// Names of the available TTS voices; defaults to none.
     fn tts_voices(&self) -> Vec<String> {
         Vec::new()
     }
 
+    /// Whether text-to-speech is currently speaking.
     fn tts_is_speaking(&self) -> bool {
         false
     }

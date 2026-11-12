@@ -9,21 +9,21 @@
 //! without updating this test and the spec, the build will fail.
 
 use gdeditor::editor_compat::{
-    // Type aliases
-    EditorInspector,
-    EditorInspectorPluginManager,
-    EditorProperty,
-    EditorUndoRedoManager,
-    // Enum
-    PropertyUsageFlags,
-    // Structs
-    EditorInterfaceCompat,
-    EditorPropertyInfo,
-    EditorSelection,
-    UndoRedoCompat,
     // Free functions
     get_property_category,
     validate_property_value,
+    // Type aliases
+    EditorInspector,
+    EditorInspectorPluginManager,
+    // Structs
+    EditorInterfaceCompat,
+    EditorProperty,
+    EditorPropertyInfo,
+    EditorSelection,
+    EditorUndoRedoManager,
+    // Enum
+    PropertyUsageFlags,
+    UndoRedoCompat,
 };
 use gdeditor::editor_interface::EditorInterface;
 use gdeditor::{Editor, EditorCommand};
@@ -276,18 +276,42 @@ fn surface_editor_interface_plugin() {
 fn surface_classdb_editor_plugin() {
     gdobject::class_db::register_editor_classes();
     assert!(gdobject::class_db::class_exists("EditorPlugin"));
-    assert!(gdobject::class_db::class_has_method("EditorPlugin", "get_editor_interface"));
-    assert!(gdobject::class_db::class_has_method("EditorPlugin", "add_control_to_dock"));
-    assert!(gdobject::class_db::class_has_method("EditorPlugin", "add_custom_type"));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorPlugin",
+        "get_editor_interface"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorPlugin",
+        "add_control_to_dock"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorPlugin",
+        "add_custom_type"
+    ));
 }
 
 #[test]
 fn surface_classdb_editor_interface() {
     gdobject::class_db::register_editor_classes();
     assert!(gdobject::class_db::class_exists("EditorInterface"));
-    assert!(gdobject::class_db::class_has_method("EditorInterface", "get_editor_settings"));
-    assert!(gdobject::class_db::class_has_method("EditorInterface", "get_selection"));
-    assert!(gdobject::class_db::class_has_method("EditorInterface", "get_inspector"));
-    assert!(gdobject::class_db::class_has_method("EditorInterface", "open_scene_from_path"));
-    assert!(gdobject::class_db::class_has_method("EditorInterface", "save_scene"));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorInterface",
+        "get_editor_settings"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorInterface",
+        "get_selection"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorInterface",
+        "get_inspector"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorInterface",
+        "open_scene_from_path"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "EditorInterface",
+        "save_scene"
+    ));
 }

@@ -200,11 +200,8 @@ impl Viewport3D {
                 {
                     return Vec::new();
                 }
-                let material = gdscene::render_server_3d::material3d_for_node(
-                    tree,
-                    nid,
-                    material_textures,
-                );
+                let material =
+                    gdscene::render_server_3d::material3d_for_node(tree, nid, material_textures);
                 // Same reason as `material`: read the GeometryInstance3D block
                 // while the tree is still in scope (pat-nzgdu.76).
                 let geometry =
@@ -418,12 +415,9 @@ impl Viewport3D {
                     cam_basis.y,
                 ) {
                     base.global_transform.basis = basis;
-                } else if let Some(basis) = material_billboard_basis(
-                    tree,
-                    nid,
-                    base.global_transform.basis,
-                    cam_basis,
-                ) {
+                } else if let Some(basis) =
+                    material_billboard_basis(tree, nid, base.global_transform.basis, cam_basis)
+                {
                     base.global_transform.basis = basis;
                 }
                 if is_gridmap {
@@ -524,7 +518,11 @@ fn material_billboard_basis(
         gdvariant::Variant::Bool(true)
     );
     let (sx, sy, sz) = if keep_scale {
-        (node_basis.x.length(), node_basis.y.length(), node_basis.z.length())
+        (
+            node_basis.x.length(),
+            node_basis.y.length(),
+            node_basis.z.length(),
+        )
     } else {
         (1.0, 1.0, 1.0)
     };
@@ -576,7 +574,10 @@ fn fill_mesh_file_materials(
     let Some(node) = tree.get_node(nid) else {
         return;
     };
-    if !matches!(node.get_property("material_override"), gdvariant::Variant::Nil) {
+    if !matches!(
+        node.get_property("material_override"),
+        gdvariant::Variant::Nil
+    ) {
         return;
     }
     // A glTF mesh — skinned ones arrive as deformed `Geometry` — draws with the
@@ -637,7 +638,10 @@ fn fill_mesh_file_materials(
 fn cached_mesh_library(path: &str) -> Option<gdscene::grid_map::MeshLibrary> {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    type Entry = (Option<std::time::SystemTime>, gdscene::grid_map::MeshLibrary);
+    type Entry = (
+        Option<std::time::SystemTime>,
+        gdscene::grid_map::MeshLibrary,
+    );
     thread_local! {
         static LIBRARIES: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
     }
@@ -878,8 +882,9 @@ fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> Strin
         // (pat-i4jgd).
         let lower = path.to_ascii_lowercase();
         if (lower.ends_with(".gltf") || lower.ends_with(".glb")) && !path.contains('?') {
-            if let Some(gdvariant::Variant::Int(i)) =
-                tree.get_node(nid).map(|n| n.get_property("gltf_mesh_index"))
+            if let Some(gdvariant::Variant::Int(i)) = tree
+                .get_node(nid)
+                .map(|n| n.get_property("gltf_mesh_index"))
             {
                 return format!("{path}?gltf_mesh={i}");
             }
@@ -1032,9 +1037,7 @@ fn mesh_from_file(marker: &str) -> Option<Mesh3D> {
         // Parsed once per file (pat-ujiku): this runs for every mesh node on
         // every frame, under the editor-state lock.
         let resource = gdscene::render_server_3d::import_gltf_cached(path)?;
-        return gdscene::render_server_3d::mesh3d_from_gltf_resource_for_mesh(
-            &resource, gltf_mesh,
-        );
+        return gdscene::render_server_3d::mesh3d_from_gltf_resource_for_mesh(&resource, gltf_mesh);
     }
 
     // pat-33wmr: a saved ArrayMesh — every GridMap tile of a real Godot
@@ -1589,9 +1592,10 @@ const COLLISION_COLOR_3D: Color = Color {
 };
 
 fn solid_material_3d(albedo: Color) -> Material3D {
-    let mut m = Material3D::default();
-    m.albedo = albedo;
-    m
+    Material3D {
+        albedo,
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2074,6 +2078,7 @@ fn draw_rotate_gizmo(fb: &mut impl Raster, viewport: &Viewport3D, center: Vector
     let view = viewport.camera.view_transform();
     const SEGMENTS: usize = 48;
     // (color, function mapping an angle to a ring point offset from center)
+    #[allow(clippy::type_complexity)]
     let rings: [(Color, fn(f32, f32) -> Vector3); 3] = [
         (X_AXIS_COLOR_3D, |a, r| {
             Vector3::new(0.0, r * a.cos(), r * a.sin())
@@ -2584,8 +2589,13 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
         // One ClassDB walk for the five questions (this loop visits every
         // node of every Play frame). `is_class` is "the node's own class name,
         // or a ClassDB ancestor", and so is this.
-        const KINDS: [&str; 5] =
-            ["FogVolume", "Decal", "ReflectionProbe", "OccluderInstance3D", "VoxelGI"];
+        const KINDS: [&str; 5] = [
+            "FogVolume",
+            "Decal",
+            "ReflectionProbe",
+            "OccluderInstance3D",
+            "VoxelGI",
+        ];
         let mut mask = gdobject::class_db::parent_class_mask(node.class_name(), &KINDS);
         for (i, k) in KINDS.iter().enumerate() {
             if node.class_name() == *k {
@@ -3551,7 +3561,12 @@ fn captured_reflection_probes(
             let mut key = probe.clone();
             key.captured = None;
             let hit = (probe.update_mode == ReflectionProbeUpdateMode::Once)
-                .then(|| cache.iter().find(|(k, _)| *k == key).map(|(_, c)| c.clone()))
+                .then(|| {
+                    cache
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, c)| c.clone())
+                })
                 .flatten();
             match hit {
                 Some(cube) => probe.captured = Some(cube),
@@ -3566,7 +3581,8 @@ fn captured_reflection_probes(
         fx.reflection_probes = probes.clone();
         populate_editor_scene_3d(&mut sw, viewport, &inputs.items, &fx, None);
         setup_editor_lighting_3d(&mut sw, viewport, &inputs.scene_lights);
-        let mut rv = editor_render_viewport(viewport, viewport.width.max(1), viewport.height.max(1));
+        let mut rv =
+            editor_render_viewport(viewport, viewport.width.max(1), viewport.height.max(1));
         rv.environment = Some(editor_render_environment(viewport));
         sw.capture_reflection_probes(&rv, REFLECTION_PROBE_CAPTURE_RESOLUTION);
         for probe in probes.iter_mut() {
@@ -3574,7 +3590,8 @@ fn captured_reflection_probes(
                 continue;
             };
             if let Some(cube) = done.captured.clone() {
-                if probe.captured.is_none() && probe.update_mode == ReflectionProbeUpdateMode::Once {
+                if probe.captured.is_none() && probe.update_mode == ReflectionProbeUpdateMode::Once
+                {
                     let mut key = probe.clone();
                     key.captured = None;
                     cache.retain(|(k, _)| k.id != key.id);
@@ -3669,13 +3686,14 @@ pub fn render_editor_3d_frame_gpu(
     // Storage value during or after destruction" (pat-p3p1m: every test thread
     // that rendered a frame through here died at exit). The editor renders on
     // its main thread for the process's whole life, so nothing is lost.
+    #[allow(clippy::large_enum_variant)]
     enum GpuSlot {
         Uninit,
         Failed,
         Ready(std::mem::ManuallyDrop<GpuRenderer3D>),
     }
     thread_local! {
-        static GPU: RefCell<GpuSlot> = RefCell::new(GpuSlot::Uninit);
+        static GPU: RefCell<GpuSlot> = const { RefCell::new(GpuSlot::Uninit) };
     }
 
     let width = viewport.width.max(1);

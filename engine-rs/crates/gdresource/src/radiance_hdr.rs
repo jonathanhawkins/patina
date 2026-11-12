@@ -70,6 +70,7 @@ fn read_scanline(data: &[u8], pos: &mut usize, width: usize, out: &mut [[u8; 4]]
     if new_rle {
         *pos += 4;
         // Each of the 4 channels (R, G, B, E) is RLE-encoded across the row.
+        #[allow(clippy::needless_range_loop)] // `ch` is a column index into `out[x]`
         for ch in 0..4 {
             let mut x = 0;
             while x < width {

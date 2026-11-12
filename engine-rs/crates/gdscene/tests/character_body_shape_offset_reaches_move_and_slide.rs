@@ -37,7 +37,10 @@ fn a_character_rests_with_its_offset_shape_on_the_floor() {
     tree.add_child(body_id, cs).unwrap();
     let src = "extends CharacterBody2D\nfunc _physics_process(delta):\n\
 \tvelocity += get_gravity() * delta\n\tmove_and_slide()\n";
-    tree.attach_script(body_id, Box::new(GDScriptNodeInstance::from_source(src, body_id).unwrap()));
+    tree.attach_script(
+        body_id,
+        Box::new(GDScriptNodeInstance::from_source(src, body_id).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, body_id);
 
     let mut ml = MainLoop::new(tree);
@@ -46,7 +49,12 @@ fn a_character_rests_with_its_offset_shape_on_the_floor() {
     for _ in 0..120 {
         ml.step(1.0 / 60.0);
     }
-    let y = match ml.tree().get_node(body_id).unwrap().get_property("position") {
+    let y = match ml
+        .tree()
+        .get_node(body_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v.y,
         other => panic!("{other:?}"),
     };

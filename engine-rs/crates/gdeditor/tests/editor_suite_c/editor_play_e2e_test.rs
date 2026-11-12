@@ -112,7 +112,10 @@ fn editor_play_launches_scene_game_view() {
     assert!(play.contains("200 OK"), "play ok: {play}");
     let play_body: serde_json::Value =
         serde_json::from_str(extract_body(&play)).unwrap_or_else(|e| panic!("play json: {e}"));
-    assert_eq!(play_body["running"], true, "play reports running: {play_body}");
+    assert_eq!(
+        play_body["running"], true,
+        "play reports running: {play_body}"
+    );
 
     // The runtime is actually running the scene.
     let status = http_get(port, "/api/runtime/status");

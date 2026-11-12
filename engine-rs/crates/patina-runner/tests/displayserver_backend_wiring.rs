@@ -110,9 +110,7 @@ fn displayserver_backend_wiring() {
 
     // ⚠️ The window size the SCRIPT saw comes from `project.godot`, not from the
     // interpreter's old hardcoded 1920x1080.
-    let main = tree
-        .get_node_by_path("/root/Main")
-        .expect("Main instanced");
+    let main = tree.get_node_by_path("/root/Main").expect("Main instanced");
     let node = tree.get_node(main).expect("main node");
 
     match node.get_property("win_size") {
@@ -159,11 +157,13 @@ fn window_size_comes_from_project_godot_not_the_default() {
 
     let boot = boot(&dir);
     let tree = boot.main_loop().expect("main loop built").tree();
-    let main = tree
-        .get_node_by_path("/root/Main")
-        .expect("Main instanced");
+    let main = tree.get_node_by_path("/root/Main").expect("Main instanced");
 
-    match tree.get_node(main).expect("main node").get_property("win_size") {
+    match tree
+        .get_node(main)
+        .expect("main node")
+        .get_property("win_size")
+    {
         Variant::Vector2(v) => assert!(
             (v.x - 1280.0).abs() < 0.5 && (v.y - 720.0).abs() < 0.5,
             "window size must come from project.godot (1280,720), got {v:?}"

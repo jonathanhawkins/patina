@@ -10,10 +10,11 @@
 
 use std::fs;
 
-const COMPAT_MATRIX_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
-const AUDIT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../prd/PHASE9_HARDENING_AUDIT.md");
+const COMPAT_MATRIX_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
+const AUDIT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../prd/PHASE9_HARDENING_AUDIT.md"
+);
 
 fn read_compat_matrix() -> String {
     fs::read_to_string(COMPAT_MATRIX_PATH)
@@ -86,7 +87,12 @@ fn hardening_rows_use_approved_classifications() {
     let matrix = read_compat_matrix();
     let section = hardening_section(&matrix);
 
-    let approved = ["Measured", "Implemented, not yet measured", "Deferred", "Missing"];
+    let approved = [
+        "Measured",
+        "Implemented, not yet measured",
+        "Deferred",
+        "Missing",
+    ];
 
     let rows: Vec<&str> = section
         .lines()
@@ -105,7 +111,11 @@ fn hardening_rows_use_approved_classifications() {
     );
 
     for row in &rows {
-        let cols: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+        let cols: Vec<&str> = row
+            .split('|')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
         if cols.len() >= 2 {
             let classification = cols[1];
             assert!(
@@ -139,7 +149,10 @@ fn measured_hardening_rows_cite_test_files() {
         })
         .collect();
 
-    assert!(!measured_rows.is_empty(), "must have Measured hardening rows");
+    assert!(
+        !measured_rows.is_empty(),
+        "must have Measured hardening rows"
+    );
 
     for row in &measured_rows {
         assert!(
@@ -195,7 +208,12 @@ fn audit_uses_approved_status_labels() {
     let audit = read_audit();
 
     // At least one of the approved statuses must appear
-    let approved = ["Measured", "Implemented, not yet measured", "Deferred", "Missing"];
+    let approved = [
+        "Measured",
+        "Implemented, not yet measured",
+        "Deferred",
+        "Missing",
+    ];
     let found = approved.iter().filter(|s| audit.contains(**s)).count();
     assert!(
         found >= 2,

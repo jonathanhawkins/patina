@@ -24,14 +24,19 @@
 //! test) and editor Play's tree (`build_play_tree`), presses the Mini Van the way
 //! its `pressed` connection does, and steps frames until the town is in.
 
-use gdeditor::editor_server::{apply_project_path_roots, build_play_tree, load_launch_scene, EditorState};
+use gdeditor::editor_server::{
+    apply_project_path_roots, build_play_tree, load_launch_scene, EditorState,
+};
 use gdscene::MainLoop;
 use gdvariant::Variant;
 use std::path::Path;
 
 #[test]
 fn picking_a_car_loads_the_town_in_editor_play() {
-    let game = Path::new(env!("CARGO_MANIFEST_DIR")).join("../games/truck_town").canonicalize().unwrap();
+    let game = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../games/truck_town")
+        .canonicalize()
+        .unwrap();
     let root = game.to_string_lossy().to_string();
     apply_project_path_roots(&root);
     let scene = game.join("car_select/car_select.tscn");
@@ -47,8 +52,12 @@ fn picking_a_car_loads_the_town_in_editor_play() {
     ml.step(1.0 / 60.0);
     let _ = ml.tree_mut().drain_script_errors();
 
-    let car_select = ml.tree().get_node_by_path("/root/CarSelect").expect("/root/CarSelect");
-    ml.tree_mut().call_script_method(car_select, "_on_mini_van_pressed", &[]);
+    let car_select = ml
+        .tree()
+        .get_node_by_path("/root/CarSelect")
+        .expect("/root/CarSelect");
+    ml.tree_mut()
+        .call_script_method(car_select, "_on_mini_van_pressed", &[]);
     for _ in 0..10 {
         ml.step(1.0 / 60.0);
     }
@@ -62,14 +71,22 @@ fn picking_a_car_loads_the_town_in_editor_play() {
         .get_node_by_path("/root/TownScene")
         .unwrap_or_else(|| panic!("the town was never added to /root; script errors: {errors:#?}"));
     assert!(
-        ml.tree().get_node_by_path("/root/TownScene/InstancePos/car").is_some(),
+        ml.tree()
+            .get_node_by_path("/root/TownScene/InstancePos/car")
+            .is_some(),
         "setup() puts the picked car under %InstancePos"
     );
     // `button_sdfgi.button_pressed` is unset in car_select.tscn, so Godot passes
     // its class default `false` — and the write lands on the inline Environment.
-    let env = ml.tree().get_node_relative(town, "WorldEnvironment").expect("WorldEnvironment");
+    let env = ml
+        .tree()
+        .get_node_relative(town, "WorldEnvironment")
+        .expect("WorldEnvironment");
     assert_eq!(
-        ml.tree().get_node(env).unwrap().get_property("__subres__environment__sdfgi_enabled"),
+        ml.tree()
+            .get_node(env)
+            .unwrap()
+            .get_property("__subres__environment__sdfgi_enabled"),
         Variant::Bool(false),
         "`environment.sdfgi_enabled = sdfgi` must land on the WorldEnvironment's Environment"
     );

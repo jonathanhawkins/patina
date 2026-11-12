@@ -714,23 +714,23 @@ fn effective_process_mode_root_defaults_to_pausable() {
 fn notification_coverage_inventory() {
     // Auto-dispatched by LifecycleManager / SceneTree / MainLoop:
     let auto_dispatched = [
-        (0, "POSTINITIALIZE"),            // Not auto-dispatched yet; placeholder
-        (1, "PREDELETE"),                 // queue_free -> process_deletions
-        (10, "ENTER_TREE"),               // LifecycleManager::enter_tree
-        (11, "EXIT_TREE"),                // LifecycleManager::exit_tree / remove_node
-        (12, "MOVED_IN_PARENT"),          // reparent / move_child / raise / lower
-        (13, "READY"),                    // LifecycleManager::enter_tree (bottom-up)
-        (14, "PAUSED"),                   // MainLoop::set_paused(true)
-        (15, "UNPAUSED"),                 // MainLoop::set_paused(false)
+        (0, "POSTINITIALIZE"),   // Not auto-dispatched yet; placeholder
+        (1, "PREDELETE"),        // queue_free -> process_deletions
+        (10, "ENTER_TREE"),      // LifecycleManager::enter_tree
+        (11, "EXIT_TREE"),       // LifecycleManager::exit_tree / remove_node
+        (12, "MOVED_IN_PARENT"), // reparent / move_child / raise / lower
+        (13, "READY"),           // LifecycleManager::enter_tree (bottom-up)
+        (14, "PAUSED"),          // MainLoop::set_paused(true)
+        (15, "UNPAUSED"),        // MainLoop::set_paused(false)
         // Godot's values (scene/main/node.h); several were invented before.
-        (24, "CHILD_ORDER_CHANGED"),      // add_child / move_child / reparent
-        (17, "PROCESS"),                  // MainLoop::step (per-frame)
-        (16, "PHYSICS_PROCESS"),          // MainLoop::step (physics tick)
-        (18, "PARENTED"),                 // add_child
-        (19, "UNPARENTED"),               // remove_node / reparent
-        (25, "INTERNAL_PROCESS"),         // MainLoop::step
+        (24, "CHILD_ORDER_CHANGED"), // add_child / move_child / reparent
+        (17, "PROCESS"),             // MainLoop::step (per-frame)
+        (16, "PHYSICS_PROCESS"),     // MainLoop::step (physics tick)
+        (18, "PARENTED"),            // add_child
+        (19, "UNPARENTED"),          // remove_node / reparent
+        (25, "INTERNAL_PROCESS"),    // MainLoop::step
         (26, "INTERNAL_PHYSICS_PROCESS"), // MainLoop::step
-        (27, "POST_ENTER_TREE"),          // LifecycleManager::enter_tree
+        (27, "POST_ENTER_TREE"),     // LifecycleManager::enter_tree
     ];
 
     // Documented gaps — constant defined but not auto-dispatched:

@@ -639,7 +639,8 @@ fn pat_2abh6_comparison_tooling_ingests_patina_and_oracle() {
         })
         .expect("test source must be readable for the command-path citation check");
     assert!(
-        this_file.contains("nextest run") && this_file.contains("render_physics_comparison_tooling_test"),
+        this_file.contains("nextest run")
+            && this_file.contains("render_physics_comparison_tooling_test"),
         "test must cite the runnable command path for the comparison tooling"
     );
 }

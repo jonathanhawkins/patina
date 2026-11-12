@@ -424,7 +424,13 @@ impl GridMap {
     ) -> Vec<(Transform3D, String, [i32; 3])> {
         let size = octant_size.max(1);
         // `grid_map.cpp`: `x > 0 ? x / size : (x - (size - 1)) / size`.
-        let key = |v: i32| if v > 0 { v / size } else { (v - (size - 1)) / size };
+        let key = |v: i32| {
+            if v > 0 {
+                v / size
+            } else {
+                (v - (size - 1)) / size
+            }
+        };
         let mut cells: Vec<(&GridCell, &i32)> = self.cells.iter().collect();
         cells.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         let mut out = Vec::new();
@@ -686,7 +692,11 @@ impl GridMap {
 /// bool.
 fn read_cell_center(node: &crate::node::Node) -> [bool; 3] {
     let on = |key: &str| !matches!(node.get_property(key), Variant::Bool(false));
-    [on("cell_center_x"), on("cell_center_y"), on("cell_center_z")]
+    [
+        on("cell_center_x"),
+        on("cell_center_y"),
+        on("cell_center_z"),
+    ]
 }
 
 // ---------------------------------------------------------------------------

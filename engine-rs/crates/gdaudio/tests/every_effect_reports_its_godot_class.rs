@@ -19,7 +19,10 @@ fn every_effect_reports_its_godot_class() {
             Box::new(AudioEffectCompressor::new(0.0, 4.0, 20.0, 250.0)),
             "AudioEffectCompressor",
         ),
-        (Box::new(AudioEffectLimiter::new(-0.1, 2.0)), "AudioEffectLimiter"),
+        (
+            Box::new(AudioEffectLimiter::new(-0.1, 2.0)),
+            "AudioEffectLimiter",
+        ),
         (
             Box::new(AudioEffectHardLimiter::new(-0.3, 0.0)),
             "AudioEffectHardLimiter",
@@ -28,10 +31,18 @@ fn every_effect_reports_its_godot_class() {
         (Box::new(AudioEffectPanner::default()), "AudioEffectPanner"),
         (Box::new(AudioEffectChorus::default()), "AudioEffectChorus"),
         (Box::new(AudioEffectPhaser::default()), "AudioEffectPhaser"),
-        (Box::new(AudioEffectCapture::default()), "AudioEffectCapture"),
+        (
+            Box::new(AudioEffectCapture::default()),
+            "AudioEffectCapture",
+        ),
         (Box::new(AudioEffectRecord::default()), "AudioEffectRecord"),
     ];
     for (effect, want) in &effects {
-        assert_eq!(effect.godot_class(), *want, "{} reports the wrong class", effect.name());
+        assert_eq!(
+            effect.godot_class(),
+            *want,
+            "{} reports the wrong class",
+            effect.name()
+        );
     }
 }

@@ -1,4 +1,3 @@
-
 //! pat-mgixk.31 (increment 4): an indexed accessor must resolve against the
 //! table for the node's OWN class, and `CPUParticles3D.set_param_min/max`.
 //!

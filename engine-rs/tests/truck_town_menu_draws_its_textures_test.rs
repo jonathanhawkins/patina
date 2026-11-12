@@ -58,12 +58,16 @@ fn the_car_select_menu_draws_its_logo_and_car_icons_where_godot_does() {
     );
     let tree = ml.tree();
     let sprite = |node_path: &str| {
-        let id = tree.get_node_by_path(node_path).unwrap_or_else(|| panic!("{node_path}"));
+        let id = tree
+            .get_node_by_path(node_path)
+            .unwrap_or_else(|| panic!("{node_path}"));
         items
             .iter()
             .filter(|(_, src)| *src == Some(id))
             .find_map(|(item, _)| match &item.kind {
-                Render2DKind::Sprite { texture, .. } => Some((texture.clone(), item.global_transform)),
+                Render2DKind::Sprite { texture, .. } => {
+                    Some((texture.clone(), item.global_transform))
+                }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{node_path} draws no texture"))
@@ -73,7 +77,11 @@ fn the_car_select_menu_draws_its_logo_and_car_icons_where_godot_does() {
     // 1 + 3. The logo: its own file, scaled into Godot's rect.
     let (tex, xf) = sprite("/root/CarSelect/TextureRect");
     assert_eq!(tex, "res://trucktown.png");
-    assert!(near(xf.origin.x, 156.0, 0.5) && near(xf.origin.y, -132.0, 0.5), "{:?}", xf.origin);
+    assert!(
+        near(xf.origin.x, 156.0, 0.5) && near(xf.origin.y, -132.0, 0.5),
+        "{:?}",
+        xf.origin
+    );
     assert!(near(xf.x.x, 841.355 / 1136.0, 1e-3), "x scale {}", xf.x.x);
     assert!(near(xf.y.y, 494.0 / 667.0, 1e-3), "y scale {}", xf.y.y);
 
@@ -85,8 +93,13 @@ fn the_car_select_menu_draws_its_logo_and_car_icons_where_godot_does() {
         "MiniVan icon at {:?}, Godot's button is at (69, 202.5)",
         xf.origin
     );
-    assert!(near(xf.x.x, 1.0, 1e-3) && near(xf.y.y, 1.0, 1e-3), "a 320x235 icon fits unscaled");
-    let van = tree.get_node_by_path("/root/CarSelect/CarContainer/MiniVan").unwrap();
+    assert!(
+        near(xf.x.x, 1.0, 1e-3) && near(xf.y.y, 1.0, 1e-3),
+        "a 320x235 icon fits unscaled"
+    );
+    let van = tree
+        .get_node_by_path("/root/CarSelect/CarContainer/MiniVan")
+        .unwrap();
     let size = gdscene::control::get_size(tree, van);
     assert_eq!((size.x, size.y), (328.0, 243.0), "Godot's MiniVan size");
 

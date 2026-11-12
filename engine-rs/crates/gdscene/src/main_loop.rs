@@ -738,7 +738,10 @@ pub struct MainLoop {
 
 /// A frame observer run at the deferred-call flush, Godot's
 /// `MessageQueue::flush()` after `_process` (pat-la27y).
-pub struct DeferredFlushObserver(Box<dyn FnMut(&SceneTree) + Send>);
+pub struct DeferredFlushObserver(DeferredFlushFn);
+
+/// The callback [`MainLoop::set_deferred_flush_observer`] installs.
+pub type DeferredFlushFn = Box<dyn FnMut(&SceneTree) + Send>;
 
 impl std::fmt::Debug for DeferredFlushObserver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -882,10 +885,7 @@ impl MainLoop {
     /// Godot's capture could see it (spark_keeper: `/root/Main/Player` at f49
     /// vs Godot's f50), although `_ready` and the first tick run on the same
     /// frames in both engines.
-    pub fn set_deferred_flush_observer(
-        &mut self,
-        observer: Option<Box<dyn FnMut(&SceneTree) + Send>>,
-    ) {
+    pub fn set_deferred_flush_observer(&mut self, observer: Option<DeferredFlushFn>) {
         self.deferred_flush_observer = observer.map(DeferredFlushObserver);
     }
 
@@ -1219,7 +1219,8 @@ impl MainLoop {
         // The child's own `emitting` flag is deliberately ignored — Godot drives a
         // sub-emitter entirely from its parent, so a child left `emitting = false`
         // (the normal way to author one) still receives particles.
-        let mut injections: Vec<(NodeId, Vec<(Vector2, Option<Vector2>)>)> = Vec::new();
+        type Injections = Vec<(NodeId, Vec<(Vector2, Option<Vector2>)>)>;
+        let mut injections: Injections = Vec::new();
         for chain in &sub_chains {
             let Some(parent_sim) = self.particles.get_mut(&chain.parent) else {
                 continue;
@@ -1288,7 +1289,8 @@ impl MainLoop {
         // emitter's current transform on top of each particle's spawn transform,
         // so already-spawned particles hold their global position while the
         // emitter moves away from them (pat-0q2kx.51).
-        let draws: Vec<(NodeId, Vec<(Vector2, Color, f32)>)> = self
+        type Draws = Vec<(NodeId, Vec<(Vector2, Color, f32)>)>;
+        let draws: Draws = self
             .particles
             .iter()
             .map(|(id, sim)| {
@@ -1513,10 +1515,7 @@ impl MainLoop {
         // against half-updated neighbors makes the result depend on tree order.
         let mut views: Vec<OrcaAgent> = Vec::with_capacity(agent_nodes.len());
         for ((id, params), position) in agent_nodes.iter().zip(&positions) {
-            let agent = self
-                .nav_agents_2d
-                .entry(*id)
-                .or_insert_with(NavigationAgent2D::new);
+            let agent = self.nav_agents_2d.entry(*id).or_default();
             params.apply(agent);
             views.push(agent.orca_agent(*position));
         }
@@ -1639,10 +1638,7 @@ impl MainLoop {
         let mut views: Vec<(Vector3, f32, crate::navigation::OrcaAgent)> =
             Vec::with_capacity(agent_nodes.len());
         for ((id, params), position) in agent_nodes.iter().zip(&positions) {
-            let agent = self
-                .nav_agents_3d
-                .entry(*id)
-                .or_insert_with(NavigationAgent3D::new);
+            let agent = self.nav_agents_3d.entry(*id).or_default();
             params.apply(agent);
             views.push((*position, agent.height, agent.orca_agent_xz(*position)));
         }
@@ -1691,7 +1687,7 @@ impl MainLoop {
     /// resulting `next_path_position` is published onto the node. Agents stop
     /// once within `target_desired_distance` of the target so they rest cleanly.
     /// Closes the audit gap where navigation.rs was never called from the loop.
-    pub fn process_navigation(&mut self, dt: f32) {
+    pub fn process_navigation(&mut self, _dt: f32) {
         use gdcore::math::{Vector2, Vector3};
 
         let mut polys2: Vec<NavPolygon> = Vec::new();
@@ -1831,37 +1827,37 @@ impl MainLoop {
                 // node's global transform applied to `start_position`, so the
                 // endpoints are read relative to the node rather than as world
                 // coordinates — moving the link node moves both ends.
-                "NavigationLink2D" => {
-                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) {
-                        let origin = crate::node2d::get_global_position(&self.tree, id);
-                        let read = |key: &str| match node.get_property(key) {
-                            Variant::Vector2(v) => v,
-                            _ => Vector2::ZERO,
-                        };
-                        let mut link = crate::navigation::NavigationLink2D::new(
-                            origin + read("start_position"),
-                            origin + read("end_position"),
-                        );
-                        link.bidirectional =
-                            !matches!(node.get_property("bidirectional"), Variant::Bool(false));
-                        links2.push(link);
-                    }
+                "NavigationLink2D"
+                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) =>
+                {
+                    let origin = crate::node2d::get_global_position(&self.tree, id);
+                    let read = |key: &str| match node.get_property(key) {
+                        Variant::Vector2(v) => v,
+                        _ => Vector2::ZERO,
+                    };
+                    let mut link = crate::navigation::NavigationLink2D::new(
+                        origin + read("start_position"),
+                        origin + read("end_position"),
+                    );
+                    link.bidirectional =
+                        !matches!(node.get_property("bidirectional"), Variant::Bool(false));
+                    links2.push(link);
                 }
-                "NavigationLink3D" => {
-                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) {
-                        let xform = crate::node3d::get_global_transform(&self.tree, id);
-                        let read = |key: &str| match node.get_property(key) {
-                            Variant::Vector3(v) => v,
-                            _ => Vector3::ZERO,
-                        };
-                        let mut link = crate::navigation::NavigationLink3D::new(
-                            xform.xform(read("start_position")),
-                            xform.xform(read("end_position")),
-                        );
-                        link.bidirectional =
-                            !matches!(node.get_property("bidirectional"), Variant::Bool(false));
-                        links3.push(link);
-                    }
+                "NavigationLink3D"
+                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) =>
+                {
+                    let xform = crate::node3d::get_global_transform(&self.tree, id);
+                    let read = |key: &str| match node.get_property(key) {
+                        Variant::Vector3(v) => v,
+                        _ => Vector3::ZERO,
+                    };
+                    let mut link = crate::navigation::NavigationLink3D::new(
+                        xform.xform(read("start_position")),
+                        xform.xform(read("end_position")),
+                    );
+                    link.bidirectional =
+                        !matches!(node.get_property("bidirectional"), Variant::Bool(false));
+                    links3.push(link);
                 }
                 "NavigationAgent2D" => {
                     // GLOBAL, not local (pat-s3rrv.20). Godot's agent has no
@@ -1963,24 +1959,18 @@ impl MainLoop {
         // `nav_agents_2d` via `entry()`, which cannot coexist with the
         // `&self.tree` needed to read the node's properties.
         for (id, _, _) in &agents2 {
-            let mut agent = self
-                .nav_agents_2d
-                .remove(id)
-                .unwrap_or_else(NavigationAgent2D::new);
+            let mut agent = self.nav_agents_2d.remove(id).unwrap_or_default();
             crate::navigation_agents::sync_tuning_2d(&self.tree, *id, &mut agent);
             self.nav_agents_2d.insert(*id, agent);
         }
         for (id, current, target) in &agents2 {
             // Every other agent this frame — an agent must not avoid itself.
-            let others: Vec<(Vector2, f32)> = neighbor_radii
+            let _others: Vec<(Vector2, f32)> = neighbor_radii
                 .iter()
                 .filter(|(other_id, _, _)| other_id != id)
                 .map(|(_, position, radius)| (*position, *radius))
                 .collect();
-            let agent = self
-                .nav_agents_2d
-                .entry(*id)
-                .or_insert_with(NavigationAgent2D::new);
+            let agent = self.nav_agents_2d.entry(*id).or_default();
             // Recompute the path only when the target changes (or none exists),
             // preserving waypoint progress across frames.
             if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
@@ -2046,18 +2036,12 @@ impl MainLoop {
         let mut finished3: Vec<NodeId> = Vec::new();
         // 3D twin of the tuning sync above (pat-s3rrv.20).
         for (id, _, _) in &agents3 {
-            let mut agent = self
-                .nav_agents_3d
-                .remove(id)
-                .unwrap_or_else(NavigationAgent3D::new);
+            let mut agent = self.nav_agents_3d.remove(id).unwrap_or_default();
             crate::navigation_agents::sync_tuning_3d(&self.tree, *id, &mut agent);
             self.nav_agents_3d.insert(*id, agent);
         }
         for (id, current, target) in &agents3 {
-            let agent = self
-                .nav_agents_3d
-                .entry(*id)
-                .or_insert_with(NavigationAgent3D::new);
+            let agent = self.nav_agents_3d.entry(*id).or_default();
             if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
                 agent.set_target_position(*target, *current, &server3);
             }
@@ -2098,7 +2082,7 @@ impl MainLoop {
 
     /// Shared-edge adjacency for 3D navmesh polygons (connected when they share
     /// >= 2 vertices within `tol`), mirroring NavMesh2D's auto-connection since
-    /// `NavMesh3D::new` takes explicit connections.
+    /// > `NavMesh3D::new` takes explicit connections.
     fn nav3d_connections(polys: &[NavPolygon3D], tol: f32) -> Vec<Vec<usize>> {
         let n = polys.len();
         let tol_sq = tol * tol;
@@ -2336,10 +2320,16 @@ impl MainLoop {
             .set_gravity(Vector3::new(dir3.x * g3, dir3.y * g3, dir3.z * g3));
         // The 3D space's default damping (pat-qg3nu). Absent keys keep Godot's
         // defaults (0.1 / 0.1), which the server already holds.
-        if let Some(v) = settings.get("physics/3d/default_linear_damp").and_then(|v| v.as_float()) {
+        if let Some(v) = settings
+            .get("physics/3d/default_linear_damp")
+            .and_then(|v| v.as_float())
+        {
             self.physics_server_3d.set_default_linear_damp(v as f32);
         }
-        if let Some(v) = settings.get("physics/3d/default_angular_damp").and_then(|v| v.as_float()) {
+        if let Some(v) = settings
+            .get("physics/3d/default_angular_damp")
+            .and_then(|v| v.as_float())
+        {
             self.physics_server_3d.set_default_angular_damp(v as f32);
         }
 
@@ -2363,10 +2353,16 @@ impl MainLoop {
             if let Some(v) = float_setting(settings, &key("baumgarte_stabilization_factor")) {
                 p.baumgarte = v;
             }
-            if let Some(v) = settings.get(&key("position_steps")).and_then(|v| v.as_int()) {
+            if let Some(v) = settings
+                .get(&key("position_steps"))
+                .and_then(|v| v.as_int())
+            {
                 p.position_steps = v.max(0) as u32;
             }
-            if let Some(v) = settings.get(&key("velocity_steps")).and_then(|v| v.as_int()) {
+            if let Some(v) = settings
+                .get(&key("velocity_steps"))
+                .and_then(|v| v.as_int())
+            {
                 p.velocity_steps = v.max(0) as u32;
             }
             if let Some(v) = float_setting(settings, &key("bounce_velocity_threshold")) {
@@ -2876,7 +2872,7 @@ impl MainLoop {
                 } else {
                     driving == Some(*index)
                 };
-                translates.then(|| InputEvent::MouseButton {
+                translates.then_some(InputEvent::MouseButton {
                     button: gdplatform::input::MouseButton::Left,
                     pressed: *pressed,
                     position: *position,
@@ -4431,19 +4427,16 @@ impl MainLoop {
             self.unbind_script_servers();
         }
         let swapped = self.tree.process_deferred_scene_change();
-        match swapped {
-            Ok(Some(new_root)) => {
-                // The shared helper from pat-mgixk.61, which reads through
-                // `FileAccess` so a scene inside an exported `.pck` works too,
-                // and skips any node that already carries a script.
-                crate::scripting::attach_subtree_scripts_from_res(&mut self.tree, new_root);
-                // `_enter_tree` then `_ready`, once, for the whole new subtree.
-                self.enter_tree_with_scripts(new_root);
-            }
-            // `Ok(None)` is "nothing was queued", or an `unload` that
-            // deliberately loaded nothing — neither has a subtree to start.
-            // An `Err` is a bad scene path, which stays non-fatal to the loop.
-            Ok(None) | Err(_) => {}
+        // `Ok(None)` is "nothing was queued", or an `unload` that deliberately
+        // loaded nothing — neither has a subtree to start. An `Err` is a bad
+        // scene path, which stays non-fatal to the loop.
+        if let Ok(Some(new_root)) = swapped {
+            // The shared helper from pat-mgixk.61, which reads through
+            // `FileAccess` so a scene inside an exported `.pck` works too,
+            // and skips any node that already carries a script.
+            crate::scripting::attach_subtree_scripts_from_res(&mut self.tree, new_root);
+            // `_enter_tree` then `_ready`, once, for the whole new subtree.
+            self.enter_tree_with_scripts(new_root);
         }
 
         // -- Control layout (pat-9ww3e) --
@@ -4811,7 +4804,6 @@ impl MainLoop {
     }
 }
 
-
 /// [`MainLoop::process_path_follows`] on `tree`, for every follow node or only
 /// `only` (pat-y2ylj).
 ///
@@ -4938,8 +4930,7 @@ pub fn process_path_follows_in(tree: &mut SceneTree, dt: f32, only: Option<NodeI
             // control points behind hundreds of baked samples. The guard is
             // that the array divides into whole triples; a partial one would
             // silently drop a handle and straighten the last segment.
-            if let Variant::PackedVector3Array(cp) = parent.get_property("curve_control_points")
-            {
+            if let Variant::PackedVector3Array(cp) = parent.get_property("curve_control_points") {
                 if !cp.is_empty() && cp.len() % 3 == 0 {
                     curve.control = cp
                         .chunks_exact(3)
@@ -5117,8 +5108,7 @@ pub fn process_path_follows_in(tree: &mut SceneTree, dt: f32, only: Option<NodeI
             // NOT read as off. ROTATION_NONE has no frame to twist, which is
             // Godot's behaviour too: the tilt branch sits inside the `else`
             // of `rotation_mode == ROTATION_NONE`.
-            let tilt_enabled =
-                !matches!(node.get_property("tilt_enabled"), Variant::Bool(false));
+            let tilt_enabled = !matches!(node.get_property("tilt_enabled"), Variant::Bool(false));
             if tilt_enabled {
                 if let Some(euler) = rot {
                     let tilt = curve.sample_baked_tilt(follow.progress);
@@ -5471,10 +5461,10 @@ mod tests {
         }
     }
     use gdobject::notification::{
-        NOTIFICATION_POST_ENTER_TREE,
         NOTIFICATION_ENTER_TREE, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
         NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS,
-        NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PROCESS, NOTIFICATION_READY,
+        NOTIFICATION_POSTINITIALIZE, NOTIFICATION_POST_ENTER_TREE, NOTIFICATION_PROCESS,
+        NOTIFICATION_READY,
     };
 
     /// pat-nzgdu.84: SceneTree/Node lifecycle + per-frame signals fire. A

@@ -131,12 +131,18 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
         _ => panic!("a current Camera3D must frame Play"),
     };
     // Through the scene camera, not the editor orbit camera.
-    let cam = vp.camera.override_transform.expect("pinned to the Camera3D");
+    let cam = vp
+        .camera
+        .override_transform
+        .expect("pinned to the Camera3D");
     assert_eq!(cam.origin, gdcore::math::Vector3::new(0.0, 0.0, 3.0));
     // No editor furniture in the pipeline's inputs.
     assert!(!vp.grid.visible, "grid must be off in Play");
     assert!(!vp.show_origin, "origin axes must be off in Play");
-    assert!(vp.selection.selected_nodes.is_empty(), "no selection outline in Play");
+    assert!(
+        vp.selection.selected_nodes.is_empty(),
+        "no selection outline in Play"
+    );
     let coin = node_id(&tree, "Coin");
     assert!(
         inputs.items.iter().any(|i| i.node_id == coin),
@@ -159,23 +165,27 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
     // (it is the scene camera that frames it).
     let near = frame.render();
     let mut hidden = load(&with_camera(3.0));
-    let coin_id = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(
-        node_id(&hidden, "Coin"),
-    ));
+    let coin_id = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(node_id(
+        &hidden, "Coin",
+    )));
     hidden
         .get_node_mut(coin_id)
         .unwrap()
         .set_property("visible", gdvariant::Variant::Bool(false));
     let hidden_vp = editor_viewport(&hidden);
-    let empty = prepare_play_3d_frame(&mut hidden, &hidden_vp, false, CLEAR, W, H)
-        .render();
+    let empty = prepare_play_3d_frame(&mut hidden, &hidden_vp, false, CLEAR, W, H).render();
     let mut far_tree = load(&with_camera(8.0));
     let far_vp = editor_viewport(&far_tree);
-    let far = prepare_play_3d_frame(&mut far_tree, &far_vp, false, CLEAR, W, H)
-        .render();
+    let far = prepare_play_3d_frame(&mut far_tree, &far_vp, false, CLEAR, W, H).render();
     let diff = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
-    assert!(diff(&near.data, &empty.data) > 400, "the coin is drawn through the camera");
-    assert!(diff(&near.data, &far.data) > 400, "the Camera3D's transform frames the view");
+    assert!(
+        diff(&near.data, &empty.data) > 400,
+        "the coin is drawn through the camera"
+    );
+    assert!(
+        diff(&near.data, &far.data) > 400,
+        "the Camera3D's transform frames the view"
+    );
 
     // With the coin hidden, what is left is the background only: no grid, no
     // wireframe, no marker. A camera-only scene (nothing else 3D) renders the
@@ -183,8 +193,7 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
     let mut bare = load(
         "[gd_scene format=3]\n\n[node name=\"Game\" type=\"Node3D\"]\n\n[node name=\"Cam\" type=\"Camera3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3)\ncurrent = true\n",
     );
-    let bare_img = prepare_play_3d_frame(&mut bare, &hidden_vp, false, CLEAR, W, H)
-        .render();
+    let bare_img = prepare_play_3d_frame(&mut bare, &hidden_vp, false, CLEAR, W, H).render();
     assert_eq!(
         diff(&empty.data, &bare_img.data),
         0,

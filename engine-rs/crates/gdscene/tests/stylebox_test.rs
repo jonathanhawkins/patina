@@ -50,7 +50,13 @@ fn styleboxflat_rounded_bordered_panel_renders() {
 
     let mut renderer = SoftwareRenderer::new();
     let mut vp = Viewport::new(100, 100, Color::BLACK);
-    render_control_tree(&mut tree, panel, &theme, &mut vp, Vector2::new(100.0, 100.0));
+    render_control_tree(
+        &mut tree,
+        panel,
+        &theme,
+        &mut vp,
+        Vector2::new(100.0, 100.0),
+    );
     let fb = capture_frame(&mut renderer, &vp);
 
     // Center is the flat background.
@@ -96,7 +102,10 @@ fn styleboxtexture_nine_patch_renders() {
     let mut renderer = SoftwareRenderer::new();
     // 16x16 texture so the nine-patch center source region (16 - 4 - 4 = 8px)
     // is non-empty with 4px margins; an 8px texture would leave no center.
-    renderer.register_texture("panel.png", Texture2D::solid(16, 16, Color::rgb(0.0, 0.0, 1.0)));
+    renderer.register_texture(
+        "panel.png",
+        Texture2D::solid(16, 16, Color::rgb(0.0, 0.0, 1.0)),
+    );
     let mut vp = Viewport::new(64, 64, Color::BLACK);
     render_control_tree(&mut tree, panel, &theme, &mut vp, Vector2::new(64.0, 64.0));
     let fb = capture_frame(&mut renderer, &vp);
@@ -135,7 +144,10 @@ vertical = true
     theme.load_styleboxes_from_tscn("Panel", tscn);
 
     assert!(theme.has_stylebox("Panel", "panel"), "flat stylebox parsed");
-    assert!(theme.has_stylebox("Panel", "separator"), "line stylebox parsed");
+    assert!(
+        theme.has_stylebox("Panel", "separator"),
+        "line stylebox parsed"
+    );
     match theme.get_stylebox("Panel", "panel") {
         Some(StyleBox::Flat(f)) => {
             assert!((f.bg_color.b - 0.2).abs() < 1e-5);

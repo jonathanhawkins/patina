@@ -150,10 +150,7 @@ fn audio_stream_player_classdb_registration() {
     assert_eq!(player.get_property("volume_db"), Variant::Float(0.0));
     assert_eq!(player.get_property("pitch_scale"), Variant::Float(1.0));
     assert_eq!(player.get_property("autoplay"), Variant::Bool(false));
-    assert_eq!(
-        player.get_property("bus"),
-        Variant::String("Master".into())
-    );
+    assert_eq!(player.get_property("bus"), Variant::String("Master".into()));
     assert_eq!(player.get_property("playing"), Variant::Bool(false));
 }
 

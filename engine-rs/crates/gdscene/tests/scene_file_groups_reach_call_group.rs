@@ -37,7 +37,10 @@ fn scene_file_groups_are_indexed_and_reached_by_call_group() {
 
     assert!(tree.get_node_or_null(level, "MobA").is_none(), "MobA freed");
     assert!(tree.get_node_or_null(level, "MobB").is_none(), "MobB freed");
-    assert!(tree.get_node_or_null(level, "Player").is_some(), "non-members untouched");
+    assert!(
+        tree.get_node_or_null(level, "Player").is_some(),
+        "non-members untouched"
+    );
     assert_eq!(
         tree.get_node_count_in_group("mobs"),
         0,

@@ -81,7 +81,9 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
 }
 
 fn load_golden(name: &str) -> Value {
-    let path = fixtures_dir().join("golden/scenes").join(format!("{name}.json"));
+    let path = fixtures_dir()
+        .join("golden/scenes")
+        .join(format!("{name}.json"));
     load_json_fixture(&path)
 }
 
@@ -187,7 +189,8 @@ fn batch_report_covers_all_three_dimensions_across_core_fixtures() {
                     let golden_trace = load_physics_trace_file(&trace_path)
                         .unwrap_or_else(|e| panic!("load {trace_name}: {e}"));
                     // Compare golden against itself (deterministic baseline)
-                    let physics_result = compare_physics_traces(&golden_trace, &golden_trace, 0.01, 0.01);
+                    let physics_result =
+                        compare_physics_traces(&golden_trace, &golden_trace, 0.01, 0.01);
                     let physics_score = SubsystemScore::from(&physics_result);
                     fixture_result = fixture_result.with_physics(physics_score);
                 }
@@ -215,7 +218,11 @@ fn batch_report_covers_all_three_dimensions_across_core_fixtures() {
     }
 
     // At least one fixture must have physics dimension
-    let physics_count = report.fixtures.iter().filter(|f| f.physics.is_some()).count();
+    let physics_count = report
+        .fixtures
+        .iter()
+        .filter(|f| f.physics.is_some())
+        .count();
     assert!(
         physics_count >= 1,
         "at least one fixture must have physics dimension"
@@ -223,7 +230,10 @@ fn batch_report_covers_all_three_dimensions_across_core_fixtures() {
 
     // The subsystem summary must show all three dimensions exercised
     let summary = report.subsystem_summary();
-    assert!(summary.scene_tree_total > 0, "scene_tree checks must be > 0");
+    assert!(
+        summary.scene_tree_total > 0,
+        "scene_tree checks must be > 0"
+    );
     assert!(summary.render_total > 0, "render checks must be > 0");
     assert!(summary.physics_total > 0, "physics checks must be > 0");
 
@@ -248,7 +258,9 @@ fn batch_report_covers_all_three_dimensions_across_core_fixtures() {
 
 #[test]
 fn report_artifact_includes_comparison_tooling_section() {
-    let report = load_json_fixture(&repo_root().join("fixtures/patina_outputs/real_3d_demo_parity_report.json"));
+    let report = load_json_fixture(
+        &repo_root().join("fixtures/patina_outputs/real_3d_demo_parity_report.json"),
+    );
 
     // Must have a comparison_tooling section
     let tooling = &report["comparison_tooling"];
@@ -261,10 +273,7 @@ fn report_artifact_includes_comparison_tooling_section() {
     let dimensions = tooling["dimensions"]
         .as_array()
         .expect("comparison_tooling.dimensions should be an array");
-    let dim_names: Vec<&str> = dimensions
-        .iter()
-        .filter_map(|d| d.as_str())
-        .collect();
+    let dim_names: Vec<&str> = dimensions.iter().filter_map(|d| d.as_str()).collect();
     assert!(
         dim_names.contains(&"scene_tree"),
         "comparison tooling must cover scene_tree dimension"
@@ -308,8 +317,8 @@ fn report_artifact_includes_comparison_tooling_section() {
 #[test]
 fn report_doc_includes_comparison_tooling_results() {
     let report_path = repo_root().join("docs/3D_DEMO_PARITY_REPORT.md");
-    let report = fs::read_to_string(&report_path)
-        .unwrap_or_else(|e| panic!("failed to read report: {e}"));
+    let report =
+        fs::read_to_string(&report_path).unwrap_or_else(|e| panic!("failed to read report: {e}"));
 
     // Must have a comparison tooling section
     assert!(
@@ -353,14 +362,18 @@ fn report_doc_includes_comparison_tooling_results() {
 
     // Must NOT still claim that physics and render are skipped
     assert!(
-        !report.contains("Physics and render dimensions in the aggregate parity view are still skipped"),
+        !report.contains(
+            "Physics and render dimensions in the aggregate parity view are still skipped"
+        ),
         "report must no longer claim that physics and render dimensions are skipped"
     );
 }
 
 #[test]
 fn report_artifact_evidence_includes_published_report_test() {
-    let report = load_json_fixture(&repo_root().join("fixtures/patina_outputs/real_3d_demo_parity_report.json"));
+    let report = load_json_fixture(
+        &repo_root().join("fixtures/patina_outputs/real_3d_demo_parity_report.json"),
+    );
 
     let test_files = report["evidence"]["test_files"]
         .as_array()

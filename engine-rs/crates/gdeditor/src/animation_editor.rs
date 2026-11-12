@@ -10,8 +10,7 @@
 
 use std::collections::HashSet;
 
-use gdscene::animation::{AnimationTrack, KeyFrame, TrackType, TransitionType};
-use gdvariant::Variant;
+use gdscene::animation::{AnimationTrack, TrackType};
 
 // ---------------------------------------------------------------------------
 // TrackDescriptor — editor-side track metadata
@@ -389,17 +388,12 @@ impl TrackState {
 // ---------------------------------------------------------------------------
 
 /// Playback mode for animation preview.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackMode {
+    #[default]
     Stopped,
     Playing,
     Paused,
-}
-
-impl Default for PlaybackMode {
-    fn default() -> Self {
-        Self::Stopped
-    }
 }
 
 /// Playback controls for the animation editor.
@@ -479,7 +473,7 @@ impl PlaybackState {
 
         if new_time >= length {
             if self.looping {
-                new_time = new_time % length;
+                new_time %= length;
                 wrapped = true;
             } else {
                 new_time = length;

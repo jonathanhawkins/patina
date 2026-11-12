@@ -19,9 +19,10 @@ use gdcore::math::{Vector2, Vector2i};
 // ---------------------------------------------------------------------------
 
 /// Active tilemap editor tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TileToolMode {
     /// Paint tiles with the current brush.
+    #[default]
     Paint,
     /// Erase tiles under the cursor.
     Erase,
@@ -33,12 +34,6 @@ pub enum TileToolMode {
     LinePaint,
     /// Pick a tile from the map (eyedropper).
     Picker,
-}
-
-impl Default for TileToolMode {
-    fn default() -> Self {
-        Self::Paint
-    }
 }
 
 // ---------------------------------------------------------------------------

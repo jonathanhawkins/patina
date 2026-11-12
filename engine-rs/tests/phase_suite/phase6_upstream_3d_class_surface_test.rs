@@ -8,8 +8,10 @@
 
 use std::fs;
 
-const AUDIT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../prd/PHASE6_3D_PARITY_AUDIT.md");
+const AUDIT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../prd/PHASE6_3D_PARITY_AUDIT.md"
+);
 
 fn read_audit() -> String {
     fs::read_to_string(AUDIT_PATH).expect("PHASE6_3D_PARITY_AUDIT.md must exist")
@@ -38,7 +40,9 @@ fn parse_table_rows(section: &str) -> Vec<Vec<String>> {
 }
 
 fn extract_section(doc: &str, header: &str) -> String {
-    let start = doc.find(header).unwrap_or_else(|| panic!("section '{header}' must exist"));
+    let start = doc
+        .find(header)
+        .unwrap_or_else(|| panic!("section '{header}' must exist"));
     let rest = &doc[start + header.len()..];
     let end = rest
         .find("\n### ")
@@ -149,7 +153,9 @@ fn measured_rows_cite_test_or_report() {
             if row[2] == "Measured" {
                 let evidence = &row[3]; // Patina Evidence is 4th column
                 assert!(
-                    evidence.contains("_test") || evidence.contains("_report") || evidence.contains("REPORT"),
+                    evidence.contains("_test")
+                        || evidence.contains("_report")
+                        || evidence.contains("REPORT"),
                     "Measured row '{}' in {header} must cite a test or report: got '{evidence}'",
                     row[0]
                 );
@@ -165,9 +171,7 @@ fn measured_rows_cite_test_or_report() {
 #[test]
 fn matrix_tables_have_required_columns() {
     let audit = read_audit();
-    let headers = [
-        "| Upstream Family | Upstream Path | Status | Patina Evidence |",
-    ];
+    let headers = ["| Upstream Family | Upstream Path | Status | Patina Evidence |"];
 
     let count = headers
         .iter()

@@ -91,11 +91,16 @@ fn player_respawn_resets_interpolation_without_a_script_error() {
         }
         last = p;
     }
-    assert!(respawned, "the player must fall below -12 and be respawned, last at {last:?}");
+    assert!(
+        respawned,
+        "the player must fall below -12 and be respawned, last at {last:?}"
+    );
 
     let errors = ml.tree_mut().drain_script_errors();
     assert!(
-        !errors.iter().any(|e| e.contains("reset_physics_interpolation")),
+        !errors
+            .iter()
+            .any(|e| e.contains("reset_physics_interpolation")),
         "player.gd's call must resolve: {errors:?}"
     );
 
@@ -121,9 +126,15 @@ fn player_respawn_resets_interpolation_without_a_script_error() {
 fn reset_request_covers_the_subtree() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let a = tree.add_child(root, gdscene::node::Node::new("A", "Node3D")).unwrap();
-    let b = tree.add_child(a, gdscene::node::Node::new("B", "Node3D")).unwrap();
-    let c = tree.add_child(b, gdscene::node::Node::new("C", "Node3D")).unwrap();
+    let a = tree
+        .add_child(root, gdscene::node::Node::new("A", "Node3D"))
+        .unwrap();
+    let b = tree
+        .add_child(a, gdscene::node::Node::new("B", "Node3D"))
+        .unwrap();
+    let c = tree
+        .add_child(b, gdscene::node::Node::new("C", "Node3D"))
+        .unwrap();
     gdscene::LifecycleManager::enter_tree(&mut tree, a);
 
     tree.request_physics_interpolation_reset(b);
@@ -132,5 +143,8 @@ fn reset_request_covers_the_subtree() {
     let mut want = vec![b, c];
     want.sort_by_key(|id| format!("{id:?}"));
     assert_eq!(got, want, "B and its child C, not the parent A");
-    assert!(tree.take_physics_interpolation_resets().is_empty(), "drained");
+    assert!(
+        tree.take_physics_interpolation_resets().is_empty(),
+        "drained"
+    );
 }

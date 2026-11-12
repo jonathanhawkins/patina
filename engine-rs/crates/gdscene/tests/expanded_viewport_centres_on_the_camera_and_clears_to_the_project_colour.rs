@@ -60,12 +60,28 @@ fn the_camera_centres_the_playfield_and_the_margin_is_the_project_clear_colour()
     let fb = gdscene::canvas_render::render_play_frame(&mut tree, 995, 843, &mut cache, &settings);
     let at = |y: u32| {
         let c = fb.get_pixel(498, y);
-        ((c.r * 10.0).round(), (c.g * 10.0).round(), (c.b * 10.0).round())
+        (
+            (c.r * 10.0).round(),
+            (c.g * 10.0).round(),
+            (c.b * 10.0).round(),
+        )
     };
     let clear = (1.0, 1.0, 5.0);
     let green = (0.0, 10.0, 0.0);
-    assert_eq!(at(181), clear, "above the playfield: the project's clear colour (camera centred)");
-    assert_eq!(at(251), green, "the playfield starts ~71 px down, not at the top");
+    assert_eq!(
+        at(181),
+        clear,
+        "above the playfield: the project's clear colour (camera centred)"
+    );
+    assert_eq!(
+        at(251),
+        green,
+        "the playfield starts ~71 px down, not at the top"
+    );
     assert_eq!(at(600), green, "and is 400 tall");
-    assert_eq!(at(660), clear, "below it, the clear colour again — not Godot's default grey");
+    assert_eq!(
+        at(660),
+        clear,
+        "below it, the clear colour again — not Godot's default grey"
+    );
 }

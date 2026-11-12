@@ -94,7 +94,10 @@ fn run(slide: bool, velocity: &str) -> Vector3 {
 fn slide_on_ceiling_false_stops_a_jump_against_the_ceiling() {
     let sliding = run(true, "Vector3(6, 10, 0)");
     let stopped = run(false, "Vector3(6, 10, 0)");
-    for (what, p) in [("slide_on_ceiling = true", sliding), ("slide_on_ceiling = false", stopped)] {
+    for (what, p) in [
+        ("slide_on_ceiling = true", sliding),
+        ("slide_on_ceiling = false", stopped),
+    ] {
         assert!(
             (p.x - 12.000014).abs() < 1e-4 && (p.y - 1.999089).abs() < 1e-5,
             "{what}: Godot (12.000014, 1.999089), Patina {p:?}"

@@ -151,7 +151,11 @@ fn editor_selection_pruned_on_undo_and_delete() {
     // The two endpoints must AGREE — neither may report a ghost node.
     assert_eq!(
         selected_nodes(port).len(),
-        if selected_single(port).is_null() { 0 } else { 1 },
+        if selected_single(port).is_null() {
+            0
+        } else {
+            1
+        },
         "/api/selected and /api/selected_nodes must never disagree"
     );
 

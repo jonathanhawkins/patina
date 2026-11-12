@@ -79,7 +79,10 @@ fn node_matches(
     let Some(node) = tree.get_node(node_id) else {
         return false;
     };
-    let has_keys = matches!(node.get_property("__shortcut__events"), Variant::PackedInt32Array(_));
+    let has_keys = matches!(
+        node.get_property("__shortcut__events"),
+        Variant::PackedInt32Array(_)
+    );
     let has_actions = matches!(
         node.get_property(SHORTCUT_ACTIONS_KEY),
         Variant::PackedStringArray(_)

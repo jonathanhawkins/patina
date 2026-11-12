@@ -417,10 +417,7 @@ impl SignalConnectionDialog {
         self.source_node.is_some()
             && self.selected_signal.is_some()
             && self.target_node.is_some()
-            && self
-                .selected_method
-                .as_ref()
-                .map_or(false, |m| !m.is_empty())
+            && self.selected_method.as_ref().is_some_and(|m| !m.is_empty())
     }
 }
 

@@ -147,7 +147,13 @@ pub fn format_variant_value(v: &Variant) -> String {
             let mut pairs: Vec<(String, String, String)> = dict
                 .to_dict()
                 .iter()
-                .map(|(k, v)| (dict_key_display(k), format_dict_key(k), format_variant_value(v)))
+                .map(|(k, v)| {
+                    (
+                        dict_key_display(k),
+                        format_dict_key(k),
+                        format_variant_value(v),
+                    )
+                })
                 .collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             if pairs.is_empty() {
@@ -1353,7 +1359,13 @@ impl TscnSaver {
     /// and after every save.
     pub fn capture_baseline(tree: &mut SceneTree, root_id: NodeId, original: String) {
         let generated = Self::generate(tree, root_id);
-        tree.set_save_baseline(root_id, Some(SaveBaseline { original, generated }));
+        tree.set_save_baseline(
+            root_id,
+            Some(SaveBaseline {
+                original,
+                generated,
+            }),
+        );
     }
 
     /// The `.tscn` text rebuilt from the tree alone, ignoring any baseline:
@@ -1528,9 +1540,9 @@ impl TscnSaver {
             if nid == root_id {
                 continue;
             }
-            let editable = tree
-                .get_node(nid)
-                .is_some_and(|n| matches!(n.get_property("_editable_children"), Variant::Bool(true)));
+            let editable = tree.get_node(nid).is_some_and(|n| {
+                matches!(n.get_property("_editable_children"), Variant::Bool(true))
+            });
             if editable {
                 if let Some(path) = id_to_path.get(&nid) {
                     write!(out, "\n[editable path=\"{path}\"]\n").unwrap();
@@ -1594,7 +1606,12 @@ struct InstanceBases {
 impl InstanceBases {
     /// The node `id` stands for in its instance's own scene, if `id` belongs
     /// to an instance of a `.tscn` that can be read.
-    fn base_of(&mut self, tree: &SceneTree, scene_root: NodeId, id: NodeId) -> Option<&crate::node::Node> {
+    fn base_of(
+        &mut self,
+        tree: &SceneTree,
+        scene_root: NodeId,
+        id: NodeId,
+    ) -> Option<&crate::node::Node> {
         let scope = instance_scope(tree, scene_root, id)?;
         let path = match tree.get_node(scope)?.get_property("_instance_path") {
             Variant::String(p) if p.ends_with(".tscn") => p,
@@ -1607,11 +1624,17 @@ impl InstanceBases {
             let scene = crate::packed_scene::PackedScene::from_tscn(&text).ok()?;
             let mut scratch = SceneTree::new();
             let r = scratch.root_id();
-            let root = crate::packed_scene::add_packed_scene_to_tree_from_res(&mut scratch, r, &scene).ok()?;
+            let root =
+                crate::packed_scene::add_packed_scene_to_tree_from_res(&mut scratch, r, &scene)
+                    .ok()?;
             Some((scratch, root))
         });
         let (scratch, root) = entry.as_ref()?;
-        let at = if rel == "." { Some(*root) } else { scratch.get_node_relative(*root, &rel) };
+        let at = if rel == "." {
+            Some(*root)
+        } else {
+            scratch.get_node_relative(*root, &rel)
+        };
         scratch.get_node(at?)
     }
 }
@@ -2244,8 +2267,15 @@ fn write_node_section(
     // canonical local transform, so an edit made through any view is kept.
     let node3d_transform = crate::node3d::looks_like_node3d(node)
         .then(|| Variant::Transform3D(crate::node3d::local_transform_of(node)));
-    const NODE3D_VIEWS: &[&str] =
-        &["position", "rotation", "rotation_degrees", "scale", "quaternion", "basis", "transform"];
+    const NODE3D_VIEWS: &[&str] = &[
+        "position",
+        "rotation",
+        "rotation_degrees",
+        "scale",
+        "quaternion",
+        "basis",
+        "transform",
+    ];
     let mut owned: Vec<(String, Variant)> = node
         .properties()
         .filter(|(k, _)| !is_internal_prop(k) && !skip_keys.contains(&k.as_str()))
@@ -2381,7 +2411,8 @@ fn write_connections(
                 // does not repeat it in the scene that instances it.
                 if let Some(&to_nid) = object_id_to_node_id.get(&conn.target_id) {
                     let from_scope = instance_scope(tree, _root_id, nid);
-                    if from_scope.is_some() && from_scope == instance_scope(tree, _root_id, to_nid) {
+                    if from_scope.is_some() && from_scope == instance_scope(tree, _root_id, to_nid)
+                    {
                         continue;
                     }
                 }

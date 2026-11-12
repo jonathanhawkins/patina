@@ -7,7 +7,9 @@
 //! The preview must come WITHOUT touching the edited tree, or the saver, undo
 //! and the scene dock would see the sub-scene's nodes as the scene's own.
 
-use gdeditor::scene_renderer::{render_scene_with_instance_previews, render_scene_with_zoom_pan_mut};
+use gdeditor::scene_renderer::{
+    render_scene_with_instance_previews, render_scene_with_zoom_pan_mut,
+};
 use gdeditor::texture_cache::TextureCache;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::SceneTree;
@@ -97,10 +99,21 @@ fn the_edit_view_draws_an_instanced_subscene_without_changing_the_edited_tree() 
     let mut tree = edited_tree(60.0);
     let before = tree.node_count();
     let plain = render_scene_with_zoom_pan_mut(&mut tree, None, 320, 200, 1.0, (0.0, 0.0));
-    assert_eq!(red_centroid(&plain).1, 0, "precondition: the placeholder alone draws no body");
+    assert_eq!(
+        red_centroid(&plain).1,
+        0,
+        "precondition: the placeholder alone draws no body"
+    );
 
     let shown = render_scene_with_instance_previews(
-        &mut tree, &root, &mut cache, None, 320, 200, 1.0, (0.0, 0.0),
+        &mut tree,
+        &root,
+        &mut cache,
+        None,
+        320,
+        200,
+        1.0,
+        (0.0, 0.0),
     );
     let (x60, n) = red_centroid(&shown);
     let x60 = x60 - anchor_x(&shown);
@@ -114,7 +127,14 @@ fn the_edit_view_draws_an_instanced_subscene_without_changing_the_edited_tree() 
     // x moves the framing too.
     let mut moved = edited_tree(100.0);
     let shown = render_scene_with_instance_previews(
-        &mut moved, &root, &mut cache, None, 320, 200, 1.0, (0.0, 0.0),
+        &mut moved,
+        &root,
+        &mut cache,
+        None,
+        320,
+        200,
+        1.0,
+        (0.0, 0.0),
     );
     let (x100, _) = red_centroid(&shown);
     let x100 = x100 - anchor_x(&shown);
@@ -172,7 +192,10 @@ color = Color(1, 0, 1, 1)
 position = Vector2(50, 50)
 "#;
 
-fn count(fb: &gdrender2d::renderer::FrameBuffer, keep: impl Fn(gdcore::math::Color) -> bool) -> (usize, u32, u32) {
+fn count(
+    fb: &gdrender2d::renderer::FrameBuffer,
+    keep: impl Fn(gdcore::math::Color) -> bool,
+) -> (usize, u32, u32) {
     let (mut n, mut min_x, mut max_x) = (0, u32::MAX, 0);
     for y in 0..fb.height {
         for x in 0..fb.width {
@@ -214,7 +237,14 @@ fn an_unplayed_animated_sprite_and_a_canvas_layer_hud_are_previewed() {
     let tree_root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, tree_root, &scene).unwrap();
     let fb = render_scene_with_instance_previews(
-        &mut tree, &root, &mut cache, None, 400, 300, 1.0, (0.0, 0.0),
+        &mut tree,
+        &root,
+        &mut cache,
+        None,
+        400,
+        300,
+        1.0,
+        (0.0, 0.0),
     );
 
     let (ship, _, _) = count(&fb, |c| c.g > 0.9 && c.r < 0.1 && c.b < 0.1);

@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -130,12 +132,22 @@ fn no_engine_server_binds_its_port_inside_a_spawned_thread() {
     rust_sources(&root.join("crates"), &mut files);
     rust_sources(&root.join("examples"), &mut files);
     rust_sources(&root.join("src"), &mut files);
-    assert!(files.len() > 100, "found only {} sources under {}", files.len(), root.display());
+    assert!(
+        files.len() > 100,
+        "found only {} sources under {}",
+        files.len(),
+        root.display()
+    );
     let mut hits = Vec::new();
     for f in &files {
-        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        let Ok(src) = std::fs::read_to_string(f) else {
+            continue;
+        };
         for line in binds_inside_spawn(&src) {
-            hits.push(format!("{}:{line}", f.strip_prefix(root).unwrap_or(f).display()));
+            hits.push(format!(
+                "{}:{line}",
+                f.strip_prefix(root).unwrap_or(f).display()
+            ));
         }
     }
     assert!(

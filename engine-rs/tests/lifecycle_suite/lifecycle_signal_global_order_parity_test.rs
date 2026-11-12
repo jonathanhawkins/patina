@@ -422,7 +422,11 @@ fn full_lifecycle_frame_signal_exit_global_ordering() {
         .rev()
         .find(|&&(ty, _)| ty == "notif")
         .copied();
-    assert_eq!(last_notif, Some(("notif", "EXIT_TREE")), "EXIT_TREE is the last notification");
+    assert_eq!(
+        last_notif,
+        Some(("notif", "EXIT_TREE")),
+        "EXIT_TREE is the last notification"
+    );
 
     // The test's signal must appear after READY and before EXIT_TREE.
     let signal_idx = player_events

@@ -115,7 +115,6 @@ fn node_class(dict: &gdvariant::SharedDictionary, doc: &Resource) -> &'static st
     "Node3D"
 }
 
-
 /// Instantiates `doc`'s default scene as a child of `parent`, returning the root
 /// node that was created, or `None` when the document declares no nodes.
 ///
@@ -288,7 +287,7 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
     let mut skel_props: HashMap<usize, HashMap<String, Variant>> = HashMap::new();
     for &k in &skel_ids {
         let mut roots: Vec<usize> = (0..n)
-            .filter(|&i| skel_of[i] == Some(k) && parent[i].map_or(true, |p| skel_of[p] != Some(k)))
+            .filter(|&i| skel_of[i] == Some(k) && parent[i].is_none_or(|p| skel_of[p] != Some(k)))
             .collect();
         roots.sort_unstable();
         let mut props = HashMap::new();
@@ -300,7 +299,11 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
                 Some(Variant::String(s)) => s.replace([':', '/'], "_"),
                 _ => String::new(),
             };
-            let raw = if raw.is_empty() { "bone".to_string() } else { raw };
+            let raw = if raw.is_empty() {
+                "bone".to_string()
+            } else {
+                raw
+            };
             let name = gen_unique_name(&mut names_used, &raw);
             let bone_parent = parent[i].and_then(|p| bone_of[p]).map_or(-1, |b| b as i64);
             props.insert(format!("bones/{next}/name"), Variant::String(name.clone()));
@@ -338,7 +341,8 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
     let mut arena_to_gltf: HashMap<usize, usize> = HashMap::new();
     let mut physics = GltfPhysics::new(doc);
 
-    let skinned_mesh = |i: usize| int_of(&nodes[i], "skin").is_some() && int_of(&nodes[i], "mesh").is_some();
+    let skinned_mesh =
+        |i: usize| int_of(&nodes[i], "skin").is_some() && int_of(&nodes[i], "mesh").is_some();
 
     // `_generate_scene_node`, iterative so a deep or hostile file cannot blow
     // the stack. Each entry: (glTF node, arena parent).
@@ -392,22 +396,36 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
             let parent_trigger_nodes = arena_to_gltf
                 .get(&at)
                 .and_then(|&pg| node_compound_trigger_nodes(&nodes[pg]));
-            let plan = physics.plan(dict, gi, &arena.nodes[at].class, parent_trigger_nodes.as_deref());
+            let plan = physics.plan(
+                dict,
+                gi,
+                &arena.nodes[at].class,
+                parent_trigger_nodes.as_deref(),
+            );
             let id = match plan {
                 // An extension-generated node REPLACES the built-in one, so a
                 // glTF node that is both a body and a mesh keeps only the body
                 // (`_generate_scene_node` asks the extensions first).
                 Some(plan) => {
                     let id = physics.emit(&mut arena, at, node_names[gi].clone(), &plan, doc);
-                    arena.nodes[id]
-                        .props
-                        .insert("transform".into(), Variant::Transform3D(local_transform(dict)));
+                    arena.nodes[id].props.insert(
+                        "transform".into(),
+                        Variant::Transform3D(local_transform(dict)),
+                    );
                     id
                 }
                 None => {
                     let mut props = content_props(dict, doc);
-                    props.insert("transform".into(), Variant::Transform3D(local_transform(dict)));
-                    arena.add(Some(at), node_names[gi].clone(), node_class(dict, doc), props)
+                    props.insert(
+                        "transform".into(),
+                        Variant::Transform3D(local_transform(dict)),
+                    );
+                    arena.add(
+                        Some(at),
+                        node_names[gi].clone(),
+                        node_class(dict, doc),
+                        props,
+                    )
                 }
             };
             gltf_to_arena.insert(gi, id);
@@ -421,6 +439,8 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
     }
 
     // -- skinned meshes move under their skeleton (`_process_mesh_instances`)
+    // `gi` is the glTF node index: a map key as well as an index into `nodes`.
+    #[allow(clippy::needless_range_loop)]
     for gi in 0..n {
         if !skinned_mesh(gi) {
             continue;
@@ -441,7 +461,10 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
         };
         arena.reparent(mesh, sk);
         let props = &mut arena.nodes[mesh].props;
-        props.insert("transform".into(), Variant::Transform3D(Transform3D::IDENTITY));
+        props.insert(
+            "transform".into(),
+            Variant::Transform3D(Transform3D::IDENTITY),
+        );
         props.insert(
             "skeleton".into(),
             Variant::NodePath(gdcore::node_path::NodePath::new("..")),
@@ -463,7 +486,10 @@ pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
                 .get(bi)
                 .copied()
                 .unwrap_or(Transform3D::IDENTITY);
-            props.insert(format!("__skin__bind/{bi}/pose"), Variant::Transform3D(pose));
+            props.insert(
+                format!("__skin__bind/{bi}/pose"),
+                Variant::Transform3D(pose),
+            );
         }
     }
 
@@ -606,7 +632,10 @@ impl GltfPhysics {
     }
 
     fn shape_is_trigger(&self, shape: usize) -> bool {
-        matches!(self.shapes[shape].get("is_trigger"), Some(Variant::Bool(true)))
+        matches!(
+            self.shapes[shape].get("is_trigger"),
+            Some(Variant::Bool(true))
+        )
     }
 
     /// The physics body a node declares, as `GLTFPhysicsBody::to_node` builds
@@ -638,22 +667,37 @@ impl GltfPhysics {
                 Some(Variant::Vector3(v)) => v,
                 _ => Vector3::ZERO,
             };
-            node.props.insert("mass".into(), Variant::Float(f("mass", 1.0)));
             node.props
-                .insert("linear_velocity".into(), Variant::Vector3(v("linear_velocity")));
+                .insert("mass".into(), Variant::Float(f("mass", 1.0)));
+            node.props.insert(
+                "linear_velocity".into(),
+                Variant::Vector3(v("linear_velocity")),
+            );
+            node.props.insert(
+                "angular_velocity".into(),
+                Variant::Vector3(v("angular_velocity")),
+            );
             node.props
-                .insert("angular_velocity".into(), Variant::Vector3(v("angular_velocity")));
-            node.props.insert("inertia".into(), Variant::Vector3(v("inertia")));
+                .insert("inertia".into(), Variant::Vector3(v("inertia")));
             // RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-            node.props.insert("center_of_mass_mode".into(), Variant::Int(1));
             node.props
-                .insert("center_of_mass".into(), Variant::Vector3(v("center_of_mass")));
+                .insert("center_of_mass_mode".into(), Variant::Int(1));
+            node.props.insert(
+                "center_of_mass".into(),
+                Variant::Vector3(v("center_of_mass")),
+            );
         }
         Some(node)
     }
 
     /// `_generate_shape_node_and_body_if_needed`.
-    fn shape_node_and_body(&self, shape: usize, col_obj: Option<&str>, is_trigger: bool, name: &str) -> PhysNode {
+    fn shape_node_and_body(
+        &self,
+        shape: usize,
+        col_obj: Option<&str>,
+        is_trigger: bool,
+        name: &str,
+    ) -> PhysNode {
         let body = if is_trigger || self.shape_is_trigger(shape) {
             (col_obj != Some("Area3D")).then_some("Area3D")
         } else {
@@ -726,7 +770,10 @@ impl GltfPhysics {
                     ancestor = Some("Area3D");
                 }
             } else if !parent.is_some_and(is_physics_body)
-                && matches!(dict.get("physics_compound_collider"), Some(Variant::Bool(true)))
+                && matches!(
+                    dict.get("physics_compound_collider"),
+                    Some(Variant::Bool(true))
+                )
             {
                 ancestor = Some("StaticBody3D");
                 ret = Some(PhysNode::new("StaticBody3D"));
@@ -760,7 +807,11 @@ impl GltfPhysics {
 
     /// The Shape3D resource for `shapes[index]` (`GLTFPhysicsShape::to_resource`),
     /// as a sub-resource id, class and properties.
-    fn shape_resource(&mut self, index: usize, doc: &Resource) -> (String, String, HashMap<String, Variant>) {
+    fn shape_resource(
+        &mut self,
+        index: usize,
+        doc: &Resource,
+    ) -> (String, String, HashMap<String, Variant>) {
         if let Some(built) = self.built.get(&index) {
             return built.clone();
         }
@@ -802,9 +853,8 @@ impl GltfPhysics {
                 // `Mesh::create_convex_shape`: every surface's vertices. Godot
                 // then cleans them to the hull's own points; the physics
                 // server's support function gives the same hull either way.
-                let points: Vec<Vector3> = mesh_surfaces(doc, mesh)
-                    .flat_map(|s| s.vertices)
-                    .collect();
+                let points: Vec<Vector3> =
+                    mesh_surfaces(doc, mesh).flat_map(|s| s.vertices).collect();
                 props.insert("points".to_string(), Variant::PackedVector3Array(points));
                 "ConvexPolygonShape3D"
             }
@@ -816,7 +866,10 @@ impl GltfPhysics {
                 "ConcavePolygonShape3D"
             }
             other => {
-                tracing::error!("glTF physics: unknown shape type '{other}' in '{}'", doc.path);
+                tracing::error!(
+                    "glTF physics: unknown shape type '{other}' in '{}'",
+                    doc.path
+                );
                 ""
             }
         };
@@ -828,7 +881,14 @@ impl GltfPhysics {
     }
 
     /// Adds `plan` under arena node `at`, returning the top node's id.
-    fn emit(&mut self, arena: &mut Arena, at: usize, name: String, plan: &PhysNode, doc: &Resource) -> usize {
+    fn emit(
+        &mut self,
+        arena: &mut Arena,
+        at: usize,
+        name: String,
+        plan: &PhysNode,
+        doc: &Resource,
+    ) -> usize {
         let mut props = plan.props.clone();
         if let Some(shape) = plan.shape {
             let (id, class, shape_props) = self.shape_resource(shape, doc);
@@ -839,7 +899,10 @@ impl GltfPhysics {
                 // marker.
                 props.insert(
                     "__viewport_shape__".into(),
-                    Variant::String(crate::packed_scene::encode_shape_marker(&class, Some(&shape_props))),
+                    Variant::String(crate::packed_scene::encode_shape_marker(
+                        &class,
+                        Some(&shape_props),
+                    )),
                 );
                 props.insert("shape".into(), Variant::String(format!("SubResource:{id}")));
                 props.insert("__shape__class".into(), Variant::String(class));
@@ -850,7 +913,10 @@ impl GltfPhysics {
         }
         let id = arena.add(Some(at), name, plan.class, props);
         for child in &plan.children {
-            let child_name = child.name.clone().unwrap_or_else(|| child.class.to_string());
+            let child_name = child
+                .name
+                .clone()
+                .unwrap_or_else(|| child.class.to_string());
             self.emit(arena, id, child_name, child, doc);
         }
         id
@@ -904,7 +970,8 @@ fn mesh_surfaces(doc: &Resource, mesh: Option<i64>) -> impl Iterator<Item = Surf
                     .collect(),
                 _ => Vec::new(),
             };
-            let triangles = !matches!(sub.get_property("primitive_mode"), Some(Variant::Int(m)) if *m != 4);
+            let triangles =
+                !matches!(sub.get_property("primitive_mode"), Some(Variant::Int(m)) if *m != 4);
             Surface {
                 vertices,
                 indices,
@@ -982,7 +1049,7 @@ pub fn import_root_scale(import_text: &str) -> (f32, bool) {
     let scale = get("nodes/root_scale")
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(1.0);
-    let apply = get("nodes/apply_root_scale").map_or(true, |v| v != "false");
+    let apply = get("nodes/apply_root_scale").is_none_or(|v| v != "false");
     (scale, apply)
 }
 
@@ -1001,7 +1068,10 @@ pub fn import_root_scale(import_text: &str) -> (f32, bool) {
 /// demos loop `idle`/`run`/`walk` ONLY through this sidecar; their names match
 /// no rule, so a project copied without its `.import` files does not loop them
 /// in Godot either.
-pub fn apply_import_animation_settings(clips: &mut [crate::animation::Animation], import_text: &str) {
+pub fn apply_import_animation_settings(
+    clips: &mut [crate::animation::Animation],
+    import_text: &str,
+) {
     use crate::animation::LoopMode;
 
     let use_name_suffixes = !import_text
@@ -1225,7 +1295,13 @@ fn content_props(dict: &gdvariant::SharedDictionary, doc: &Resource) -> HashMap<
 /// become `_`.
 fn validate_node_name(name: &str) -> String {
     name.chars()
-        .map(|c| if matches!(c, '.' | ':' | '@' | '/' | '"' | '%') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '.' | ':' | '@' | '/' | '"' | '%') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 

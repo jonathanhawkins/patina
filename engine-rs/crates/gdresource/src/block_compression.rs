@@ -157,8 +157,8 @@ fn decode_bc1_color_opaque(block: &[u8; 8]) -> ([[u8; 3]; 4], u32) {
 fn decode_bc2_block(block: &[u8; 16]) -> [[u8; 4]; 16] {
     // 64 bits of 4-bit alpha across bytes 0..8, texel 0 in the low nibble.
     let mut alpha_bits: u64 = 0;
-    for i in 0..8 {
-        alpha_bits |= (block[i] as u64) << (8 * i);
+    for (i, &byte) in block[..8].iter().enumerate() {
+        alpha_bits |= (byte as u64) << (8 * i);
     }
     let mut color_block = [0u8; 8];
     color_block.copy_from_slice(&block[8..16]);

@@ -203,7 +203,8 @@ impl Rng {
         if temp < CMP_EPSILON {
             temp += CMP_EPSILON;
         }
-        mean + deviation * ((std::f64::consts::TAU * self.randd()).cos() * (-2.0 * temp.ln()).sqrt())
+        mean + deviation
+            * ((std::f64::consts::TAU * self.randd()).cos() * (-2.0 * temp.ln()).sqrt())
     }
 
     /// Godot `RandomPCG::randfn(float, float)` (Box-Muller on `randf`), with
@@ -347,7 +348,10 @@ pub fn pin_seed(base: Option<u64>) {
 
 /// The pinned base seed, if a seed is pinned.
 pub fn pinned_seed() -> Option<u64> {
-    PINNED.lock().unwrap_or_else(|e| e.into_inner()).map(|p| p.base)
+    PINNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|p| p.base)
 }
 
 fn next_pinned_global_seed() -> Option<u64> {

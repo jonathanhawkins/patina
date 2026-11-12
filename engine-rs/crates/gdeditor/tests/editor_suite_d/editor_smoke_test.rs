@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 /// A loopback stand-in for the asset catalog host (Godot AssetLib
@@ -68,7 +72,8 @@ fn make_server() -> (EditorServerHandle, u16, std::path::PathBuf) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let world = tree.add_child(root, Node::new("World", "Node2D")).unwrap();
-    tree.add_child(world, Node::new("Hero", "Sprite2D")).unwrap();
+    tree.add_child(world, Node::new("Hero", "Sprite2D"))
+        .unwrap();
     let mut state = EditorState::new(tree);
     state.project_root = Some(dir.to_string_lossy().to_string());
     let handle = EditorServerHandle::start(port, state);
@@ -91,7 +96,10 @@ fn http_get(port: u16, path: &str) -> String {
     let mut stream = connect_with_retry(port);
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .unwrap();
     let mut resp = Vec::new();
     let _ = stream.read_to_end(&mut resp);
@@ -99,8 +107,13 @@ fn http_get(port: u16, path: &str) -> String {
 }
 
 fn json_of(resp: &str) -> serde_json::Value {
-    assert!(resp.contains("200 OK"), "endpoint did not return 200:\n{}", resp.lines().next().unwrap_or(""));
-    serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or(serde_json::Value::Null)
+    assert!(
+        resp.contains("200 OK"),
+        "endpoint did not return 200:\n{}",
+        resp.lines().next().unwrap_or("")
+    );
+    serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap_or(""))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Resolve a "a.b.c" path into the JSON value.
@@ -123,25 +136,81 @@ fn editor_app_smoke_all_modes() {
     // (surface, DOM marker served in /editor, backing endpoint, json key that
     //  must be present/non-null — proving the endpoint is real, not a stub).
     let surfaces: &[(&str, &str, &str, &str)] = &[
-        ("play controls",  r#"id="btn-play""#,            "/api/runtime/status",                   "running"),
-        ("3D viewport",    r#"id="vp3d-toolbar""#,        "/api/viewport/3d/state",                "yaw"),
-        ("script view",    r#"id="script-editor-panel""#, "/api/scene",                            "nodes"),
-        ("signals dock",   r#"id="node-dock""#,           "/api/scene",                            "nodes"),
-        ("asset browser",  r#"id="assetlib-grid""#,       "/api/assetlib/list",                    "assets"),
-        ("profiler",       r#"id="profiler-panel""#,      "/api/profiler",                         "capturing"),
-        ("monitors",       r#"id="monitor-tree""#,        "/api/monitors",                         "monitors.object/nodes"),
-        ("debugger",       r#"id="debug-errors-list""#,   "/api/debug/info",                       "video_ram"),
-        ("animation",      r#"id="animation-panel""#,     "/api/animations",                       ""),
-        ("game toolbar",   r#"id="game-toolbar""#,        "/api/runtime/status",                   "time_scale"),
-        ("input map",      r#"id="pset-input-map""#,      "/api/input_map",                        "actions"),
+        (
+            "play controls",
+            r#"id="btn-play""#,
+            "/api/runtime/status",
+            "running",
+        ),
+        (
+            "3D viewport",
+            r#"id="vp3d-toolbar""#,
+            "/api/viewport/3d/state",
+            "yaw",
+        ),
+        (
+            "script view",
+            r#"id="script-editor-panel""#,
+            "/api/scene",
+            "nodes",
+        ),
+        ("signals dock", r#"id="node-dock""#, "/api/scene", "nodes"),
+        (
+            "asset browser",
+            r#"id="assetlib-grid""#,
+            "/api/assetlib/list",
+            "assets",
+        ),
+        (
+            "profiler",
+            r#"id="profiler-panel""#,
+            "/api/profiler",
+            "capturing",
+        ),
+        (
+            "monitors",
+            r#"id="monitor-tree""#,
+            "/api/monitors",
+            "monitors.object/nodes",
+        ),
+        (
+            "debugger",
+            r#"id="debug-errors-list""#,
+            "/api/debug/info",
+            "video_ram",
+        ),
+        (
+            "animation",
+            r#"id="animation-panel""#,
+            "/api/animations",
+            "",
+        ),
+        (
+            "game toolbar",
+            r#"id="game-toolbar""#,
+            "/api/runtime/status",
+            "time_scale",
+        ),
+        (
+            "input map",
+            r#"id="pset-input-map""#,
+            "/api/input_map",
+            "actions",
+        ),
     ];
 
     for (label, marker, endpoint, key) in surfaces {
         // 1. The surface's DOM is actually served.
-        assert!(doc.contains(marker), "[{label}] DOM marker {marker} missing from /editor");
+        assert!(
+            doc.contains(marker),
+            "[{label}] DOM marker {marker} missing from /editor"
+        );
         // 2. Its backing endpoint returns real data (200 + structured body).
         let v = json_of(&http_get(port, endpoint));
-        assert!(!v.is_null(), "[{label}] {endpoint} returned no JSON body (stub/404)");
+        assert!(
+            !v.is_null(),
+            "[{label}] {endpoint} returned no JSON body (stub/404)"
+        );
         if !key.is_empty() {
             let field = dig(&v, key);
             assert!(
@@ -152,15 +221,24 @@ fn editor_app_smoke_all_modes() {
             // seeded real content (asset catalog, monitors, input map).
             if let Some(arr) = field.as_array() {
                 if *label == "asset browser" {
-                    assert!(!arr.is_empty(), "[{label}] {endpoint} `{key}` is an empty array (stub)");
+                    assert!(
+                        !arr.is_empty(),
+                        "[{label}] {endpoint} `{key}` is an empty array (stub)"
+                    );
                 }
             }
             if *label == "input map" {
-                assert!(field.as_object().map(|o| !o.is_empty()).unwrap_or(false), "[{label}] input map has no actions (stub)");
+                assert!(
+                    field.as_object().map(|o| !o.is_empty()).unwrap_or(false),
+                    "[{label}] input map has no actions (stub)"
+                );
             }
         } else {
             // No key: just require a JSON array/object came back.
-            assert!(v.is_array() || v.is_object(), "[{label}] {endpoint} returned a scalar stub");
+            assert!(
+                v.is_array() || v.is_object(),
+                "[{label}] {endpoint} returned a scalar stub"
+            );
         }
     }
 

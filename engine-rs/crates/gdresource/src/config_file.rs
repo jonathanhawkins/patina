@@ -55,7 +55,7 @@ impl ConfigFile {
     pub fn has_section_key(&self, section: &str, key: &str) -> bool {
         self.sections
             .get(section)
-            .map_or(false, |s| s.contains_key(key))
+            .is_some_and(|s| s.contains_key(key))
     }
 
     /// Returns all section names in sorted order.

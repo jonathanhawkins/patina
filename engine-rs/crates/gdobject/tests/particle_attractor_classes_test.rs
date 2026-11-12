@@ -8,8 +8,8 @@
 //!
 //! Schemas are diffed against `extension_api.json`.
 
-use gdobject::{class_exists, get_property_list, is_parent_class, register_3d_classes};
 use gdobject::class_db::is_abstract;
+use gdobject::{class_exists, get_property_list, is_parent_class, register_3d_classes};
 use gdvariant::Variant;
 
 /// The three concrete attractor shapes and the property that defines each volume.
@@ -109,11 +109,15 @@ fn each_shape_defines_its_own_volume() {
     // A sphere is defined by a radius and a box by a size; neither borrows the
     // other's.
     assert!(
-        !props("GPUParticlesAttractorSphere3D").iter().any(|p| p == "size"),
+        !props("GPUParticlesAttractorSphere3D")
+            .iter()
+            .any(|p| p == "size"),
         "a sphere has no size — it has a radius"
     );
     assert!(
-        !props("GPUParticlesAttractorBox3D").iter().any(|p| p == "radius"),
+        !props("GPUParticlesAttractorBox3D")
+            .iter()
+            .any(|p| p == "radius"),
         "a box has no radius — it has a size"
     );
     // The vector-field variant is a box that also samples a texture for the
@@ -125,8 +129,14 @@ fn each_shape_defines_its_own_volume() {
 fn defaults_describe_a_usable_attractor() {
     register_3d_classes();
     // A default attractor pulls (positive strength) rather than doing nothing.
-    assert_eq!(default_of("GPUParticlesAttractor3D", "strength"), Variant::Float(1.0));
-    assert_eq!(default_of("GPUParticlesAttractor3D", "attenuation"), Variant::Float(1.0));
+    assert_eq!(
+        default_of("GPUParticlesAttractor3D", "strength"),
+        Variant::Float(1.0)
+    );
+    assert_eq!(
+        default_of("GPUParticlesAttractor3D", "attenuation"),
+        Variant::Float(1.0)
+    );
     // Fully radial by default: 0 = pull toward the centre, 1 = uniform direction.
     assert_eq!(
         default_of("GPUParticlesAttractor3D", "directionality"),
@@ -146,7 +156,10 @@ fn defaults_describe_a_usable_attractor() {
     );
     match default_of("GPUParticlesAttractorBox3D", "size") {
         Variant::Vector3(v) => {
-            assert!(v.x > 0.0 && v.y > 0.0 && v.z > 0.0, "a box volume must have extent")
+            assert!(
+                v.x > 0.0 && v.y > 0.0 && v.z > 0.0,
+                "a box volume must have extent"
+            )
         }
         other => panic!("size must be a Vector3, got {other:?}"),
     }

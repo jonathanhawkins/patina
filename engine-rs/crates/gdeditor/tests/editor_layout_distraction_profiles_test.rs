@@ -96,11 +96,17 @@ fn saved_layout_persists_through_settings_store() {
         "/api/settings",
         r#"{"panel_sizes":{"left":250.0,"right":300.0,"bottom":180.0}}"#,
     );
-    assert!(post.contains("200 OK"), "POST /api/settings should 200, got:\n{post}");
+    assert!(
+        post.contains("200 OK"),
+        "POST /api/settings should 200, got:\n{post}"
+    );
 
     // Reload: GET returns the persisted panel_sizes unchanged.
     let get = http_req(port, "GET", "/api/settings", "");
-    assert!(get.contains("200 OK"), "GET /api/settings should 200, got:\n{get}");
+    assert!(
+        get.contains("200 OK"),
+        "GET /api/settings should 200, got:\n{get}"
+    );
     let v: serde_json::Value =
         serde_json::from_str(extract_body(&get)).expect("settings response should be JSON");
     assert_eq!(

@@ -32,8 +32,13 @@ fn default_icon_svg_loads_pixels() {
     let path = dir.path().join("icon.svg");
     std::fs::write(&path, ICON_SVG).unwrap();
 
-    let res = rfl.load_resource(&path).expect("load default icon.svg via registry");
-    assert_eq!(res.class_name, "Texture2D", "icon.svg imports as a Texture2D");
+    let res = rfl
+        .load_resource(&path)
+        .expect("load default icon.svg via registry");
+    assert_eq!(
+        res.class_name, "Texture2D",
+        "icon.svg imports as a Texture2D"
+    );
     assert_eq!(res.get_property("width"), Some(&Variant::Int(ICON_W)));
     assert_eq!(res.get_property("height"), Some(&Variant::Int(ICON_H)));
     assert_eq!(

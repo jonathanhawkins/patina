@@ -107,13 +107,21 @@ fn an_action_shortcut_fires_on_every_key_bound_to_the_action() {
     assert_eq!(fired(&ml, hud), Variant::Int(0));
 
     tap(&mut ml, Key::Enter);
-    assert_eq!(fired(&ml, hud), Variant::Int(1), "Enter is bound to start_game");
+    assert_eq!(
+        fired(&ml, hud),
+        Variant::Int(1),
+        "Enter is bound to start_game"
+    );
 
     tap(&mut ml, Key::Space);
     assert_eq!(fired(&ml, hud), Variant::Int(2), "so is Space");
 
     tap(&mut ml, Key::A);
-    assert_eq!(fired(&ml, hud), Variant::Int(2), "an unbound key fires nothing");
+    assert_eq!(
+        fired(&ml, hud),
+        Variant::Int(2),
+        "an unbound key fires nothing"
+    );
 }
 
 #[test]

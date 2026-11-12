@@ -22,8 +22,13 @@ fn boot(scripts: &[(&str, &str, Option<&str>)]) -> (MainLoop, Vec<NodeId>) {
             Some(p) => tree.get_node_relative(ids[0], p).unwrap_or(ids[0]),
             None => root,
         };
-        let id = tree.add_child(parent_id, Node::new(*name, "Node2D")).unwrap();
-        tree.attach_script(id, Box::new(GDScriptNodeInstance::from_source(src, id).unwrap()));
+        let id = tree
+            .add_child(parent_id, Node::new(*name, "Node2D"))
+            .unwrap();
+        tree.attach_script(
+            id,
+            Box::new(GDScriptNodeInstance::from_source(src, id).unwrap()),
+        );
         ids.push(id);
     }
     LifecycleManager::enter_tree(&mut tree, ids[0]);
@@ -61,7 +66,11 @@ func _on_hit():
 #[test]
 fn a_handler_for_the_scripts_own_signal_keeps_its_writes_and_the_emitter_sees_them() {
     let (ml, ids) = boot(&[("P", SELF_EMIT, None)]);
-    assert_eq!(var(&ml, ids[0], "hp"), Variant::Int(7), "the handler's write is kept");
+    assert_eq!(
+        var(&ml, ids[0], "hp"),
+        Variant::Int(7),
+        "the handler's write is kept"
+    );
     assert_eq!(
         var(&ml, ids[0], "seen_after"),
         Variant::Int(7),
@@ -88,7 +97,11 @@ func bump():
 #[test]
 fn a_callers_local_does_not_capture_a_callees_member_write() {
     let (ml, ids) = boot(&[("P", LOCAL_SHADOW, None)]);
-    assert_eq!(var(&ml, ids[0], "n"), Variant::Int(1), "bump() wrote the MEMBER n");
+    assert_eq!(
+        var(&ml, ids[0], "n"),
+        Variant::Int(1),
+        "bump() wrote the MEMBER n"
+    );
     assert_eq!(
         var(&ml, ids[0], "local_after"),
         Variant::Int(100),

@@ -44,7 +44,15 @@ fn close(a: Color, b: Color, tol: f32) -> bool {
 }
 
 /// Returns true if any pixel in the (inclusive) rect matches `color`.
-fn region_has(fb: &FrameBuffer, x0: u32, y0: u32, x1: u32, y1: u32, color: Color, tol: f32) -> bool {
+fn region_has(
+    fb: &FrameBuffer,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: Color,
+    tol: f32,
+) -> bool {
     for y in y0..=y1 {
         for x in x0..=x1 {
             if close(pixel_at(fb, x, y), color, tol) {
@@ -69,7 +77,12 @@ fn control_tree_renders_themed_pixels() {
     place(&mut tree, panel, 0.0, 0.0, 200.0, 100.0);
     let cr = add(&mut tree, panel, "Rect", "ColorRect");
     place(&mut tree, cr, 10.0, 10.0, 60.0, 60.0); // local → global (10,10)-(60,60)
-    set_prop(&mut tree, cr, "color", Variant::Color(Color::rgb(1.0, 0.0, 0.0)));
+    set_prop(
+        &mut tree,
+        cr,
+        "color",
+        Variant::Color(Color::rgb(1.0, 0.0, 0.0)),
+    );
 
     // Button with centered text.
     let btn = add(&mut tree, ui, "Btn", "Button");
@@ -84,11 +97,19 @@ fn control_tree_renders_themed_pixels() {
     // TextureRect referencing a registered texture.
     let tex = add(&mut tree, ui, "Tex", "TextureRect");
     place(&mut tree, tex, 120.0, 120.0, 180.0, 180.0);
-    set_prop(&mut tree, tex, "texture", Variant::String("icon.png".to_owned()));
+    set_prop(
+        &mut tree,
+        tex,
+        "texture",
+        Variant::String("icon.png".to_owned()),
+    );
 
     // Render the tree into draw commands, then rasterize.
     let mut renderer = SoftwareRenderer::new();
-    renderer.register_texture("icon.png", Texture2D::solid(4, 4, Color::rgb(0.0, 0.0, 1.0)));
+    renderer.register_texture(
+        "icon.png",
+        Texture2D::solid(4, 4, Color::rgb(0.0, 0.0, 1.0)),
+    );
     let mut vp = Viewport::new(200, 200, Color::BLACK);
     let theme = Theme::default_theme();
     render_control_tree(&mut tree, ui, &theme, &mut vp, Vector2::new(200.0, 200.0));
@@ -100,7 +121,11 @@ fn control_tree_renders_themed_pixels() {
     // at 60% alpha (pat-9ww3e) over the black clear = 0.06 gray, on the top
     // half where the ColorRect does not cover it.
     assert!(
-        close(pixel_at(&fb, 150, 50), Color::new(0.06, 0.06, 0.06, 1.0), tol),
+        close(
+            pixel_at(&fb, 150, 50),
+            Color::new(0.06, 0.06, 0.06, 1.0),
+            tol
+        ),
         "Panel StyleBox bg should fill its rect, got {:?}",
         pixel_at(&fb, 150, 50)
     );
@@ -116,14 +141,26 @@ fn control_tree_renders_themed_pixels() {
     // same 60%-alpha (0.1, 0.1, 0.1) as the Panel (pat-9ww3e) -> 0.06 over the
     // black clear, away from the centred text.
     assert!(
-        close(pixel_at(&fb, 15, 155), Color::new(0.06, 0.06, 0.06, 1.0), tol),
+        close(
+            pixel_at(&fb, 15, 155),
+            Color::new(0.06, 0.06, 0.06, 1.0),
+            tol
+        ),
         "Button StyleBox bg should fill its rect, got {:?}",
         pixel_at(&fb, 15, 155)
     );
 
     // Button text: themed font_color (~0.875 gray) appears somewhere in the button.
     assert!(
-        region_has(&fb, 10, 120, 109, 159, Color::new(0.875, 0.875, 0.875, 1.0), tol),
+        region_has(
+            &fb,
+            10,
+            120,
+            109,
+            159,
+            Color::new(0.875, 0.875, 0.875, 1.0),
+            tol
+        ),
         "Button should render themed font_color text pixels"
     );
 
@@ -189,7 +226,12 @@ fn scroll_scene() -> (SceneTree, NodeId) {
     let vbox = add(&mut tree, scroll, "Content", "VBoxContainer");
     // Gapless bands: Godot's default `separation` is 4 (pat-9ww3e), and the
     // scroll arithmetic below is for 3 x 100 = 300px of content.
-    set_prop(&mut tree, vbox, "theme_override_constants/separation", Variant::Int(0));
+    set_prop(
+        &mut tree,
+        vbox,
+        "theme_override_constants/separation",
+        Variant::Int(0),
+    );
     // A container distributes space from `effective_min`, and Patina does not
     // derive an implicit minimum from children yet, so the content extent is
     // authored — the same accommodation play_view_renders_controls_e2e makes.
@@ -491,7 +533,12 @@ fn wheel_over_non_scrolling_content_is_not_consumed() {
     let vbox = add(&mut tree, scroll, "Content", "VBoxContainer");
     // Gapless bands: Godot's default `separation` is 4 (pat-9ww3e), and the
     // scroll arithmetic below is for 3 x 100 = 300px of content.
-    set_prop(&mut tree, vbox, "theme_override_constants/separation", Variant::Int(0));
+    set_prop(
+        &mut tree,
+        vbox,
+        "theme_override_constants/separation",
+        Variant::Int(0),
+    );
     set_prop(
         &mut tree,
         vbox,
@@ -522,7 +569,12 @@ fn anchors_resolved_live_fullrect_fills_viewport() {
     let root = tree.root_id();
     let cr = add(&mut tree, root, "Full", "ColorRect");
     control::apply_anchor_preset(&mut tree, cr, AnchorPreset::FullRect);
-    set_prop(&mut tree, cr, "color", Variant::Color(Color::rgb(0.0, 1.0, 0.0)));
+    set_prop(
+        &mut tree,
+        cr,
+        "color",
+        Variant::Color(Color::rgb(0.0, 1.0, 0.0)),
+    );
 
     let mut renderer = SoftwareRenderer::new();
     let mut vp = Viewport::new(48, 48, Color::BLACK);

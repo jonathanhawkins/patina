@@ -14,8 +14,7 @@ fn report_path() -> PathBuf {
 
 fn read_report() -> String {
     let path = report_path();
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 #[test]

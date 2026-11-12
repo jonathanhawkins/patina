@@ -454,7 +454,7 @@ impl EditorPluginRegistry {
         self.plugins
             .iter()
             .find(|e| e.plugin.plugin_id() == plugin_id)
-            .map_or(false, |e| e.enabled)
+            .is_some_and(|e| e.enabled)
     }
 
     /// Returns the number of registered plugins.
@@ -548,14 +548,14 @@ impl EditorPluginRegistry {
         pressed: bool,
     ) -> InputHandleResult {
         for entry in &mut self.plugins {
-            if entry.enabled && entry.plugin.handles(class_name) {
-                if entry
+            if entry.enabled
+                && entry.plugin.handles(class_name)
+                && entry
                     .plugin
                     .forward_canvas_input(mouse_x, mouse_y, button, pressed)
                     == InputHandleResult::Consumed
-                {
-                    return InputHandleResult::Consumed;
-                }
+            {
+                return InputHandleResult::Consumed;
             }
         }
         InputHandleResult::Pass
@@ -573,14 +573,14 @@ impl EditorPluginRegistry {
         pressed: bool,
     ) -> InputHandleResult {
         for entry in &mut self.plugins {
-            if entry.enabled && entry.plugin.handles(class_name) {
-                if entry
+            if entry.enabled
+                && entry.plugin.handles(class_name)
+                && entry
                     .plugin
                     .forward_3d_input(mouse_x, mouse_y, button, pressed)
                     == InputHandleResult::Consumed
-                {
-                    return InputHandleResult::Consumed;
-                }
+            {
+                return InputHandleResult::Consumed;
             }
         }
         InputHandleResult::Pass
@@ -1051,6 +1051,12 @@ pub struct PreviewEntry {
     pub width: u32,
     /// Preview height in pixels.
     pub height: u32,
+}
+
+impl Default for ResourcePreviewPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourcePreviewPlugin {

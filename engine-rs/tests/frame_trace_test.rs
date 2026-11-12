@@ -324,11 +324,19 @@ fn patina_trace_matches_golden() {
 fn each_node_enters_and_readies_exactly_once() {
     let output = run_with_event_trace("test_scripts.tscn", 1);
     let events = output["event_trace"].as_array().expect("event_trace");
-    for path in ["/root/TestScene", "/root/TestScene/Mover", "/root/TestScene/VarTest"] {
+    for path in [
+        "/root/TestScene",
+        "/root/TestScene/Mover",
+        "/root/TestScene/VarTest",
+    ] {
         for detail in ["ENTER_TREE", "READY"] {
             let n = events
                 .iter()
-                .filter(|e| e["event_type"] == "notification" && e["detail"] == detail && e["node_path"] == path)
+                .filter(|e| {
+                    e["event_type"] == "notification"
+                        && e["detail"] == detail
+                        && e["node_path"] == path
+                })
                 .count();
             assert_eq!(n, 1, "{path} {detail} fired {n} times");
         }

@@ -544,6 +544,7 @@ impl Image {
     }
 
     /// Copies a `src` region to `(dst_x, dst_y)`, overwriting (`Image.blit_rect`).
+    #[allow(clippy::too_many_arguments)]
     pub fn blit_rect(
         &mut self,
         src: &Image,
@@ -585,6 +586,7 @@ impl Image {
     }
 
     /// Alpha-blends a `src` region over `(dst_x, dst_y)` (`Image.blend_rect`).
+    #[allow(clippy::too_many_arguments)]
     pub fn blend_rect(
         &mut self,
         src: &Image,

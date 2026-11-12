@@ -19,9 +19,8 @@ fn plan_path() -> PathBuf {
 
 fn plan_body() -> String {
     let p = plan_path();
-    std::fs::read_to_string(&p).unwrap_or_else(|e| {
-        panic!("EDITOR_ARCHITECTURE.md must exist at {}: {e}", p.display())
-    })
+    std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("EDITOR_ARCHITECTURE.md must exist at {}: {e}", p.display()))
 }
 
 #[test]
@@ -87,8 +86,12 @@ fn validation_test_anchor_cites_plan_as_source_of_truth() {
         .join("tests")
         .join("editor_suite")
         .join("editor_architecture_plan_test.rs");
-    let body = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("editor_architecture_plan_test.rs must exist at {}: {e}", p.display()));
+    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+        panic!(
+            "editor_architecture_plan_test.rs must exist at {}: {e}",
+            p.display()
+        )
+    });
     assert!(
         body.contains("EDITOR_ARCHITECTURE.md"),
         "validation test must cite EDITOR_ARCHITECTURE.md as the source of truth"

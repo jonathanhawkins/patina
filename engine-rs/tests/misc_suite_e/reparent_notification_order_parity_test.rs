@@ -176,9 +176,7 @@ fn reparent_ready_after_enter_tree() {
 
     let log = tree.get_node(child).unwrap().notification_log();
     let enter_pos = log.iter().position(|n| *n == NOTIFICATION_ENTER_TREE);
-    let post_pos = log
-        .iter()
-        .position(|n| *n == NOTIFICATION_POST_ENTER_TREE);
+    let post_pos = log.iter().position(|n| *n == NOTIFICATION_POST_ENTER_TREE);
 
     assert!(enter_pos.is_some(), "ENTER_TREE must fire");
     assert!(post_pos.is_some(), "POST_ENTER_TREE must fire");

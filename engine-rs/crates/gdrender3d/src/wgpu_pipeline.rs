@@ -19,10 +19,10 @@ use gdserver3d::environment::{BackgroundMode, Environment3D};
 use gdserver3d::fog_volume::FogVolume;
 use gdserver3d::gi::{VoxelGI, VoxelGIId};
 use gdserver3d::instance::{GeometryInstanceSettings, Instance3D, Instance3DId};
-use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::{Material3D, ShadingMode};
 use gdserver3d::mesh::Mesh3D;
+use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::projection::perspective_projection_matrix;
 use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
@@ -1553,7 +1553,11 @@ pub fn probe_atlas_layout(res: u32) -> (u32, u32, Vec<(u32, u32)>) {
         origins.push((res, y));
         y += roughness_level_resolution(res, k);
     }
-    (res + roughness_level_resolution(res, 1), res.max(y), origins)
+    (
+        res + roughness_level_resolution(res, 1),
+        res.max(y),
+        origins,
+    )
 }
 
 /// The uniform the probe loop reads (pat-h7sz7): up to [`MAX_GPU_PROBES`]
@@ -1565,7 +1569,10 @@ pub fn probe_atlas_layout(res: u32) -> (u32, u32, Vec<(u32, u32)>) {
 pub fn build_probe_array_data<'a>(
     probes: &'a [ReflectionProbe],
     sky: Option<&'a gdserver3d::reflection_probe::SkyRadiance>,
-) -> (ProbeArrayData, Vec<&'a gdserver3d::reflection_probe::ReflectionCubemap>) {
+) -> (
+    ProbeArrayData,
+    Vec<&'a gdserver3d::reflection_probe::ReflectionCubemap>,
+) {
     use gdserver3d::reflection_probe::probe_processing_order;
     let resolution = probes
         .iter()
@@ -1705,7 +1712,11 @@ fn upload_probe_cube_array(
             dfg_bytes.extend_from_slice(&f32::to_le_bytes(v));
         }
     }
-    let dfg_size = wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 };
+    let dfg_size = wgpu::Extent3d {
+        width: n,
+        height: n,
+        depth_or_array_layers: 1,
+    };
     let dfg_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dfg-lut"),
         size: dfg_size,
@@ -1773,7 +1784,8 @@ fn apply_probe_fields(
                             (v - q) * (v - q)
                         })
                         .sum();
-                    !(d2 > r * r)
+                    // `!(d2 > r²)`, spelled so a NaN distance still touches.
+                    d2.partial_cmp(&(r * r)) != Some(std::cmp::Ordering::Greater)
                 }
             };
             if touches {
@@ -2008,7 +2020,14 @@ pub struct EditorPipelineKey {
 // By hand: `CullMode` lives in gdserver3d and derives no `Hash`.
 impl std::hash::Hash for EditorPipelineKey {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        (self.cull as u8, self.depth_write, self.depth_test, self.additive, self.module).hash(h);
+        (
+            self.cull as u8,
+            self.depth_write,
+            self.depth_test,
+            self.additive,
+            self.module,
+        )
+            .hash(h);
     }
 }
 
@@ -3463,13 +3482,12 @@ fn pack_lights_from_maps(
     {
         let mut gpu = light_to_gpu(light, camera);
         if light.shadow_enabled
-            && matches!(
-                light.light_type,
-                LightType::Directional | LightType::Spot
-            )
+            && matches!(light.light_type, LightType::Directional | LightType::Spot)
         {
-            if let Some((layer, sm)) =
-                maps.iter().enumerate().find(|(_, m)| m.light_id == light.id)
+            if let Some((layer, sm)) = maps
+                .iter()
+                .enumerate()
+                .find(|(_, m)| m.light_id == light.id)
             {
                 gpu.shadow_view_proj = mul_mat4(&sm.proj_matrix, &sm.view_matrix);
                 gpu.shadow_map_index = layer as i32;
@@ -3499,6 +3517,7 @@ fn pack_lights_from_maps(
 /// Uncached variant kept for tests; the render paths go through
 /// [`GpuRenderer3D::ensure_shadow_atlas`], which skips generation entirely
 /// when the shadow-relevant scene state hasn't changed (pat-2be0q).
+#[cfg(test)]
 fn pack_lights_with_shadows<'a>(
     lights: &[Light3D],
     instances: impl Iterator<Item = &'a Instance3D>,
@@ -3511,10 +3530,7 @@ fn pack_lights_with_shadows<'a>(
     (light_data, maps)
 }
 
-/// Generates omni cubemaps for the shadow-casting point lights and packs the
-/// `Some` results as `(light id, cubemap)` in light order — the layout
-/// [`pack_lights_from_maps`] and the omni face array share (pat-g4i60).
-/// [`pack_omni_cubemaps`] with each light's cubemap reused while neither the
+/// `pack_omni_cubemaps` with each light's cubemap reused while neither the
 /// light nor any caster within its range changed. `casters`, `keys` and
 /// `mesh_hashes` are parallel (one caster key and mesh fingerprint per
 /// caster). Returns the packed cubemaps, and whether any differs from the
@@ -3565,7 +3581,10 @@ fn omni_cubemaps_cached(
         }
         let key = h.finish();
         seen.push(l.id.0);
-        let hit = cache.get(&l.id.0).filter(|(k, _)| *k == key).map(|(_, c)| c.clone());
+        let hit = cache
+            .get(&l.id.0)
+            .filter(|(k, _)| *k == key)
+            .map(|(_, c)| c.clone());
         let cube = match hit {
             Some(c) => c,
             None => {
@@ -3583,6 +3602,13 @@ fn omni_cubemaps_cached(
     (out, changed)
 }
 
+/// Generates omni cubemaps for the shadow-casting point lights and packs the
+/// `Some` results as `(light id, cubemap)` in light order — the layout
+/// [`pack_lights_from_maps`] and the omni face array share (pat-g4i60).
+///
+/// Test-only, like [`pack_lights_with_shadows`]; the render path uses
+/// [`omni_cubemaps_cached`].
+#[cfg(test)]
 fn pack_omni_cubemaps(
     lights: &[Light3D],
     instances: &[Instance3D],
@@ -3599,6 +3625,9 @@ fn pack_omni_cubemaps(
 /// every occluder's visibility, transform, and mesh geometry. Multimesh and
 /// material state are deliberately excluded: the CPU shadow rasterizer draws
 /// `inst.mesh` only (extend this key if that ever changes).
+///
+/// Test-only composition of the halves the render path computes separately.
+#[cfg(test)]
 fn shadow_state_key<'a>(
     lights: &[Light3D],
     instances: impl Iterator<Item = &'a Instance3D>,
@@ -3612,7 +3641,7 @@ fn shadow_state_key<'a>(
     combine_shadow_key(sig, any_shadow, &keys)
 }
 
-/// The light half of [`shadow_state_key`], and whether any light casts.
+/// The light half of `shadow_state_key`, and whether any light casts.
 fn shadow_light_signature(lights: &[Light3D]) -> (u64, bool) {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -3666,14 +3695,15 @@ fn shadow_light_signature(lights: &[Light3D]) -> (u64, bool) {
 
 /// Everything one instance contributes to a shadow map: visibility,
 /// transform, geometry, and the `cast_shadow` / `layers` settings
-/// `casts_into_shadow` reads. The per-caster half of [`shadow_state_key`], and
+/// `casts_into_shadow` reads. The per-caster half of `shadow_state_key`, and
 /// the identity [`crate::shadow_map::generate_shadow_maps_incremental`] uses
 /// to tell a static caster from a moving one (pat-414k3).
+#[cfg(test)]
 fn shadow_caster_key(inst: &Instance3D) -> u64 {
     shadow_caster_key_with(inst, inst.mesh.as_ref().map(mesh_content_hash))
 }
 
-/// [`shadow_caster_key`] with the mesh's `mesh_content_hash` already known.
+/// `shadow_caster_key` with the mesh's `mesh_content_hash` already known.
 fn shadow_caster_key_with(inst: &Instance3D, mesh_hash: Option<u64>) -> u64 {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -3682,10 +3712,18 @@ fn shadow_caster_key_with(inst: &Instance3D, mesh_hash: Option<u64>) -> u64 {
     h.write_u32(inst.geometry.layers);
     let t = &inst.transform;
     for f in [
-        t.basis.x.x, t.basis.x.y, t.basis.x.z,
-        t.basis.y.x, t.basis.y.y, t.basis.y.z,
-        t.basis.z.x, t.basis.z.y, t.basis.z.z,
-        t.origin.x, t.origin.y, t.origin.z,
+        t.basis.x.x,
+        t.basis.x.y,
+        t.basis.x.z,
+        t.basis.y.x,
+        t.basis.y.y,
+        t.basis.y.z,
+        t.basis.z.x,
+        t.basis.z.y,
+        t.basis.z.z,
+        t.origin.x,
+        t.origin.y,
+        t.origin.z,
     ] {
         h.write_u32(f.to_bits());
     }
@@ -3741,7 +3779,11 @@ fn write_shadow_rects(
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: x0, y: y0, z: layer as u32 },
+                    origin: wgpu::Origin3d {
+                        x: x0,
+                        y: y0,
+                        z: layer as u32,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 bytemuck::cast_slice(&rows),
@@ -3750,7 +3792,11 @@ fn write_shadow_rects(
                     bytes_per_row: Some(rw * 4),
                     rows_per_image: Some(rh),
                 },
-                wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: rw,
+                    height: rh,
+                    depth_or_array_layers: 1,
+                },
             );
             written += rw as u64 * rh as u64;
         }
@@ -3796,8 +3842,16 @@ fn upload_shadow_depth_array(
         // top-left of a layer as big as the largest, the rest of the layer is
         // the empty sentinel, and `shadow_uv_scale` tells the shader how much
         // of the layer is its map.
-        let dw = maps.iter().map(|m| m.depth.dimensions().0).max().unwrap_or(1);
-        let dh = maps.iter().map(|m| m.depth.dimensions().1).max().unwrap_or(1);
+        let dw = maps
+            .iter()
+            .map(|m| m.depth.dimensions().0)
+            .max()
+            .unwrap_or(1);
+        let dh = maps
+            .iter()
+            .map(|m| m.depth.dimensions().1)
+            .max()
+            .unwrap_or(1);
         // Row copies, not per-texel pushes: a fitted map is 2048² texels and
         // this runs whenever a caster moves.
         let (dwu, dhu) = (dw as usize, dh as usize);
@@ -3876,8 +3930,7 @@ fn upload_omni_shadow_array(
         (1, 1, f32::MAX.to_le_bytes().to_vec())
     } else {
         let res = cubes[0].1.resolution.max(1);
-        let mut bytes =
-            Vec::with_capacity(cubes.len() * 6 * (res * res) as usize * 4);
+        let mut bytes = Vec::with_capacity(cubes.len() * 6 * (res * res) as usize * 4);
         for (_, cube) in cubes {
             debug_assert_eq!(
                 cube.resolution, res,
@@ -3940,6 +3993,7 @@ fn upload_omni_shadow_array(
 }
 
 /// Builds the light bind group (uniform + shadow depth array).
+#[allow(clippy::too_many_arguments)]
 fn create_light_bind_group(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4013,7 +4067,7 @@ fn bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
 /// up to 8 worker threads (pat-414k3). For per-pixel readback conversions,
 /// whose result does not depend on which thread computes it.
 fn par_rows<T: Send>(out: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
-    let rows = if row_len == 0 { 0 } else { out.len() / row_len };
+    let rows = out.len().checked_div(row_len).unwrap_or(0);
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .clamp(1, 8)
@@ -4089,12 +4143,8 @@ fn sky_uniform_for_env(
     }
     let sky = env.sky.as_ref()?;
 
-    let proj = perspective_projection_matrix(
-        viewport.fov,
-        viewport.aspect(),
-        viewport.near,
-        viewport.far,
-    );
+    let proj =
+        perspective_projection_matrix(viewport.fov, viewport.aspect(), viewport.near, viewport.far);
     let inv_projection = invert_projection(&proj);
     let b = &viewport.camera_transform.basis;
     let energy = env.background_energy_multiplier;
@@ -4103,7 +4153,12 @@ fn sky_uniform_for_env(
     let mut sun_color_size = [[0.0f32; 4]; 4];
     let sun_count = suns.len().min(4);
     for (i, sun) in suns.iter().take(4).enumerate() {
-        sun_dir_energy[i] = [sun.direction.x, sun.direction.y, sun.direction.z, sun.energy];
+        sun_dir_energy[i] = [
+            sun.direction.x,
+            sun.direction.y,
+            sun.direction.z,
+            sun.energy,
+        ];
         // LIGHTn_COLOR is the light color in linear space (sky.cpp), * energy
         // applied in the shader via `de.w`.
         sun_color_size[i] = [
@@ -4157,7 +4212,12 @@ fn sky_uniform_for_env(
                     lin4(&bot, e),
                     lin4(&hor, e),
                     // w = 2 when the panorama is decoded and bound (pat-cezo4).
-                    [4.0, 30.0, 1.0, if mat.texture.is_some() { 2.0 } else { 1.0 }],
+                    [
+                        4.0,
+                        30.0,
+                        1.0,
+                        if mat.texture.is_some() { 2.0 } else { 1.0 },
+                    ],
                     1.0_f32, // equirect mode flag (sun_params.z)
                 )
             }
@@ -4408,7 +4468,13 @@ struct GpuDrawEntry<'a> {
 /// the GPU path (it would need a shader→WGSL transpiler); this covers the constant
 /// albedo override the parity tests + typical editor shader materials use.
 fn resolve_shader_albedo(mat: &ShaderMaterial3D) -> Option<Color> {
-    for name in ["albedo_color", "albedo", "color", "modulate", "source_color"] {
+    for name in [
+        "albedo_color",
+        "albedo",
+        "color",
+        "modulate",
+        "source_color",
+    ] {
         if let Some(gdvariant::Variant::Color(c)) = mat.get_shader_parameter(name) {
             return Some(*c);
         }
@@ -4434,7 +4500,10 @@ fn resolve_shader_albedo(mat: &ShaderMaterial3D) -> Option<Color> {
 /// Returns no entries for an instance with neither a mesh nor a multimesh-with-
 /// mesh — the previous GPU loop silently skipped those; this makes multimesh and
 /// shader-material instances render on the GPU like they already do in software.
-fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Vec<GpuDrawEntry<'a>> {
+fn instance_draw_entries<'a>(
+    inst: &'a Instance3D,
+    surfaces: &'a [Mesh3D],
+) -> Vec<GpuDrawEntry<'a>> {
     let base = inst.material.clone().unwrap_or_default();
     let base_mode = match base.shading_mode {
         ShadingMode::Unlit => 0u32,
@@ -4443,8 +4512,15 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
     };
     // A shader material overrides the albedo and shades unlit (the common
     // `unshaded; uniform vec4 albedo_color : source_color;` case).
-    let shader_albedo = inst.shader_material.as_ref().and_then(resolve_shader_albedo);
-    let mode = if shader_albedo.is_some() { 0 } else { base_mode };
+    let shader_albedo = inst
+        .shader_material
+        .as_ref()
+        .and_then(resolve_shader_albedo);
+    let mode = if shader_albedo.is_some() {
+        0
+    } else {
+        base_mode
+    };
     // A resolved shader albedo REPLACES the material, so its draw must not also
     // be modulated by the BaseMaterial3D map — that would tint pat-s3rrv.122's
     // custom shaders by a texture their author never referenced. Binding no
@@ -4600,7 +4676,10 @@ fn custom_bind_group(
     (w, h): (u32, u32),
     tex_cache: &mut HashMap<
         (usize, bool),
-        (std::sync::Arc<gdserver3d::material::TextureImage>, wgpu::TextureView),
+        (
+            std::sync::Arc<gdserver3d::material::TextureImage>,
+            wgpu::TextureView,
+        ),
     >,
     unbound_cache: &mut HashMap<[u32; 4], wgpu::TextureView>,
     sampler_cache: &mut HashMap<(bool, bool), wgpu::Sampler>,
@@ -4636,7 +4715,10 @@ fn custom_bind_group(
                     .entry(key)
                     .or_insert_with(|| {
                         let t = upload_custom_texture(device, queue, img, s.source_color);
-                        (img.clone(), t.create_view(&wgpu::TextureViewDescriptor::default()))
+                        (
+                            img.clone(),
+                            t.create_view(&wgpu::TextureViewDescriptor::default()),
+                        )
                     })
                     .1
                     .clone()
@@ -4730,6 +4812,9 @@ fn split_surface_meshes(mesh: &Mesh3D) -> Vec<Mesh3D> {
 /// and fragment shaders. Supports unlit, Lambert, and Phong shading.
 pub struct GpuRenderer3D {
     ctx: GpuContext3D,
+    // Built at construction and owned for the renderer's lifetime; the draw
+    // paths currently build their own pipelines, so nothing reads it.
+    #[allow(dead_code)]
     pipeline: RenderPipeline3D,
     instances: HashMap<u64, Instance3D>,
     lights: Vec<Light3D>,
@@ -4771,7 +4856,10 @@ pub struct GpuRenderer3D {
     /// kept alive so the address stays unique (pat-9gjpr).
     custom_tex_cache: HashMap<
         (usize, bool),
-        (std::sync::Arc<gdserver3d::material::TextureImage>, wgpu::TextureView),
+        (
+            std::sync::Arc<gdserver3d::material::TextureImage>,
+            wgpu::TextureView,
+        ),
     >,
     /// 1x1 stand-ins for unbound custom samplers, by their linear RGBA bits.
     custom_unbound_cache: HashMap<[u32; 4], wgpu::TextureView>,
@@ -4908,7 +4996,10 @@ impl MeshBounds {
     /// The enclosing sphere of `mesh`'s vertices.
     pub fn of(mesh: &Mesh3D) -> Self {
         let Some(first) = mesh.vertices.first() else {
-            return Self { center: Vector3::ZERO, radius: 0.0 };
+            return Self {
+                center: Vector3::ZERO,
+                radius: 0.0,
+            };
         };
         let (mut lo, mut hi) = (*first, *first);
         for v in &mesh.vertices {
@@ -4940,7 +5031,12 @@ impl ClipPlanes {
         let row = |r: usize| [m[0][r], m[1][r], m[2][r], m[3][r]];
         let (x, y, z, w) = (row(0), row(1), row(2), row(3));
         let add = |a: [f32; 4], b: [f32; 4], s: f32| {
-            [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2], a[3] + s * b[3]]
+            [
+                a[0] + s * b[0],
+                a[1] + s * b[1],
+                a[2] + s * b[2],
+                a[3] + s * b[3],
+            ]
         };
         let mut planes = [
             add(w, x, 1.0),
@@ -5086,7 +5182,6 @@ fn mesh_content_hash(mesh: &Mesh3D) -> u64 {
         push(&mut h, uv[0].to_bits());
         push(&mut h, uv[1].to_bits());
     }
-    drop(push);
     h.write(bytemuck::cast_slice::<u32, u8>(&block[..n]));
     h.write(bytemuck::cast_slice::<u32, u8>(&mesh.indices));
     h.finish()
@@ -5120,7 +5215,11 @@ impl EditorTargets {
     fn new(device: &wgpu::Device, w: u32, h: u32, color_format: wgpu::TextureFormat) -> Self {
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("editor-color-target"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -5132,7 +5231,11 @@ impl EditorTargets {
 
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("editor-depth-target"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -5148,7 +5251,7 @@ impl EditorTargets {
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_row = (w * bytes_per_pixel(color_format) + align - 1) / align * align;
+        let padded_row = (w * bytes_per_pixel(color_format)).div_ceil(align) * align;
         let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor-color-readback"),
             size: padded_row as u64 * h as u64,
@@ -5338,11 +5441,18 @@ impl GpuRenderer3D {
             if !inst.visible {
                 continue;
             }
-            for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
+            for entry in instance_draw_entries(
+                inst,
+                self.surface_meshes
+                    .get(&inst.id.0)
+                    .map_or(&[][..], Vec::as_slice),
+            ) {
                 let addr = entry.mesh as *const Mesh3D as usize;
-                if !self.editor_frame_mesh_keys.contains_key(&addr) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    self.editor_frame_mesh_keys.entry(addr)
+                {
                     let key = mesh_content_hash(entry.mesh);
-                    self.editor_frame_mesh_keys.insert(addr, key);
+                    e.insert(key);
                     if !self.mesh_gpu_cache.contains_key(&key)
                         && !mesh_uploads.iter().any(|(k, _)| *k == key)
                     {
@@ -5401,8 +5511,14 @@ impl GpuRenderer3D {
             self.editor_texture_uploads += 1;
             let texture = upload_material_texture(&self.ctx.device, &self.ctx.queue, &image, key.1);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.material_tex_cache
-                .insert(key, CachedMaterialTexture { image, _texture: texture, view });
+            self.material_tex_cache.insert(
+                key,
+                CachedMaterialTexture {
+                    image,
+                    _texture: texture,
+                    view,
+                },
+            );
         }
     }
 
@@ -5412,11 +5528,13 @@ impl GpuRenderer3D {
     /// distinct panorama (pat-cezo4): a `PanoramaSkyMaterial`'s texture or a
     /// cubemap shader sky's CPU bake. A 1x1 black texel otherwise.
     fn ensure_sky_panorama(&mut self, env: Option<&Environment3D>) {
-        let pano = env.and_then(|e| e.sky.as_ref()).and_then(|sky| match &sky.material {
-            SkyMaterial::Panoramic(m) => m.texture.as_ref(),
-            SkyMaterial::Shader(m) => m.baked.as_deref(),
-            _ => None,
-        });
+        let pano = env
+            .and_then(|e| e.sky.as_ref())
+            .and_then(|sky| match &sky.material {
+                SkyMaterial::Panoramic(m) => m.texture.as_ref(),
+                SkyMaterial::Shader(m) => m.baked.as_deref(),
+                _ => None,
+            });
         let key = pano.map_or(0, |p| p.pixels.as_ptr() as usize);
         if self.sky_panorama.as_ref().map(|c| c.0) == Some(key) {
             return;
@@ -5442,7 +5560,11 @@ impl GpuRenderer3D {
         let device = &self.ctx.device;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sky-panorama"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -5463,7 +5585,11 @@ impl GpuRenderer3D {
                 bytes_per_row: Some(w * 4),
                 rows_per_image: Some(h),
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5612,12 +5738,19 @@ impl GpuRenderer3D {
                 (Some(_), Some(dirty)) => {
                     dirty.len() == maps.len()
                         && prev_dims.len() == maps.len()
-                        && prev_dims.iter().zip(&maps).all(|(a, b)| *a == b.depth.dimensions())
+                        && prev_dims
+                            .iter()
+                            .zip(&maps)
+                            .all(|(a, b)| *a == b.depth.dimensions())
                 }
                 _ => false,
             };
             if partial {
-                let dirty = self.shadow_casters.last_dirty.as_ref().expect("checked above");
+                let dirty = self
+                    .shadow_casters
+                    .last_dirty
+                    .as_ref()
+                    .expect("checked above");
                 let cache = self.shadow_atlas_cache.as_mut().expect("checked above");
                 self.shadow_upload_texels +=
                     write_shadow_rects(&self.ctx.queue, &cache._texture, &maps, dirty);
@@ -5727,12 +5860,16 @@ impl GpuRenderer3D {
             let custom_texture_images: Vec<(
                 std::sync::Arc<gdserver3d::material::TextureImage>,
                 bool,
-            )> =
-                custom_shader
-                    .as_ref()
-                    .map(|(_, _, t)| t.clone())
-                    .unwrap_or_default();
-            for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
+            )> = custom_shader
+                .as_ref()
+                .map(|(_, _, t)| t.clone())
+                .unwrap_or_default();
+            for entry in instance_draw_entries(
+                inst,
+                self.surface_meshes
+                    .get(&inst.id.0)
+                    .map_or(&[][..], Vec::as_slice),
+            ) {
                 if entry.mesh.indices.is_empty() {
                     continue;
                 }
@@ -5870,13 +6007,8 @@ impl GpuRenderer3D {
                 // pat-cezo4: BLEND_MODE_ADD (`src * alpha + dst`), never writing
                 // depth — Godot's additive materials are transparent.
                 let face = RenderPipeline3D::wgpu_cull_face(cull);
-                let add = base.build_cull_variant(
-                    &self.ctx.device,
-                    format,
-                    face,
-                    false,
-                    ADDITIVE_BLEND,
-                );
+                let add =
+                    base.build_cull_variant(&self.ctx.device, format, face, false, ADDITIVE_BLEND);
                 self.editor_add_variants.push((cull, add));
             }
             self.editor_variants = built;
@@ -5900,8 +6032,7 @@ impl GpuRenderer3D {
         // instance's geometry a second time (pat-414k3).
         self.prime_editor_draw_caches();
         let mesh_keys = std::mem::take(&mut self.editor_frame_mesh_keys);
-        let light_data =
-            self.ensure_shadow_atlas_with(viewport, Some(&mesh_keys));
+        let light_data = self.ensure_shadow_atlas_with(viewport, Some(&mesh_keys));
         self.editor_frame_mesh_keys = mesh_keys;
         self.ensure_probe_cubes(viewport.environment.as_ref());
         self.ensure_sky_panorama(viewport.environment.as_ref());
@@ -5969,9 +6100,7 @@ impl GpuRenderer3D {
         // target, so after the post-process's linear→sRGB encode the flat
         // backdrop comes back out at its authored sRGB value.
         let clear = match viewport.environment.as_ref() {
-            Some(env) if env.background_mode == BackgroundMode::CustomColor => {
-                env.background_color
-            }
+            Some(env) if env.background_mode == BackgroundMode::CustomColor => env.background_color,
             _ => clear,
         };
         let clear_linear = clear.srgb_to_linear();
@@ -6009,7 +6138,10 @@ impl GpuRenderer3D {
         let camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("editor-camera-bind-group"),
             layout: &pipeline.camera_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buf.as_entire_binding(),
+            }],
         });
 
         // Light bind group over the cached shadow atlases (pat-2be0q).
@@ -6053,7 +6185,7 @@ impl GpuRenderer3D {
         let clip_planes = ClipPlanes::from_view_proj(&mul_mat4(&projection_matrix, &view_matrix));
         let mut draws: Vec<EditorDraw<'_>> = Vec::new();
         let mut model_bytes: Vec<u8> = Vec::new();
-        let mut draw_count = 0;
+        let draw_count;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("editor-3d-encoder"),
@@ -6126,15 +6258,12 @@ impl GpuRenderer3D {
                 // Fully transparent means there is nothing to draw at all —
                 // `opacity_at_distance` folds `transparency` together with the
                 // VISIBILITY_RANGE_FADE_SELF ramp.
-                if inst
-                    .geometry
-                    .opacity_at_distance(
-                        viewport
-                            .camera_transform
-                            .origin
-                            .distance_to(inst.transform.origin),
-                    )
-                    <= 0.0
+                if inst.geometry.opacity_at_distance(
+                    viewport
+                        .camera_transform
+                        .origin
+                        .distance_to(inst.transform.origin),
+                ) <= 0.0
                 {
                     continue;
                 }
@@ -6149,7 +6278,12 @@ impl GpuRenderer3D {
                     .and_then(Result::ok);
                 // Expand multimesh + shader material into concrete draws (matching
                 // the software renderer), instead of drawing only a single mesh.
-                for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
+                for entry in instance_draw_entries(
+                    inst,
+                    self.surface_meshes
+                        .get(&inst.id.0)
+                        .map_or(&[][..], Vec::as_slice),
+                ) {
                     // Geometry uploaded once by `prime_editor_draw_caches`; a
                     // mesh with no vertices was never cached and draws nothing,
                     // as before.
@@ -6212,8 +6346,7 @@ impl GpuRenderer3D {
                             }
                         }
                         None => {
-                            let additive =
-                                entry.blend_mode == gdserver3d::material::BlendMode::Add;
+                            let additive = entry.blend_mode == gdserver3d::material::BlendMode::Add;
                             let transparent =
                                 crate::render_modes::is_transparent(entry.transparency);
                             EditorPipelineKey {
@@ -6281,8 +6414,12 @@ impl GpuRenderer3D {
                         model_data.albedo = [1.0; 4];
                         model_data.emission = [0.0; 4];
                         model_data.roughness = 1.0;
-                        model_data.metallic =
-                            if m.wgsl.contains("let metallic_map = cs.metallic;") { 1.0 } else { 0.0 };
+                        model_data.metallic = if m.wgsl.contains("let metallic_map = cs.metallic;")
+                        {
+                            1.0
+                        } else {
+                            0.0
+                        };
                         model_data.shading_mode = if m.render_modes.unshaded { 0 } else { 2 };
                         model_data.has_normal_map = 0;
                     }
@@ -6312,38 +6449,38 @@ impl GpuRenderer3D {
                     // which is what keeps an untextured draw bit-identical to before, and
                     // for the normal slot `has_normal_map` decides whether it is read.
                     // Uploaded once by `prime_editor_draw_caches`.
-                    let slot = |img: &Option<
-                        std::sync::Arc<gdserver3d::material::TextureImage>,
-                    >,
-                                format: wgpu::TextureFormat|
-                     -> &wgpu::TextureView {
-                        img.as_ref()
-                            .and_then(|i| {
-                                self.material_tex_cache
-                                    .get(&(std::sync::Arc::as_ptr(i) as usize, format))
-                            })
-                            .map(|c| &c.view)
-                            .unwrap_or_else(|| &self.white_tex_cache[&format].1)
-                    };
+                    let slot =
+                        |img: &Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+                         format: wgpu::TextureFormat|
+                         -> &wgpu::TextureView {
+                            img.as_ref()
+                                .and_then(|i| {
+                                    self.material_tex_cache
+                                        .get(&(std::sync::Arc::as_ptr(i) as usize, format))
+                                })
+                                .map(|c| &c.view)
+                                .unwrap_or_else(|| &self.white_tex_cache[&format].1)
+                        };
                     // A custom shader binds none of the base material's maps.
-                    let slot = |img: &Option<
-                        std::sync::Arc<gdserver3d::material::TextureImage>,
-                    >,
-                                format: wgpu::TextureFormat|
-                     -> &wgpu::TextureView {
-                        if custom.is_some() {
-                            &self.white_tex_cache[&format].1
-                        } else {
-                            slot(img, format)
-                        }
-                    };
+                    let slot =
+                        |img: &Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+                         format: wgpu::TextureFormat|
+                         -> &wgpu::TextureView {
+                            if custom.is_some() {
+                                &self.white_tex_cache[&format].1
+                            } else {
+                                slot(img, format)
+                            }
+                        };
                     let custom_bg = custom.as_ref().map(|m| {
                         custom_bind_group(
                             device,
                             queue,
                             &pipeline.custom_layout,
                             m,
-                            inst.shader_material.as_ref().expect("custom implies a material"),
+                            inst.shader_material
+                                .as_ref()
+                                .expect("custom implies a material"),
                             shader_time,
                             (w, h),
                             &mut custom_tex_cache,
@@ -6434,27 +6571,27 @@ impl GpuRenderer3D {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&maps.albedo),
+                            resource: wgpu::BindingResource::TextureView(maps.albedo),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&albedo_sampler),
+                            resource: wgpu::BindingResource::Sampler(albedo_sampler),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&maps.normal),
+                            resource: wgpu::BindingResource::TextureView(maps.normal),
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: wgpu::BindingResource::TextureView(&maps.roughness),
+                            resource: wgpu::BindingResource::TextureView(maps.roughness),
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::TextureView(&maps.metallic),
+                            resource: wgpu::BindingResource::TextureView(maps.metallic),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
-                            resource: wgpu::BindingResource::TextureView(&maps.emission),
+                            resource: wgpu::BindingResource::TextureView(maps.emission),
                         },
                     ],
                 });
@@ -6481,7 +6618,11 @@ impl GpuRenderer3D {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         // pat-s3rrv.29: depth comes back too, because the decal and fog-volume
         // passes reproject each pixel and cannot run without it. Encoded into
@@ -6502,11 +6643,12 @@ impl GpuRenderer3D {
         // platformer demo) rendered at ~80 ms a frame on the CPU.
         let wants_depth = !self.decals.is_empty()
             || !self.fog_volumes.is_empty()
-            || viewport.environment.as_ref().map_or(false, |e| {
-                (e.ssao_enabled && e.ssao_intensity > 0.0) || e.fog_enabled
-            });
+            || viewport
+                .environment
+                .as_ref()
+                .is_some_and(|e| (e.ssao_enabled && e.ssao_intensity > 0.0) || e.fog_enabled);
         let depth_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let depth_padded_row = (w * 4 + depth_align - 1) / depth_align * depth_align;
+        let depth_padded_row = (w * 4).div_ceil(depth_align) * depth_align;
         let depth_readback_buf = if wants_depth {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("editor-depth-readback"),
@@ -6529,7 +6671,11 @@ impl GpuRenderer3D {
                         rows_per_image: Some(h),
                     },
                 },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
             );
             Some(buf)
         } else {
@@ -6569,7 +6715,10 @@ impl GpuRenderer3D {
             let _ = tx.send(r.is_ok());
         });
         device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .ok();
         // Device-lost hardening (pat-ism62 #4): if the map failed (e.g. the GPU
         // device was lost on sleep/wake), degrade gracefully — return a flat
@@ -6583,7 +6732,12 @@ impl GpuRenderer3D {
                 (clear.r.clamp(0.0, 1.0) * 255.0) as u8,
                 255,
             ];
-            let data: Vec<u8> = px.iter().copied().cycle().take((w * h * 4) as usize).collect();
+            let data: Vec<u8> = px
+                .iter()
+                .copied()
+                .cycle()
+                .take((w * h * 4) as usize)
+                .collect();
             return (w, h, data);
         }
         // Decode the Rgba16Float HDR readback (8 bytes/pixel, top-down) into a
@@ -6629,7 +6783,10 @@ impl GpuRenderer3D {
             let depth_slice = depth_buf.slice(..);
             depth_slice.map_async(wgpu::MapMode::Read, |_| {});
             device
-                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
                 .ok();
             let depth_mapped = depth_slice.get_mapped_range();
             let mut depth: Vec<f32> = vec![0.0; w as usize * h as usize];
@@ -6647,7 +6804,13 @@ impl GpuRenderer3D {
             depth_buf.unmap();
 
             if let Some(plan) = &decal_plan {
-                plan.apply(&mut pixels, &depth, &self.decals, &fx_inv_proj, &viewport.camera_transform);
+                plan.apply(
+                    &mut pixels,
+                    &depth,
+                    &self.decals,
+                    &fx_inv_proj,
+                    &viewport.camera_transform,
+                );
             }
             // Environment fog covers the decal-modulated surface, in the
             // software renderer's order (decal -> fog -> fog volumes), and with
@@ -6732,7 +6895,12 @@ impl GpuRenderer3D {
                 px[3] as f32 / 255.0,
             ));
         }
-        FrameData3D { width: w, height: h, pixels, depth: Vec::new() }
+        FrameData3D {
+            width: w,
+            height: h,
+            pixels,
+            depth: Vec::new(),
+        }
     }
 
     /// Returns the reflection probes currently registered with the renderer.
@@ -6898,7 +7066,10 @@ impl GpuRenderer3D {
                     label: Some("sky-bind-group"),
                     layout: &sky_pipeline.layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(pano_view),
@@ -7232,7 +7403,7 @@ impl GpuRenderer3D {
         let bytes_per_pixel = 8u32;
         let unpadded_row = w * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_row = (unpadded_row + align - 1) / align * align;
+        let padded_row = unpadded_row.div_ceil(align) * align;
 
         let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("color-readback"),
@@ -7265,7 +7436,7 @@ impl GpuRenderer3D {
         // Copy depth texture to readback buffer.
         let depth_bytes_per_pixel = 4u32; // Depth32Float = 4 bytes
         let depth_unpadded_row = w * depth_bytes_per_pixel;
-        let depth_padded_row = (depth_unpadded_row + align - 1) / align * align;
+        let depth_padded_row = depth_unpadded_row.div_ceil(align) * align;
         let depth_readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("depth-readback"),
             size: depth_padded_row as u64 * h as u64,
@@ -7314,9 +7485,18 @@ impl GpuRenderer3D {
                 let o = start + (col * bytes_per_pixel) as usize;
                 // Rgba16Float, RGBA order: decode each half-float channel.
                 let r = f16_to_f32(u16::from_le_bytes([color_mapped[o], color_mapped[o + 1]]));
-                let g = f16_to_f32(u16::from_le_bytes([color_mapped[o + 2], color_mapped[o + 3]]));
-                let b = f16_to_f32(u16::from_le_bytes([color_mapped[o + 4], color_mapped[o + 5]]));
-                let a = f16_to_f32(u16::from_le_bytes([color_mapped[o + 6], color_mapped[o + 7]]));
+                let g = f16_to_f32(u16::from_le_bytes([
+                    color_mapped[o + 2],
+                    color_mapped[o + 3],
+                ]));
+                let b = f16_to_f32(u16::from_le_bytes([
+                    color_mapped[o + 4],
+                    color_mapped[o + 5],
+                ]));
+                let a = f16_to_f32(u16::from_le_bytes([
+                    color_mapped[o + 6],
+                    color_mapped[o + 7],
+                ]));
                 pixels.push(Color::new(r, g, b, a));
             }
         }
@@ -7450,7 +7630,8 @@ impl RenderingServer3D for GpuRenderer3D {
             if mesh.surfaces.is_empty() {
                 self.surface_meshes.remove(&id.0);
             } else {
-                self.surface_meshes.insert(id.0, split_surface_meshes(&mesh));
+                self.surface_meshes
+                    .insert(id.0, split_surface_meshes(&mesh));
             }
             inst.mesh = Some(mesh);
         }
@@ -7539,11 +7720,7 @@ impl RenderingServer3D for GpuRenderer3D {
     }
 
     fn update_reflection_probe(&mut self, probe: &ReflectionProbe) {
-        if let Some(existing) = self
-            .reflection_probes
-            .iter_mut()
-            .find(|p| p.id == probe.id)
-        {
+        if let Some(existing) = self.reflection_probes.iter_mut().find(|p| p.id == probe.id) {
             *existing = probe.clone();
         } else {
             self.reflection_probes.push(probe.clone());
@@ -7648,7 +7825,11 @@ mod tests {
     fn shader_has_directional_shadow_hook_and_pbr() {
         // pat-32edz / pat-sf07y: WGSL must wire shadow factor + Burley/GGX.
         assert!(SHADER_3D_WGSL.contains("directional_shadow_factor"));
-        assert!(SHADER_3D_WGSL.contains("burley") || SHADER_3D_WGSL.contains("Burley") || SHADER_3D_WGSL.contains("fd90"));
+        assert!(
+            SHADER_3D_WGSL.contains("burley")
+                || SHADER_3D_WGSL.contains("Burley")
+                || SHADER_3D_WGSL.contains("fd90")
+        );
         assert!(SHADER_3D_WGSL.contains("metallic"));
         // Real sampling — not the old always-1.0 placeholder.
         assert!(
@@ -7716,7 +7897,10 @@ mod tests {
         // Matrix must not be identity when a map was generated.
         let m = data.lights[0].shadow_view_proj;
         let is_identity = m == identity_mat4();
-        assert!(!is_identity, "shadow_view_proj should be proj*view, not identity");
+        assert!(
+            !is_identity,
+            "shadow_view_proj should be proj*view, not identity"
+        );
     }
 
     /// pat-mst61: two shadow-enabled directionals each get a unique layer index.
@@ -7942,7 +8126,11 @@ mod tests {
             } else {
                 sign_f * (1.0 + frac / 1024.0) * 2.0f32.powi(exp as i32 - 15)
             };
-            assert_eq!(f16_to_f32(bits).to_bits(), want.to_bits(), "half {bits:#06x}");
+            assert_eq!(
+                f16_to_f32(bits).to_bits(),
+                want.to_bits(),
+                "half {bits:#06x}"
+            );
         }
     }
 
@@ -8082,7 +8270,10 @@ mod tests {
         // The default (LIGHT_AND_SKY) still shades.
         light.affects_scene = true;
         let gpu = light_to_gpu(&light, Vector3::ZERO);
-        assert!(gpu.color[0] > 0.0, "LIGHT_AND_SKY must still shade the scene");
+        assert!(
+            gpu.color[0] > 0.0,
+            "LIGHT_AND_SKY must still shade the scene"
+        );
     }
 
     /// 🔑 THE RUST AND WGSL `LightData` STRUCTS MUST AGREE BYTE FOR BYTE.
@@ -8156,7 +8347,10 @@ mod tests {
             "shadow_pcf_radius: f32",
             "shadow_pcf_taps: u32",
         ] {
-            assert!(SHADER_3D_WGSL.contains(field), "WGSL LightData lacks {field}");
+            assert!(
+                SHADER_3D_WGSL.contains(field),
+                "WGSL LightData lacks {field}"
+            );
         }
         // A light with no fitted map keeps the legacy nearest compare.
         assert!(empty_gpu_light().shadow_pcf_radius < 0.0);

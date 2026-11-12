@@ -15,9 +15,9 @@
 //! module end to end against a `SceneTree`.
 
 use gdcore::math::{Vector2, Vector3};
+use gdscene::camera3d::ProjectionType;
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
-use gdscene::camera3d::ProjectionType;
 use gdscene::{camera3d, node3d};
 
 /// Build a fresh tree with a single Camera3D child and return its id. The
@@ -26,7 +26,9 @@ use gdscene::{camera3d, node3d};
 fn scene_with_camera() -> (SceneTree, gdscene::NodeId) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let cam = tree.add_child(root, Node::new("Camera3D", "Camera3D")).unwrap();
+    let cam = tree
+        .add_child(root, Node::new("Camera3D", "Camera3D"))
+        .unwrap();
     node3d::set_position(&mut tree, cam, Vector3::new(0.0, 0.0, 5.0));
     node3d::set_fov(&mut tree, cam, 70.0);
     node3d::set_near(&mut tree, cam, 0.05);

@@ -40,7 +40,12 @@ process_material = SubResource("7")
 "#;
 
 fn scales(ml: &MainLoop, id: gdscene::node::NodeId) -> Vec<f32> {
-    match ml.tree().get_node(id).unwrap().get_property("_particle_scales") {
+    match ml
+        .tree()
+        .get_node(id)
+        .unwrap()
+        .get_property("_particle_scales")
+    {
         Variant::PackedFloat32Array(v) => v,
         other => panic!("the emitter should publish particle scales, got {other:?}"),
     }

@@ -2331,11 +2331,7 @@ impl MultiplayerSynchronizer {
         self.properties_to_watch
             .iter()
             .filter_map(|name| self.property_values.get(name).map(|v| (name, v)))
-            .filter(|(name, value)| {
-                self.watch_last_sent
-                    .get(name.as_str())
-                    .map_or(true, |sent| sent != *value)
-            })
+            .filter(|(name, value)| self.watch_last_sent.get(name.as_str()) != Some(*value))
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     }

@@ -18,10 +18,7 @@ use gdscene::MainLoop;
 
 /// A unique temp directory for this test's `res://` root.
 fn temp_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "patina_change_scene_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("patina_change_scene_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -82,7 +79,10 @@ fn change_scene_to_file_swaps_running_scene() {
     );
 
     // quit() raises the stop flag the runner polls.
-    assert!(!ml.tree().should_quit(), "not quitting before quit() is called");
+    assert!(
+        !ml.tree().should_quit(),
+        "not quitting before quit() is called"
+    );
     ml.tree_mut().quit(0);
     assert!(
         ml.tree().should_quit(),

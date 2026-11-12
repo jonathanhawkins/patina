@@ -241,9 +241,9 @@ pub fn draw_polyline_shaded(
             // Interior steps use Round joints so consecutive steps of differing
             // width leave no notch between them; the caller's `cap` applies only
             // at the true ends of the stroke.
-            let step_cap = if !closed && i == 0 && s == 0 {
-                cap
-            } else if !closed && i == seg_count - 1 && s == steps - 1 {
+            let at_start = i == 0 && s == 0;
+            let at_end = i == seg_count - 1 && s == steps - 1;
+            let step_cap = if !closed && (at_start || at_end) {
                 cap
             } else {
                 LineCap::None

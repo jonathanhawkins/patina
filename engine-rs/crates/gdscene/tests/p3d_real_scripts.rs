@@ -184,7 +184,11 @@ fn touch_ui_and_joystick_hide_on_a_desktop_without_touch() {
     assert!(errs.is_empty(), "touch UI _ready must not raise: {errs:?}");
     let ui = node(&ml, "/root/TouchScreenUI");
     let stick = node(&ml, "/root/TouchScreenUI/Virtual Joystick");
-    assert_eq!(visible(&ml, ui), Variant::Bool(false), "TouchScreenUI hides");
+    assert_eq!(
+        visible(&ml, ui),
+        Variant::Bool(false),
+        "TouchScreenUI hides"
+    );
     assert_eq!(
         visible(&ml, stick),
         Variant::Bool(false),
@@ -207,7 +211,11 @@ fn touch_ui_shows_when_the_project_emulates_touch_from_mouse() {
     let ui = node(&ml, "/root/TouchScreenUI");
     let stick = node(&ml, "/root/TouchScreenUI/Virtual Joystick");
     assert_eq!(visible(&ml, ui), Variant::Bool(true), "TouchScreenUI shows");
-    assert_eq!(visible(&ml, stick), Variant::Bool(true), "the joystick stays");
+    assert_eq!(
+        visible(&ml, stick),
+        Variant::Bool(true),
+        "the joystick stays"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +311,11 @@ fn player_camera_and_enemy_scripts_run_without_errors_and_fall_at_project_gravit
     );
 
     ml.step(DT);
-    let vy = vec3(ml.tree().get_node(player).unwrap().get_property("velocity"), "velocity").y;
+    let vy = vec3(
+        ml.tree().get_node(player).unwrap().get_property("velocity"),
+        "velocity",
+    )
+    .y;
     // `velocity += get_gravity() * delta` from rest, before any contact. The
     // 1/60 frame is two 1/120 physics ticks, but only the SECOND falls:
     // `get_gravity()` reads ZERO in a body's first `_physics_process`, before
@@ -323,7 +335,10 @@ fn player_camera_and_enemy_scripts_run_without_errors_and_fall_at_project_gravit
     }
     errs.sort();
     errs.dedup();
-    assert!(errs.is_empty(), "no script may raise while the world runs: {errs:#?}");
+    assert!(
+        errs.is_empty(),
+        "no script may raise while the world runs: {errs:#?}"
+    );
 
     // `%CoinCount.text = str(coins)` reached the Label3D the `.tscn` marks
     // unique with `unique_name_in_owner = true` (authored "123").
@@ -353,7 +368,10 @@ unique_name_in_owner = true
     let by_property = node(&ml, "/root/Root/Deep/ByProperty");
     let by_name = node(&ml, "/root/Root/Deep/ByName");
     let tree = ml.tree();
-    assert_eq!(tree.get_node_relative(root, "%ByProperty"), Some(by_property));
+    assert_eq!(
+        tree.get_node_relative(root, "%ByProperty"),
+        Some(by_property)
+    );
     assert_eq!(tree.get_node_relative(root, "%ByName"), Some(by_name));
     assert_eq!(
         tree.get_node_relative(root, "%Plain"),
@@ -448,7 +466,10 @@ shape = SubResource("sph")
     );
     ml.step(DT);
     let errs = errors(&mut ml);
-    assert!(errs.is_empty(), "_integrate_forces must not raise: {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "_integrate_forces must not raise: {errs:?}"
+    );
     // The demo runs physics at `common/physics_ticks_per_second=120`, so the
     // step is 1/120 — not the 1/60 frame this test advances by.
     let step = float(script_var(&ml, probe, "step"), "step");
@@ -490,7 +511,11 @@ shape = SubResource("own")
 fn ray_probe(exclude_own: bool) -> (Vec<String>, Variant) {
     let mut ml = boot(RAY_SCENE);
     let probe = node(&ml, "/root/World/Probe");
-    let exclude = if exclude_own { "[$\"../Own\".get_rid()]" } else { "[]" };
+    let exclude = if exclude_own {
+        "[$\"../Own\".get_rid()]"
+    } else {
+        "[]"
+    };
     let src = format!(
         "extends Node3D\n\
          var hit_y = 999.0\n\
@@ -518,7 +543,10 @@ fn ray_probe(exclude_own: bool) -> (Vec<String>, Variant) {
 #[test]
 fn ray_create_with_excluded_rid_passes_through_its_own_body() {
     let (errs, hit_y) = ray_probe(true);
-    assert!(errs.is_empty(), "the camera's ray idiom must not raise: {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "the camera's ray idiom must not raise: {errs:?}"
+    );
     let y = float(hit_y, "hit_y");
     assert!(
         (y + 5.0).abs() < 1e-3,

@@ -3,7 +3,7 @@
 //! Clicking in the 3D viewport should select the spatial node under the cursor,
 //! mirroring Godot. This composes the viewport's existing pick machinery
 //! ([`Viewport3D::pickable_nodes`](crate::viewport_3d::Viewport3D::pickable_nodes)
-//! + [`pick_node`](crate::viewport_3d::Viewport3D::pick_node)) with its
+//! plus [`pick_node`](crate::viewport_3d::Viewport3D::pick_node)) with its
 //! [`Selection3D`](crate::viewport_3d) state: a click casts a ray through the
 //! scene's visible spatial nodes, and the topmost hit becomes the selection.
 //!

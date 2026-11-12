@@ -725,10 +725,18 @@ impl Play3DRenderThread {
                 }
             })
             .expect("spawn the Play-3D render thread");
-        Self { jobs, done, submitted: std::cell::Cell::new(false) }
+        Self {
+            jobs,
+            done,
+            submitted: std::cell::Cell::new(false),
+        }
     }
 
-    fn submit(&self, prepared: gdeditor::play_3d::PreparedPlay3DFrame, started: std::time::Instant) {
+    fn submit(
+        &self,
+        prepared: gdeditor::play_3d::PreparedPlay3DFrame,
+        started: std::time::Instant,
+    ) {
         self.jobs
             .send((prepared, started.elapsed()))
             .expect("the Play-3D render thread exited");

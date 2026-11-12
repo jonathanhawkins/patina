@@ -335,18 +335,69 @@ fn plain_paint_over_a_terrain_cell_drops_its_atlas_coords() {
     thread::sleep(Duration::from_millis(100));
     let raw = tnid.raw();
 
-    let set = ok(&http_post(port, "/api/tileset/terrain_set/add", r#"{"mode":"match_sides"}"#), "set");
+    let set = ok(
+        &http_post(
+            port,
+            "/api/tileset/terrain_set/add",
+            r#"{"mode":"match_sides"}"#,
+        ),
+        "set",
+    );
     let set_id = set["terrain_set"].as_i64().unwrap();
-    ok(&http_post(port, "/api/tileset/terrain/add", &format!(r#"{{"terrain_set":{set_id},"id":0}}"#)), "terrain");
+    ok(
+        &http_post(
+            port,
+            "/api/tileset/terrain/add",
+            &format!(r#"{{"terrain_set":{set_id},"id":0}}"#),
+        ),
+        "terrain",
+    );
     // A lone cell has mask 0; map it to atlas (2,1).
-    ok(&http_post(port, "/api/tileset/tile/peering", &format!(r#"{{"terrain_set":{set_id},"terrain":0,"bitmask":0,"source_id":1,"atlas_coords":[2,1]}}"#)), "peering");
-    ok(&http_post(port, "/api/tilemap/terrain_paint", &format!(r#"{{"node_id":{raw},"terrain_set":{set_id},"terrain":0,"cells":[[3,3]]}}"#)), "paint");
-    let data = ok(&http_get(port, &format!("/api/tilemap/data?node_id={raw}")), "data");
-    assert_eq!(data["atlas_coords"]["3,3"], serde_json::json!([2, 1]), "terrain placed (2,1)");
+    ok(
+        &http_post(
+            port,
+            "/api/tileset/tile/peering",
+            &format!(
+                r#"{{"terrain_set":{set_id},"terrain":0,"bitmask":0,"source_id":1,"atlas_coords":[2,1]}}"#
+            ),
+        ),
+        "peering",
+    );
+    ok(
+        &http_post(
+            port,
+            "/api/tilemap/terrain_paint",
+            &format!(r#"{{"node_id":{raw},"terrain_set":{set_id},"terrain":0,"cells":[[3,3]]}}"#),
+        ),
+        "paint",
+    );
+    let data = ok(
+        &http_get(port, &format!("/api/tilemap/data?node_id={raw}")),
+        "data",
+    );
+    assert_eq!(
+        data["atlas_coords"]["3,3"],
+        serde_json::json!([2, 1]),
+        "terrain placed (2,1)"
+    );
 
     // Plain paint of a DIFFERENT source over it.
-    ok(&http_post(port, "/api/tilemap/paint", &format!(r#"{{"node_id":{raw},"x":3,"y":3,"tile_id":2}}"#)), "plain paint");
-    let data = ok(&http_get(port, &format!("/api/tilemap/data?node_id={raw}")), "data");
-    assert_eq!(data["atlas_coords"]["3,3"], serde_json::json!([0, 0]), "stale terrain atlas must not survive: {data}");
+    ok(
+        &http_post(
+            port,
+            "/api/tilemap/paint",
+            &format!(r#"{{"node_id":{raw},"x":3,"y":3,"tile_id":2}}"#),
+        ),
+        "plain paint",
+    );
+    let data = ok(
+        &http_get(port, &format!("/api/tilemap/data?node_id={raw}")),
+        "data",
+    );
+    assert_eq!(
+        data["atlas_coords"]["3,3"],
+        serde_json::json!([0, 0]),
+        "stale terrain atlas must not survive: {data}"
+    );
     handle.stop();
 }

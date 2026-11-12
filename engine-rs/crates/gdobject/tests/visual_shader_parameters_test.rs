@@ -56,7 +56,10 @@ fn visual_shader_parameter_inheritance_matches_godot() {
     register_3d_classes();
 
     assert!(
-        is_parent_class("VisualShaderNodeFloatParameter", "VisualShaderNodeParameter"),
+        is_parent_class(
+            "VisualShaderNodeFloatParameter",
+            "VisualShaderNodeParameter"
+        ),
         "FloatParameter derives the parameter base"
     );
     assert!(
@@ -101,7 +104,10 @@ fn parameter_ref_is_not_a_parameter() {
         "ParameterRef references a parameter; it does not declare one"
     );
     // Godot names this `parameter_name` — same as the base — not `param_name`.
-    assert_props("VisualShaderNodeParameterRef", &["parameter_name", "param_type"]);
+    assert_props(
+        "VisualShaderNodeParameterRef",
+        &["parameter_name", "param_type"],
+    );
 }
 
 #[test]
@@ -258,7 +264,10 @@ fn texture_parameter_carries_all_five_sampler_enums() {
         Some(6)
     );
     assert_eq!(
-        class_get_integer_constant("VisualShaderNodeTextureParameter", "SOURCE_NORMAL_ROUGHNESS"),
+        class_get_integer_constant(
+            "VisualShaderNodeTextureParameter",
+            "SOURCE_NORMAL_ROUGHNESS"
+        ),
         Some(3)
     );
 }
@@ -317,5 +326,8 @@ fn registration_is_idempotent() {
     let before = props("VisualShaderNodeFloatParameter");
     register_3d_classes();
     let after = props("VisualShaderNodeFloatParameter");
-    assert_eq!(before, after, "re-registering must not duplicate properties");
+    assert_eq!(
+        before, after,
+        "re-registering must not duplicate properties"
+    );
 }

@@ -26,17 +26,27 @@ fn a_body_starting_exactly_on_a_floor_is_in_contact_on_the_first_step() {
         BodyId(0),
         BodyType::Static,
         Vector2::new(0.0, 10.0),
-        Shape2D::Rectangle { half_extents: Vector2::new(500.0, 5.0) },
+        Shape2D::Rectangle {
+            half_extents: Vector2::new(500.0, 5.0),
+        },
         1.0,
     ));
 
     let events = world.step(1.0 / 60.0);
-    assert_eq!(events.len(), 1, "the touching pair is a contact on step one");
+    assert_eq!(
+        events.len(),
+        1,
+        "the touching pair is a contact on step one"
+    );
     let ball = world.get_body(ball_id).unwrap();
     assert!(
         ball.linear_velocity.y.abs() < 1e-3,
         "the approach is stopped on the first step, not after sinking: {:?}",
         ball.linear_velocity
     );
-    assert!(ball.position.y <= 0.0 + 1e-3, "it did not sink into the floor: {:?}", ball.position);
+    assert!(
+        ball.position.y <= 0.0 + 1e-3,
+        "it did not sink into the floor: {:?}",
+        ball.position
+    );
 }

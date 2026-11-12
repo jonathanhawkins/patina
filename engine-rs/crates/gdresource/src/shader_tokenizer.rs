@@ -893,7 +893,7 @@ fn lex_number(
 
     let text: String = chars[num_start..pos].iter().collect();
     // Strip trailing 'f'/'F' for parsing
-    let parse_text = text.trim_end_matches(|c| c == 'f' || c == 'F');
+    let parse_text = text.trim_end_matches(['f', 'F']);
 
     if is_float {
         let val: f64 = parse_text.parse().map_err(|e: std::num::ParseFloatError| {

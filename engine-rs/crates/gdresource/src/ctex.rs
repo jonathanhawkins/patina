@@ -2,7 +2,7 @@
 //!
 //! Reads Godot's `.ctex` compiled-texture format
 //! (`scene/resources/compressed_texture.cpp` `CompressedTexture2D::_load_data`
-//! + `load_image_from_file`; writer in
+//! and `load_image_from_file`; writer in
 //! `editor/import/resource_importer_texture.cpp`). Little-endian throughout.
 //!
 //! Exported/imported Godot projects reference `.godot/imported/*.ctex`
@@ -120,9 +120,9 @@ const IMG_FORMAT_ASTC_4X4_HDR: u32 = 36;
 const IMG_FORMAT_ASTC_8X8: u32 = 37;
 const IMG_FORMAT_ASTC_8X8_HDR: u32 = 38;
 
-/// `FORMAT_BIT_HAS_MIPMAPS` from `scene/resources/compressed_texture.h:56` —
-/// set in the OUTER header's `df` word when the file carries a mip chain.
-const CTEX_FORMAT_BIT_HAS_MIPMAPS: u32 = 1 << 23;
+// `FORMAT_BIT_HAS_MIPMAPS` (`1 << 23`, `scene/resources/compressed_texture.h:56`)
+// is set in the OUTER header's `df` word when the file carries a mip chain;
+// the reader does not consult it (the mip chain is read from the image header).
 
 /// Every block-compressed format is stored as 4x4 texel blocks, and its mip
 /// chain floors at 4x4 rather than 1x1 (`Image::get_format_min_pixel_size`,
@@ -447,7 +447,7 @@ fn read_image_blob(c: &mut CtexCursor<'_>, path: &Path) -> EngineResult<(Arc<Res
 
             let tex = match &layout {
                 ImageLayout::Raw { bpp, format_str } => {
-                    build_raw_texture(w, h, level0, *bpp, *format_str, path)
+                    build_raw_texture(w, h, level0, *bpp, format_str, path)
                 }
                 ImageLayout::Block { decode, name, .. } => {
                     // The block decoders hand back tightly packed RGBA8, which
@@ -632,7 +632,7 @@ pub fn slice_source_into_layers(
     path: &Path,
 ) -> EngineResult<Arc<Resource>> {
     let int_of = |key: &str| match source.get_property(key) {
-        Some(Variant::Int(v)) => *v as i64,
+        Some(Variant::Int(v)) => *v,
         _ => 0,
     };
     let width = int_of("width");

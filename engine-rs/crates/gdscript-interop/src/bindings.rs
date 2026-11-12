@@ -434,7 +434,7 @@ impl InputEventSpec {
 /// one must be checked against EVERY crate, not just this one. In use as of
 /// pat-s3rrv.19: 1A 1B 4D 57 5B 6D 6E A1 A2 A3 A4 A5 A6 B9 C1 C2 C3 CA CF DA
 /// E1-EF FA, plus FF as the mask itself.
-pub const ASTAR_HANDLE_TAG: u64 = 0xA7_00_0000_0000_0000;
+pub const ASTAR_HANDLE_TAG: u64 = 0xA700_0000_0000_0000;
 
 /// Tag bits marking an `ObjectId` minted by [`SceneAccess::mesh_builder_new`]
 /// (pat-s3rrv.197) — an `ImmediateMesh` or `SurfaceTool` owned by the scene
@@ -489,11 +489,6 @@ pub fn is_polygon_path_finder_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == POLYGON_PATH_FINDER_HANDLE_TAG
 }
 
-/// Trait providing scene-tree operations to a running script.
-///
-/// The engine crate (`gdscene`) implements this trait on an accessor that wraps
-/// a raw pointer to the `SceneTree`, breaking the circular borrow that would
-/// otherwise prevent a script from calling back into the tree during execution.
 // ---------------------------------------------------------------------------
 // SceneTree script handle (pat-mgixk.59)
 // ---------------------------------------------------------------------------
@@ -570,6 +565,11 @@ pub fn resource_binding(res: &gdvariant::ResourceRef) -> Option<&str> {
     }
 }
 
+/// Trait providing scene-tree operations to a running script.
+///
+/// The engine crate (`gdscene`) implements this trait on an accessor that wraps
+/// a raw pointer to the `SceneTree`, breaking the circular borrow that would
+/// otherwise prevent a script from calling back into the tree during execution.
 pub trait SceneAccess {
     /// Resolve a node by path relative to `from`.
     fn get_node(&self, from: u64, path: &str) -> Option<u64>;
@@ -596,6 +596,7 @@ pub trait SceneAccess {
     /// (`Connection::resolve_args`), which is what makes the pair able to
     /// represent any nesting of `.bind()`/`.unbind()` — see
     /// `callable_bindings` in the interpreter.
+    #[allow(clippy::too_many_arguments)] // mirrors Godot's `connect` + binds/unbinds
     fn connect_signal_flags(
         &mut self,
         source: u64,

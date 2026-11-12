@@ -97,10 +97,7 @@ fn import_glb(bytes: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
                 // JSON
                 let s = std::str::from_utf8(chunk)
                     .map_err(|e| EngineError::Parse(format!("glb JSON chunk: {e}")))?;
-                json_text = Some(
-                    s.trim_end_matches(|c: char| c == '\0' || c == ' ')
-                        .to_string(),
-                );
+                json_text = Some(s.trim_end_matches(['\0', ' ']).to_string());
             }
             0x004E_4942 => {
                 // BIN
@@ -891,7 +888,10 @@ fn physics_shape_dict(shape: &Value) -> Dictionary {
     if ty == "hull" {
         ty = "convex".into();
     }
-    let props = shape.get(ty.as_str()).filter(|p| p.is_object()).unwrap_or(shape);
+    let props = shape
+        .get(ty.as_str())
+        .filter(|p| p.is_object())
+        .unwrap_or(shape);
     if let Some(r) = props.get("radius").and_then(|v| v.as_f64()) {
         d.insert("radius", Variant::Float(r));
     }

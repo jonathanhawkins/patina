@@ -31,7 +31,9 @@ fn change_scene_runs_enter_top_down_then_ready_bottom_up_once_each() {
     tree.set_current_scene(old, None);
     let mut ml = MainLoop::new(tree);
     ml.tree_mut().drain_script_output();
-    ml.tree_mut().change_scene_to_file("res://b.tscn").expect("queued");
+    ml.tree_mut()
+        .change_scene_to_file("res://b.tscn")
+        .expect("queued");
     ml.step(1.0 / 60.0);
 
     let out = ml.tree_mut().drain_script_output();

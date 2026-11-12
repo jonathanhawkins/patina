@@ -54,11 +54,19 @@ func helper():
     }
     // `helper` is the only user frame on the stack while it runs (the entry
     // `_physics_process` is dispatched by the host, which pushes none).
-    assert_eq!(get("depth"), Some(Variant::Int(1)), "get_stack() inside helper");
+    assert_eq!(
+        get("depth"),
+        Some(Variant::Int(1)),
+        "get_stack() inside helper"
+    );
     assert_eq!(
         get("max_depth"),
         Some(Variant::Int(1)),
         "20 native calls a frame for 120 frames must not grow the stack"
     );
-    assert_eq!(get("top"), Some(Variant::String("helper".into())), "the top frame is helper");
+    assert_eq!(
+        get("top"),
+        Some(Variant::String("helper".into())),
+        "the top frame is helper"
+    );
 }

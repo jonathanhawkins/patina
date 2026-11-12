@@ -101,7 +101,10 @@ fn write_creates_nested_dir_and_valid_json_file() {
 
     let path = write_crash_report(&nested, &report).unwrap();
     assert!(path.exists());
-    assert_eq!(path.file_name().unwrap().to_str().unwrap(), report.file_name());
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        report.file_name()
+    );
 
     let body = std::fs::read_to_string(&path).unwrap();
     let v: Value = serde_json::from_str(&body).expect("report must be valid JSON");

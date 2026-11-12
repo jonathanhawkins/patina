@@ -68,7 +68,10 @@ fn test_confirm_dialog_markup_present() {
     let b = extract_body(&http_get(port, "/editor"));
     handle.stop();
 
-    assert!(b.contains("id=\"confirm-dialog\""), "Missing #confirm-dialog");
+    assert!(
+        b.contains("id=\"confirm-dialog\""),
+        "Missing #confirm-dialog"
+    );
     assert!(
         b.contains("id=\"confirm-dialog-inner\""),
         "Missing #confirm-dialog-inner"

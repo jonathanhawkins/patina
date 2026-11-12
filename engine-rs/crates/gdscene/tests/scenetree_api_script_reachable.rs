@@ -65,7 +65,11 @@ func _ready():
         other => panic!("position should be a Vector2, got {other:?}"),
     };
 
-    assert_eq!(x_of(&ml), 0.0, "the tween starts at the node's current value");
+    assert_eq!(
+        x_of(&ml),
+        0.0,
+        "the tween starts at the node's current value"
+    );
 
     // Half the duration: partway, not finished. A RANGE rather than an exact
     // value, so the easing curve is not pinned by this test.

@@ -34,7 +34,10 @@ fn spinning_box(tree: &mut SceneTree, name: &str, at: Vector3, custom: bool) -> 
     let root = tree.root_id();
     let mut body = Node::new(name, "RigidBody3D");
     body.set_property("gravity_scale", Variant::Float(0.0));
-    body.set_property("angular_velocity", Variant::Vector3(Vector3::new(0.0, 2.0, 0.0)));
+    body.set_property(
+        "angular_velocity",
+        Variant::Vector3(Vector3::new(0.0, 2.0, 0.0)),
+    );
     if custom {
         body.set_property("center_of_mass_mode", Variant::Int(1));
     }
@@ -83,9 +86,25 @@ fn an_offset_shape_spins_about_its_own_centre_like_godot() {
         (120, (-0.9503, 50.0, 1.3113), 0.8097),
     ] {
         let (a, c, q, lin) = at[&tick];
-        near(&format!("AUTO body origin at tick {tick}"), a, godot_auto, 0.01);
-        near(&format!("CUSTOM body origin at tick {tick}"), c, (10.0, 50.0, 0.0), 1e-4);
-        assert!((q.y.abs() - quat_y).abs() < 0.003, "tick {tick}: rotation {q:?}; Godot y {quat_y}");
-        assert!(lin.length() < 1e-4, "tick {tick}: linear_velocity {lin:?} is the centre of mass's; Godot 0");
+        near(
+            &format!("AUTO body origin at tick {tick}"),
+            a,
+            godot_auto,
+            0.01,
+        );
+        near(
+            &format!("CUSTOM body origin at tick {tick}"),
+            c,
+            (10.0, 50.0, 0.0),
+            1e-4,
+        );
+        assert!(
+            (q.y.abs() - quat_y).abs() < 0.003,
+            "tick {tick}: rotation {q:?}; Godot y {quat_y}"
+        );
+        assert!(
+            lin.length() < 1e-4,
+            "tick {tick}: linear_velocity {lin:?} is the centre of mass's; Godot 0"
+        );
     }
 }

@@ -135,7 +135,7 @@ impl SoftBody3D {
 
     /// Returns true if the vertex at the given index is pinned.
     pub fn is_vertex_pinned(&self, index: usize) -> bool {
-        self.vertices.get(index).map_or(false, |v| v.pinned)
+        self.vertices.get(index).is_some_and(|v| v.pinned)
     }
 
     /// Returns the number of vertices.

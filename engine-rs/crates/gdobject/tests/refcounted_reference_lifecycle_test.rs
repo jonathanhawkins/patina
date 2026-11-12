@@ -33,7 +33,11 @@ fn refcounted_reference_lifecycle_test() {
 
     // `var r2 = r` — a second strong reference increments the count.
     rc.reference();
-    assert_eq!(rc.get_reference_count(), 2, "count 2 after a second reference");
+    assert_eq!(
+        rc.get_reference_count(),
+        2,
+        "count 2 after a second reference"
+    );
 
     // Release the references. Only the final `unreference` (count → 0) reports
     // that the object should now be freed.

@@ -78,7 +78,9 @@ fn root_node_parent_targets_player_siblings() {
     let player_node = tree
         .add_child(parent, Node::new("Anim", "AnimationPlayer"))
         .unwrap();
-    let label = tree.add_child(parent, Node::new("Label", "Node2D")).unwrap();
+    let label = tree
+        .add_child(parent, Node::new("Label", "Node2D"))
+        .unwrap();
 
     let mut anim = Animation::new("a", 1.0);
     anim.tracks.push(const_track("Label", "opacity", 0.5));
@@ -120,7 +122,11 @@ fn empty_node_path_targets_owner_node() {
 
     tree.process_animations(0.5);
 
-    match tree.get_node(player_node).unwrap().get_property("visible_ratio") {
+    match tree
+        .get_node(player_node)
+        .unwrap()
+        .get_property("visible_ratio")
+    {
         Variant::Float(f) => assert!((f - 0.5).abs() < 1e-4, "owner opacity {f}"),
         v => panic!("empty node_path should target owner, got {v:?}"),
     }

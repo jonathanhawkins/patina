@@ -196,13 +196,12 @@ fn web_frame_renders_scene_pixels() {
     // ...and through `CanvasMapping`, which is what the browser listeners use.
     // ⚠️ Carries the SAME inverse the engine applies, taken from the same root
     // window, so the two can never disagree about where a click landed.
-    let inverse = engine
-        .main_loop()
-        .tree()
-        .root_window()
-        .content_scale()
-        .window_transform
-        .affine_inverse();
+    //
+    // 🔑 Built with `canvas_to_project_transform`, the exact accessor the wasm
+    // listeners call. The wasm build once constructed `CanvasMapping` WITHOUT
+    // this field (E0063 on wasm32 only), so pointer events skipped the stretch
+    // entirely; asserting through the accessor pins the browser's real path.
+    let inverse = engine.canvas_to_project_transform();
     let mapping = CanvasMapping {
         origin_css: Vector2::new(0.0, 0.0),
         device_pixel_ratio: 1.0,

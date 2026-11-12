@@ -90,7 +90,10 @@ fn real_layers() -> Vec<(PathBuf, String, Cells)> {
             }
         }
     }
-    let games = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../games").canonicalize().unwrap();
+    let games = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../games")
+        .canonicalize()
+        .unwrap();
     let mut files = Vec::new();
     walk(&games, &mut files);
     files.sort();
@@ -101,9 +104,18 @@ fn real_layers() -> Vec<(PathBuf, String, Cells)> {
         for line in text.lines() {
             if line.starts_with("[node ") {
                 name = line.contains("type=\"TileMapLayer\"").then(|| {
-                    line.split("name=\"").nth(1).unwrap().split('"').next().unwrap().to_string()
+                    line.split("name=\"")
+                        .nth(1)
+                        .unwrap()
+                        .split('"')
+                        .next()
+                        .unwrap()
+                        .to_string()
                 });
-            } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("tile_map_data = PackedByteArray(\"")) {
+            } else if let (Some(n), Some(rest)) = (
+                &name,
+                line.strip_prefix("tile_map_data = PackedByteArray(\""),
+            ) {
                 let b64 = rest.trim_end_matches("\")");
                 out.push((f.clone(), n.clone(), decode(&base64_decode(b64))));
             }
@@ -115,7 +127,11 @@ fn real_layers() -> Vec<(PathBuf, String, Cells)> {
 /// Only the cells that differ, so a failure names them instead of dumping 341.
 fn diff(a: &Cells, b: &Cells) -> String {
     let mut out = Vec::new();
-    for k in a.keys().chain(b.keys()).collect::<std::collections::BTreeSet<_>>() {
+    for k in a
+        .keys()
+        .chain(b.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         if a.get(k) != b.get(k) {
             out.push(format!("{k:?}: {:?} -> {:?}", b.get(k), a.get(k)));
         }
@@ -127,7 +143,8 @@ fn layer_cells(handle: &EditorServerHandle, name: &str) -> (u64, Cells) {
     let state = handle.state();
     let s = state.lock().unwrap();
     let mut ids = Vec::new();
-    s.scene_tree.collect_subtree_top_down(s.scene_tree.root_id(), &mut ids);
+    s.scene_tree
+        .collect_subtree_top_down(s.scene_tree.root_id(), &mut ids);
     let id = *ids
         .iter()
         .find(|&&i| {
@@ -135,7 +152,12 @@ fn layer_cells(handle: &EditorServerHandle, name: &str) -> (u64, Cells) {
             n.name() == name && n.class_name() == "TileMapLayer"
         })
         .unwrap_or_else(|| panic!("no TileMapLayer {name} in the loaded scene"));
-    match s.scene_tree.get_node(id).unwrap().get_property("tile_map_data") {
+    match s
+        .scene_tree
+        .get_node(id)
+        .unwrap()
+        .get_property("tile_map_data")
+    {
         Variant::PackedByteArray(b) => (id.raw(), decode(&b)),
         other => panic!("{name}.tile_map_data is {other:?}"),
     }
@@ -145,22 +167,48 @@ fn layer_cells(handle: &EditorServerHandle, name: &str) -> (u64, Cells) {
 fn every_real_tilemap_loads_edits_and_undoes_without_losing_a_cell() {
     gdobject::class_db::register_all_classes();
     let layers = real_layers();
-    assert!(!layers.is_empty(), "no TileMapLayer found under games/ — the harvest is broken");
+    assert!(
+        !layers.is_empty(),
+        "no TileMapLayer found under games/ — the harvest is broken"
+    );
     let mut classes_seen = (false, false, false);
     for (scene, layer, file_cells) in &layers {
-        let game = scene.ancestors().find(|p| p.join("project.godot").exists()).unwrap();
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let game = scene
+            .ancestors()
+            .find(|p| p.join("project.godot").exists())
+            .unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
-        post(port, "/api/project/open", &format!(r#"{{"path":"{}"}}"#, game.display()));
-        let r = post(port, "/api/scene/load", &format!(r#"{{"path":"{}"}}"#, scene.display()));
+        post(
+            port,
+            "/api/project/open",
+            &format!(r#"{{"path":"{}"}}"#, game.display()),
+        );
+        let r = post(
+            port,
+            "/api/scene/load",
+            &format!(r#"{{"path":"{}"}}"#, scene.display()),
+        );
         assert!(r.contains("200 OK"), "{}: {r}", scene.display());
 
         let (nid, loaded) = layer_cells(&handle, layer);
-        assert!(&loaded == file_cells, "{}:{layer}: the editor holds different cells than the file: {}", scene.display(), diff(&loaded, file_cells));
+        assert!(
+            &loaded == file_cells,
+            "{}:{layer}: the editor holds different cells than the file: {}",
+            scene.display(),
+            diff(&loaded, file_cells)
+        );
 
         // One real cell per edge class the data has.
         let picks: Vec<(&str, (i16, i16))> = [
-            ("source 0", file_cells.iter().find(|(_, v)| v.0 == 0).map(|(k, _)| *k)),
+            (
+                "source 0",
+                file_cells.iter().find(|(_, v)| v.0 == 0).map(|(k, _)| *k),
+            ),
             ("negative x", file_cells.keys().find(|k| k.0 < 0).copied()),
             ("negative y", file_cells.keys().find(|k| k.1 < 0).copied()),
         ]
@@ -175,39 +223,81 @@ fn every_real_tilemap_loads_edits_and_undoes_without_losing_a_cell() {
             }
         }
         for (what, (x, y)) in picks {
-            let r = post(port, "/api/tilemap/erase", &format!(r#"{{"node_id":{nid},"x":{x},"y":{y}}}"#));
-            assert!(r.contains("200 OK"), "{layer} erase {what} cell ({x},{y}): {r}");
+            let r = post(
+                port,
+                "/api/tilemap/erase",
+                &format!(r#"{{"node_id":{nid},"x":{x},"y":{y}}}"#),
+            );
+            assert!(
+                r.contains("200 OK"),
+                "{layer} erase {what} cell ({x},{y}): {r}"
+            );
             let (_, after) = layer_cells(&handle, layer);
-            assert!(!after.contains_key(&(x, y)), "{layer}: erasing the {what} cell ({x},{y}) did nothing");
+            assert!(
+                !after.contains_key(&(x, y)),
+                "{layer}: erasing the {what} cell ({x},{y}) did nothing"
+            );
             let mut expect = file_cells.clone();
             expect.remove(&(x, y));
-            assert!(after == expect, "{layer}: erasing the {what} cell ({x},{y}) changed other cells: {}", diff(&after, &expect));
+            assert!(
+                after == expect,
+                "{layer}: erasing the {what} cell ({x},{y}) changed other cells: {}",
+                diff(&after, &expect)
+            );
             post(port, "/api/undo", "{}");
             {
                 let now = layer_cells(&handle, layer).1;
-                assert!(&now == file_cells, "{layer}: undo of the {what} erase did not restore the file's cells: {}", diff(&now, file_cells));
+                assert!(
+                    &now == file_cells,
+                    "{layer}: undo of the {what} erase did not restore the file's cells: {}",
+                    diff(&now, file_cells)
+                );
             }
 
             // Paint that cell's source into an empty neighbour, then undo.
             let src = file_cells[&(x, y)].0;
             let (ex, ey) = (-30i16..30)
                 .flat_map(|dy| (-30i16..30).map(move |dx| (x + dx, y + dy)))
-                .find(|c| !file_cells.contains_key(c) && (c.0 < 0) == (x < 0) && (c.1 < 0) == (y < 0))
+                .find(|c| {
+                    !file_cells.contains_key(c) && (c.0 < 0) == (x < 0) && (c.1 < 0) == (y < 0)
+                })
                 .expect("an empty cell in the same quadrant");
-            let r = post(port, "/api/tilemap/paint", &format!(r#"{{"node_id":{nid},"x":{ex},"y":{ey},"tile_id":{src}}}"#));
-            assert!(r.contains("200 OK"), "{layer} paint source {src} at ({ex},{ey}): {r}");
+            let r = post(
+                port,
+                "/api/tilemap/paint",
+                &format!(r#"{{"node_id":{nid},"x":{ex},"y":{ey},"tile_id":{src}}}"#),
+            );
+            assert!(
+                r.contains("200 OK"),
+                "{layer} paint source {src} at ({ex},{ey}): {r}"
+            );
             let (_, painted) = layer_cells(&handle, layer);
-            assert_eq!(painted.get(&(ex, ey)).map(|v| v.0), Some(src), "{layer}: painting source {src} at ({ex},{ey}) ({what} quadrant) was dropped");
+            assert_eq!(
+                painted.get(&(ex, ey)).map(|v| v.0),
+                Some(src),
+                "{layer}: painting source {src} at ({ex},{ey}) ({what} quadrant) was dropped"
+            );
             let mut expect = file_cells.clone();
             expect.insert((ex, ey), painted[&(ex, ey)]);
-            assert!(painted == expect, "{layer}: the paint at ({ex},{ey}) changed other cells: {}", diff(&painted, &expect));
+            assert!(
+                painted == expect,
+                "{layer}: the paint at ({ex},{ey}) changed other cells: {}",
+                diff(&painted, &expect)
+            );
             post(port, "/api/undo", "{}");
             {
                 let now = layer_cells(&handle, layer).1;
-                assert!(&now == file_cells, "{layer}: undo of the paint did not restore the file's cells: {}", diff(&now, file_cells));
+                assert!(
+                    &now == file_cells,
+                    "{layer}: undo of the paint did not restore the file's cells: {}",
+                    diff(&now, file_cells)
+                );
             }
         }
     }
     // The point of harvesting: the real data DOES contain the edge cases.
-    assert!(classes_seen.0 && classes_seen.1, "the real games no longer contain source-0 / negative cells: {classes_seen:?}");
+    assert!(
+        classes_seen.0 && classes_seen.1,
+        "the real games no longer contain source-0 / negative cells: {classes_seen:?}"
+    );
 }

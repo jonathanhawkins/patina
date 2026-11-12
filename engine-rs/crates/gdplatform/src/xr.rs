@@ -62,6 +62,7 @@ pub enum WebXrSessionMode {
 impl WebXrSessionMode {
     /// Parses the string Godot/WebXR uses on the wire. Unknown values map to
     /// `None` so a script typo surfaces rather than silently becoming inline.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "inline" => Some(WebXrSessionMode::Inline),
@@ -406,8 +407,7 @@ impl WebXrInterface {
         // in arrival order.
         #[cfg(target_arch = "wasm32")]
         {
-            self.incoming
-                .extend(crate::xr_web::drain_events());
+            self.incoming.extend(crate::xr_web::drain_events());
         }
         for event in std::mem::take(&mut self.incoming) {
             self.apply_frame_event(event);

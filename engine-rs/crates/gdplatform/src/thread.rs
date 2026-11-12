@@ -116,7 +116,7 @@ impl GodotMutex {
     /// Locks the mutex, blocking until it becomes available.
     ///
     /// Mirrors Godot's `Mutex.lock()`.
-    pub fn lock(&self) -> GodotMutexGuard {
+    pub fn lock(&self) -> GodotMutexGuard<'_> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         GodotMutexGuard {
             _guard: Some(guard),
@@ -127,7 +127,7 @@ impl GodotMutex {
     ///
     /// Returns `true` if the lock was acquired, `false` if it was already
     /// held. Mirrors Godot's `Mutex.try_lock()`.
-    pub fn try_lock(&self) -> Option<GodotMutexGuard> {
+    pub fn try_lock(&self) -> Option<GodotMutexGuard<'_>> {
         match self.inner.try_lock() {
             Ok(guard) => Some(GodotMutexGuard {
                 _guard: Some(guard),

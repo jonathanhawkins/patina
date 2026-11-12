@@ -903,6 +903,7 @@ pub(crate) fn graph_child_by_name(tree: &SceneTree, edit: NodeId, name: &str) ->
         .find(|c| tree.get_node(*c).map(|n| n.name() == name).unwrap_or(false))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     tree: &mut SceneTree,
     node_id: NodeId,
@@ -1050,10 +1051,11 @@ fn render_node(
         let is_container = if class == "PanelContainer" {
             // The node's own `theme_override_styles/panel` first (pat-9ww3e),
             // the same resolution `control::arrange_container` uses.
-            let margins = control::resolve_stylebox_in(tree, node_id, theme, "PanelContainer", "panel")
-                .or_else(|| theme.get_stylebox("Panel", "panel").cloned())
-                .map(|sb| sb.content_margins())
-                .unwrap_or([0.0; 4]);
+            let margins =
+                control::resolve_stylebox_in(tree, node_id, theme, "PanelContainer", "panel")
+                    .or_else(|| theme.get_stylebox("Panel", "panel").cloned())
+                    .map(|sb| sb.content_margins())
+                    .unwrap_or([0.0; 4]);
             control::arrange_panel_container(tree, node_id, size, margins);
             true
         } else {
@@ -1461,7 +1463,9 @@ pub(crate) fn line_height_px(font_size: f32) -> f32 {
 /// `theme_override_fonts/font` when that loads, else the built-in face.
 pub fn line_height_px_in(font_size: f32, font_path: Option<&str>) -> f32 {
     font_path
-        .and_then(|path| crate::canvas_render::line_height_with_override_font(path, font_size.max(1.0)))
+        .and_then(|path| {
+            crate::canvas_render::line_height_with_override_font(path, font_size.max(1.0))
+        })
         .unwrap_or_else(|| line_height_px(font_size))
 }
 
@@ -1684,7 +1688,8 @@ fn parse_bbcode_with_effects(src: &str, default: Color, custom: &[(u64, String)]
                 // Unterminated '[' — treat literally.
                 cur.push('[');
                 cur.push_str(&tag);
-                char_index += 1 + tag.chars().count();
+                // No `char_index` bump: the loop ends here and nothing after it
+                // reads the counter.
                 break;
             }
             let cur_color = *color_stack.last().unwrap();
@@ -2260,13 +2265,6 @@ fn int_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<i64> {
     }
 }
 
-/// The advance between two words, chosen so that
-/// `width(a) + SPACE + width(b) == text_width("a b")` — the wrap is only
-/// correct if the width model the layout uses matches the one that draws.
-fn space_advance(scale: u32) -> f32 {
-    (GLYPH_W + 2.0 * GLYPH_GAP) * scale as f32
-}
-
 /// Lays a `Label`'s text out as Godot does and emits one `DrawString` per line
 /// (pat-0q2kx.149).
 ///
@@ -2532,7 +2530,7 @@ fn flush_custom_char_fx(tree: &mut SceneTree, node_id: NodeId) {
                 let returned = tree.call_script_method(
                     effect_node,
                     "_process_custom_fx",
-                    &[charfx_arg.clone()],
+                    std::slice::from_ref(&charfx_arg),
                 );
                 fx.read_back(|key| {
                     tree.get_node(charfx)
@@ -2890,11 +2888,11 @@ fn richtext_placements(
                 };
             let y = rect.position.y + visual_line as f32 * line_h;
             visual_line += 1;
-            for wi in range.start..range.end {
-                if wi > range.start {
+            for (n, word) in words[range.start..range.end].iter().enumerate() {
+                if n > 0 {
                     x += space_w;
                 }
-                for (pi, (si, text, off)) in words[wi].iter().enumerate() {
+                for (pi, (si, text, off)) in word.iter().enumerate() {
                     if pi > 0 {
                         x += gap;
                     }
@@ -3169,7 +3167,10 @@ fn draw_control(
                 let m = crate::control::BUTTON_CONTENT_MARGIN;
                 let content = Rect2::new(
                     Vector2::new(rect.position.x + m, rect.position.y + m),
-                    Vector2::new((rect.size.x - 2.0 * m).max(0.0), (rect.size.y - 2.0 * m).max(0.0)),
+                    Vector2::new(
+                        (rect.size.x - 2.0 * m).max(0.0),
+                        (rect.size.y - 2.0 * m).max(0.0),
+                    ),
                 );
                 let expand = bool_prop(tree, node_id, "expand_icon").unwrap_or(false);
                 let natural = texture_pixel_size(&icon).unwrap_or(content.size);
@@ -3230,7 +3231,9 @@ fn draw_control(
             }
             // The focus frame, over everything else the button drew.
             if tree.focus_owner() == Some(node_id) {
-                if let Some(sb) = control::resolve_stylebox_in(tree, node_id, theme, "Button", "focus") {
+                if let Some(sb) =
+                    control::resolve_stylebox_in(tree, node_id, theme, "Button", "focus")
+                {
                     out.extend(sb.draw(rect));
                 }
             }
@@ -4175,7 +4178,7 @@ fn draw_control(
                     Vector2::new(l + r, t + b)
                 })
                 .unwrap_or(Vector2::new(8.0, 8.0));
-            let ratio = control::get_range_ratio(tree, node_id).clamp(0.0, 1.0) as f32;
+            let ratio = control::get_range_ratio(tree, node_id).clamp(0.0, 1.0);
             let g = control::SLIDER_GRABBER_SIZE;
             let (p0, sz) = (rect.position, rect.size);
             if !vertical {
@@ -4450,11 +4453,15 @@ fn draw_control(
             let class = class_of(tree, node_id);
             let checked = bool_prop(tree, node_id, "button_pressed").unwrap_or(false);
             let radio = !matches!(
-                tree.get_node(node_id).map(|n| n.get_property("button_group")),
+                tree.get_node(node_id)
+                    .map(|n| n.get_property("button_group")),
                 None | Some(Variant::Nil)
             );
             let style = control::resolve_stylebox_in(tree, node_id, theme, &class, "normal");
-            let [ml, _mt, _mr, _mb] = style.as_ref().map(|sb| sb.content_margins()).unwrap_or([4.0; 4]);
+            let [ml, _mt, _mr, _mb] = style
+                .as_ref()
+                .map(|sb| sb.content_margins())
+                .unwrap_or([4.0; 4]);
             if let Some(sb) = &style {
                 out.extend(sb.draw(rect));
             }
@@ -4468,7 +4475,11 @@ fn draw_control(
                     .or_else(|| {
                         theme.get_color(
                             "CheckBox",
-                            if checked { "font_pressed_color" } else { "font_color" },
+                            if checked {
+                                "font_pressed_color"
+                            } else {
+                                "font_color"
+                            },
                         )
                     })
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
@@ -5319,13 +5330,22 @@ mod tests {
         // The button's rounded bg is several bands; their UNION starts at the
         // accumulated global position (10 + 20 = 30 on each axis).
         let bounds = rect_union(&items[1].commands);
-        assert!((bounds.position.x - 30.0).abs() < 0.01, "global x=30, got {bounds:?}");
-        assert!((bounds.position.y - 30.0).abs() < 0.01, "global y=30, got {bounds:?}");
+        assert!(
+            (bounds.position.x - 30.0).abs() < 0.01,
+            "global x=30, got {bounds:?}"
+        );
+        assert!(
+            (bounds.position.y - 30.0).abs() < 0.01,
+            "global y=30, got {bounds:?}"
+        );
     }
 
     /// The bounding box of every filled rect and disc in `cmds`.
     fn rect_union(cmds: &[DrawCommand]) -> Rect2 {
-        let (mut lo, mut hi) = (Vector2::new(f32::MAX, f32::MAX), Vector2::new(f32::MIN, f32::MIN));
+        let (mut lo, mut hi) = (
+            Vector2::new(f32::MAX, f32::MAX),
+            Vector2::new(f32::MIN, f32::MIN),
+        );
         for c in cmds {
             let (a, b) = match c {
                 DrawCommand::DrawRect { rect, .. } => (rect.position, rect.position + rect.size),
@@ -5333,15 +5353,20 @@ mod tests {
                     *center - Vector2::new(*radius, *radius),
                     *center + Vector2::new(*radius, *radius),
                 ),
-                DrawCommand::DrawPolygon { points, .. } if !points.is_empty() => points.iter().fold(
-                    (Vector2::new(f32::MAX, f32::MAX), Vector2::new(f32::MIN, f32::MIN)),
-                    |(lo, hi), p| {
+                DrawCommand::DrawPolygon { points, .. } if !points.is_empty() => {
+                    points.iter().fold(
                         (
-                            Vector2::new(lo.x.min(p.x), lo.y.min(p.y)),
-                            Vector2::new(hi.x.max(p.x), hi.y.max(p.y)),
-                        )
-                    },
-                ),
+                            Vector2::new(f32::MAX, f32::MAX),
+                            Vector2::new(f32::MIN, f32::MIN),
+                        ),
+                        |(lo, hi), p| {
+                            (
+                                Vector2::new(lo.x.min(p.x), lo.y.min(p.y)),
+                                Vector2::new(hi.x.max(p.x), hi.y.max(p.y)),
+                            )
+                        },
+                    )
+                }
                 _ => continue,
             };
             lo = Vector2::new(lo.x.min(a.x), lo.y.min(a.y));

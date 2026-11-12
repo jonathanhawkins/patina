@@ -108,7 +108,9 @@ fn springarm3d_retracts_after_physics_step() {
     // Obstacle at (0,0,-5); the arm sits at the origin and extends along -Z
     // with a rest spring_length of 10.
     add_static_sphere(&mut tree, root, "Wall", Vector3::new(0.0, 0.0, -5.0));
-    let arm_id = tree.add_child(root, Node::new("Arm", "SpringArm3D")).unwrap();
+    let arm_id = tree
+        .add_child(root, Node::new("Arm", "SpringArm3D"))
+        .unwrap();
     node3d::set_position(&mut tree, arm_id, Vector3::ZERO);
     springarm3d::set_spring_length(&mut tree, arm_id, 10.0);
     springarm3d::set_margin(&mut tree, arm_id, 0.0);

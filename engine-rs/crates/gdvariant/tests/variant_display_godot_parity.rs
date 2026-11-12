@@ -75,7 +75,10 @@ fn matrix_types_label_their_columns() {
 #[test]
 fn rect_and_shape_types_use_p_s_labels() {
     let r = Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
-    assert_eq!(Variant::Rect2(r).to_string(), "[P: (1.0, 2.0), S: (3.0, 4.0)]");
+    assert_eq!(
+        Variant::Rect2(r).to_string(),
+        "[P: (1.0, 2.0), S: (3.0, 4.0)]"
+    );
 
     let aabb = Aabb::new(Vector3::new(1.0, 2.0, 3.0), Vector3::new(4.0, 5.0, 6.0));
     assert_eq!(
@@ -87,7 +90,10 @@ fn rect_and_shape_types_use_p_s_labels() {
         normal: Vector3::new(0.0, 1.0, 0.0),
         d: 5.0,
     };
-    assert_eq!(Variant::Plane(plane).to_string(), "[N: (0.0, 1.0, 0.0), D: 5]");
+    assert_eq!(
+        Variant::Plane(plane).to_string(),
+        "[N: (0.0, 1.0, 0.0), D: 5]"
+    );
 }
 
 #[test]

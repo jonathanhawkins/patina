@@ -170,7 +170,11 @@ pub fn load_array_mesh_surface_materials(path: &str) -> Vec<Option<SurfaceMateri
         .map(|res| {
             decode_surfaces(&res)
                 .iter()
-                .map(|s| s.material.as_deref().and_then(|r| material_from_ref(&res, r)))
+                .map(|s| {
+                    s.material
+                        .as_deref()
+                        .and_then(|r| material_from_ref(&res, r))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -305,9 +309,7 @@ fn layout(format: u64, vertex_count: usize) -> Option<Layout> {
         }
         let elem = match i {
             ARRAY_VERTEX => {
-                if format & FLAG_USE_2D_VERTICES != 0 {
-                    8
-                } else if compressed {
+                if format & FLAG_USE_2D_VERTICES != 0 || compressed {
                     8
                 } else {
                     12

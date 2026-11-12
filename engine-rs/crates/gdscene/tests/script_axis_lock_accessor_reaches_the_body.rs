@@ -1,4 +1,3 @@
-
 //! pat-mgixk.31 (increment 3): a GDScript call to
 //! `PhysicsBody3D.set_axis_lock(axis, lock)` reaches the property the physics
 //! solver reads, and `PhysicsServer3D.BodyAxis` is nameable from a script.

@@ -110,7 +110,11 @@ fn audio_add_remove_rename_buses() {
     let (handle, port) = make_server();
 
     // Add a bus — defaults to routing into Master.
-    let v = audio_json(&http_post(port, "/api/audio/bus/add", "{\"name\":\"Music\"}"));
+    let v = audio_json(&http_post(
+        port,
+        "/api/audio/bus/add",
+        "{\"name\":\"Music\"}",
+    ));
     let bs = buses(&v);
     assert_eq!(bs.len(), 2);
     assert_eq!(bs[1]["name"], "Music");
@@ -238,7 +242,10 @@ fn editor_html_contains_audio_panel() {
 
     // The Audio bottom tab and its panel scaffold are present.
     assert!(b.contains("data-tab=\"audio\""), "missing Audio bottom tab");
-    assert!(b.contains("id=\"audio-buses\""), "missing audio bus strip host");
+    assert!(
+        b.contains("id=\"audio-buses\""),
+        "missing audio bus strip host"
+    );
     assert!(b.contains("id=\"audio-add-bus\""), "missing Add Bus button");
     assert!(b.contains("Load Default"), "missing Load Default button");
     // The audio panel wiring function is shipped to the client.
@@ -251,7 +258,10 @@ fn editor_html_contains_audio_panel() {
     assert!(b.contains("abus-db-scale"), "missing fader dB scale");
     assert!(b.contains("Speakers"), "missing Master 'Speakers' output");
     assert!(b.contains("bus-remove"), "missing per-bus delete control");
-    assert!(b.contains("Add Effect"), "missing per-bus Add Effect dropdown");
+    assert!(
+        b.contains("Add Effect"),
+        "missing per-bus Add Effect dropdown"
+    );
 
     handle.stop();
 }

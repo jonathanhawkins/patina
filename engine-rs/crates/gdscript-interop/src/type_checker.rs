@@ -127,24 +127,16 @@ fn check_stmts(stmts: &[Stmt]) -> Vec<TypeError> {
 /// A lightweight signature used for checking call sites.
 struct FuncSig {
     params: Vec<FuncParam>,
-    return_type: Option<String>,
 }
 
 fn collect_functions(stmts: &[Stmt]) -> HashMap<String, FuncSig> {
     let mut out = HashMap::new();
     for stmt in stmts {
-        if let Stmt::FuncDef {
-            name,
-            params,
-            return_type,
-            ..
-        } = stmt
-        {
+        if let Stmt::FuncDef { name, params, .. } = stmt {
             out.insert(
                 name.clone(),
                 FuncSig {
                     params: params.clone(),
-                    return_type: return_type.clone(),
                 },
             );
         }
@@ -176,11 +168,9 @@ fn check_stmt(stmt: &Stmt, funcs: &HashMap<String, FuncSig>, errors: &mut Vec<Ty
             }
             check_expr(expr, funcs, errors);
         }
-        Stmt::VarDecl { value, .. } => {
-            if let Some(expr) = value {
-                check_expr(expr, funcs, errors);
-            }
-        }
+        Stmt::VarDecl {
+            value: Some(expr), ..
+        } => check_expr(expr, funcs, errors),
         Stmt::Assignment { target, value, .. } => {
             check_expr(target, funcs, errors);
             check_expr(value, funcs, errors);

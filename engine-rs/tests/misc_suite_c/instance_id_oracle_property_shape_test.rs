@@ -65,7 +65,8 @@ fn count_oracle_nodes(json: &serde_json::Value) -> usize {
 // --- Original 5 scenes ---
 const SIGNAL_INSTANTIATION_TSCN: &str =
     include_str!("../../../fixtures/scenes/signal_instantiation.tscn");
-const PHYSICS_PLAYGROUND_TSCN: &str = include_str!("../../../fixtures/scenes/physics_playground.tscn");
+const PHYSICS_PLAYGROUND_TSCN: &str =
+    include_str!("../../../fixtures/scenes/physics_playground.tscn");
 const PLATFORMER_TSCN: &str = include_str!("../../../fixtures/scenes/platformer.tscn");
 const HIERARCHY_TSCN: &str = include_str!("../../../fixtures/scenes/hierarchy.tscn");
 const MINIMAL_TSCN: &str = include_str!("../../../fixtures/scenes/minimal.tscn");
@@ -90,14 +91,16 @@ const PLATFORMER_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/platformer_properties.json");
 const HIERARCHY_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/hierarchy_properties.json");
-const MINIMAL_PROPS: &str = include_str!("../../../fixtures/oracle_outputs/minimal_properties.json");
+const MINIMAL_PROPS: &str =
+    include_str!("../../../fixtures/oracle_outputs/minimal_properties.json");
 const CHARACTER_BODY_TEST_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/character_body_test_properties.json");
 const SIGNALS_COMPLEX_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/signals_complex_properties.json");
 const SPACE_SHOOTER_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/space_shooter_properties.json");
-const UI_MENU_PROPS: &str = include_str!("../../../fixtures/oracle_outputs/ui_menu_properties.json");
+const UI_MENU_PROPS: &str =
+    include_str!("../../../fixtures/oracle_outputs/ui_menu_properties.json");
 const UNIQUE_NAME_RESOLUTION_PROPS: &str =
     include_str!("../../../fixtures/oracle_outputs/unique_name_resolution_properties.json");
 const WITH_PROPERTIES_PROPS: &str =

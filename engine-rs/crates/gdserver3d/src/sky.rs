@@ -1288,7 +1288,10 @@ mod tests {
         assert!(mat.program.is_some(), "a samplerCube sky runs as a program");
         // +Z is face 4: r = 0.8, times exposure 0.5.
         let c = mat.eval_program(Vector3::new(0.0, 0.0, 1.0)).expect("runs");
-        assert!((c.r - 0.4).abs() < 1e-4 && (c.b - 0.1).abs() < 1e-4, "{c:?}");
+        assert!(
+            (c.r - 0.4).abs() < 1e-4 && (c.b - 0.1).abs() < 1e-4,
+            "{c:?}"
+        );
         // The bake covers every direction; its middle row at u = 0.5 is +Z.
         mat.bake_panorama(8, 4);
         let pano = mat.baked.as_ref().expect("baked");

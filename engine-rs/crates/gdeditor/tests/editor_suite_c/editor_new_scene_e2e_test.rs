@@ -98,7 +98,11 @@ fn new_scene_opens_an_empty_untitled_active_tab() {
     let resp = http_post(port, "/api/scene/new", "{}");
     assert!(resp.contains("200 OK"), "new scene ok: {resp}");
     let body: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-    assert_eq!(body["ok"].as_bool(), Some(true), "new scene reports ok: {body}");
+    assert_eq!(
+        body["ok"].as_bool(),
+        Some(true),
+        "new scene reports ok: {body}"
+    );
 
     // Tabs: a second, Untitled, unsaved tab is now active.
     let tabs: serde_json::Value =
@@ -108,10 +112,17 @@ fn new_scene_opens_an_empty_untitled_active_tab() {
     let active = tabs["active_tab_index"].as_u64().unwrap() as usize;
     assert_eq!(active, 1, "the new scene tab is active: {tabs}");
     assert!(
-        arr[active]["name"].as_str().unwrap().starts_with("Untitled"),
+        arr[active]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Untitled"),
         "the new tab is Untitled: {tabs}"
     );
-    assert_eq!(arr[active]["path"].as_str(), Some(""), "no path yet: {tabs}");
+    assert_eq!(
+        arr[active]["path"].as_str(),
+        Some(""),
+        "no path yet: {tabs}"
+    );
 
     // The active scene is empty (no root node) -> Create Root Node panel shows.
     let after = scene(port);
@@ -147,14 +158,20 @@ fn create_root_node_buttons_add_matching_root_type() {
         let add = http_post(
             port,
             "/api/node/add",
-            &format!(r#"{{"parent_id":{root_id},"name":"{kind_class}","class_name":"{kind_class}"}}"#),
+            &format!(
+                r#"{{"parent_id":{root_id},"name":"{kind_class}","class_name":"{kind_class}"}}"#
+            ),
         );
         assert!(add.contains("200 OK"), "add root {kind_class} ok: {add}");
 
         // The scene now has exactly that root node.
         let after = scene(port);
         let children = after["nodes"]["children"].as_array().unwrap();
-        assert_eq!(children.len(), 1, "one root created for {kind_class}: {after}");
+        assert_eq!(
+            children.len(),
+            1,
+            "one root created for {kind_class}: {after}"
+        );
         assert_eq!(
             children[0]["class"].as_str(),
             Some(kind_class),

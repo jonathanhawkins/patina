@@ -175,17 +175,30 @@ fn ray_test_body(
         &body.shape,
     );
     let extras = body.extra_shapes.iter().map(|(offset, rotation, shape)| {
-        (body.position + body.rotation.xform(*offset), body.rotation * *rotation, shape)
+        (
+            body.position + body.rotation.xform(*offset),
+            body.rotation * *rotation,
+            shape,
+        )
     });
     let mut closest: Option<RaycastHit3D> = None;
     for (position, rotation, shape) in std::iter::once(primary).chain(extras) {
         if !segment_may_reach(origin, dir, max_dist, position, rotation, shape) {
             continue;
         }
-        let Some(hit) = ray_test_shape(origin, dir, body.id, position, rotation, shape, hit_from_inside, hit_back_faces) else {
+        let Some(hit) = ray_test_shape(
+            origin,
+            dir,
+            body.id,
+            position,
+            rotation,
+            shape,
+            hit_from_inside,
+            hit_back_faces,
+        ) else {
             continue;
         };
-        if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
+        if closest.as_ref().is_none_or(|c| hit.distance < c.distance) {
             closest = Some(hit);
         }
     }
@@ -369,7 +382,7 @@ fn ray_capsule_local(
             let ch = cb * cb - cc;
             if ch >= 0.0 {
                 let t = -cb - ch.sqrt();
-                if t >= 0.0 && t_hit.map_or(true, |prev| t < prev) {
+                if t >= 0.0 && t_hit.is_none_or(|prev| t < prev) {
                     t_hit = Some(t);
                 }
             }
@@ -482,7 +495,7 @@ fn ray_cylinder_local(
     let half_h = height * 0.5;
     let mut best: Option<(f32, Vector3)> = None;
     let mut keep = |t: f32, n: Vector3| {
-        if t >= 0.0 && best.map_or(true, |(bt, _)| t < bt) {
+        if t >= 0.0 && best.is_none_or(|(bt, _)| t < bt) {
             best = Some((t, n));
         }
     };
@@ -630,7 +643,7 @@ fn ray_trimesh_local(
             continue;
         }
 
-        if best.map_or(true, |(bt, _)| t < bt) {
+        if best.is_none_or(|(bt, _)| t < bt) {
             let raw = e1.cross(e2);
             let mut normal = raw.normalized();
             if back_face {
@@ -949,7 +962,7 @@ impl PhysicsShapeQuery3D {
                 &body.shape,
             );
             if cr.colliding {
-                let deeper = best.map_or(true, |b| cr.depth > b.depth);
+                let deeper = best.is_none_or(|b| cr.depth > b.depth);
                 if deeper {
                     let [_self_pt, collider_pt] = self.witness_points(body, &cr);
                     best = Some(RestInfo3D {
@@ -1199,22 +1212,28 @@ mod tests {
         body.extra_shapes.push((
             Vector3::new(0.0, -5.0, 0.0),
             Quaternion::IDENTITY,
-            Shape3D::BoxShape { half_extents: Vector3::new(2.0, 0.5, 2.0) },
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(2.0, 0.5, 2.0),
+            },
         ));
         let bodies = [body];
         // Down onto the extra shape: its top face is at y -4.5.
-        let hit = PhysicsRayQuery3D::new(Vector3::new(0.5, 0.0, 0.0), Vector3::new(0.5, -10.0, 0.0))
-            .intersect(bodies.iter())
-            .expect("the extra shape under the ray");
+        let hit =
+            PhysicsRayQuery3D::new(Vector3::new(0.5, 0.0, 0.0), Vector3::new(0.5, -10.0, 0.0))
+                .intersect(bodies.iter())
+                .expect("the extra shape under the ray");
         assert!((hit.point.y + 4.5).abs() < 1e-4, "hit {hit:?}");
         assert!((hit.normal.y - 1.0).abs() < 1e-4);
         // The primary shape is tested at its OFFSET, not at the body origin.
-        assert!(PhysicsRayQuery3D::new(Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
-            .intersect(bodies.iter())
-            .is_none());
-        let hit = PhysicsRayQuery3D::new(Vector3::new(50.0, 3.0, 0.0), Vector3::new(50.0, 0.0, 0.0))
-            .intersect(bodies.iter())
-            .expect("the offset primary shape");
+        assert!(
+            PhysicsRayQuery3D::new(Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
+                .intersect(bodies.iter())
+                .is_none()
+        );
+        let hit =
+            PhysicsRayQuery3D::new(Vector3::new(50.0, 3.0, 0.0), Vector3::new(50.0, 0.0, 0.0))
+                .intersect(bodies.iter())
+                .expect("the offset primary shape");
         assert!((hit.point.y - 1.0).abs() < 1e-4, "hit {hit:?}");
     }
 

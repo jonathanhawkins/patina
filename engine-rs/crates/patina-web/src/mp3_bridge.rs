@@ -105,7 +105,7 @@ impl BrowserMp3Decoder {
         if interleaved.is_empty() {
             return Err("decoded PCM is empty".to_string());
         }
-        if interleaved.len() % channels as usize != 0 {
+        if !interleaved.len().is_multiple_of(channels as usize) {
             return Err(format!(
                 "{} interleaved samples is not a whole number of {channels}-channel frames",
                 interleaved.len()
@@ -137,7 +137,7 @@ impl BrowserMp3Decoder {
             return Err("decoded PCM needs at least one channel".to_string());
         }
         let channels_usize = channels as usize;
-        if planar.len() % channels_usize != 0 {
+        if !planar.len().is_multiple_of(channels_usize) {
             return Err(format!(
                 "{} planar samples do not divide into {channels} equal channels",
                 planar.len()

@@ -129,7 +129,11 @@ fn wrong_bearer_token_returns_401() {
     stream.write_all(b"GET /api/scene HTTP/1.1\r\nHost: localhost\r\nAuthorization: super-secret\r\nConnection: close\r\n\r\n").unwrap();
     let mut resp = String::new();
     stream.read_to_string(&mut resp).ok();
-    assert_eq!(status_code(&resp), 401, "non-Bearer scheme must be rejected");
+    assert_eq!(
+        status_code(&resp),
+        401,
+        "non-Bearer scheme must be rejected"
+    );
 
     handle.stop();
 }
@@ -184,7 +188,10 @@ fn auth_token_can_come_from_environment_variable() {
     let handle = EditorServerHandle::start_with_auth(port, fixture_state(), token);
     thread::sleep(Duration::from_millis(120));
     assert_eq!(probe(port, "GET", "/api/scene", None), 401);
-    assert_eq!(probe(port, "GET", "/api/scene", Some("env-sourced-token")), 200);
+    assert_eq!(
+        probe(port, "GET", "/api/scene", Some("env-sourced-token")),
+        200
+    );
     handle.stop();
 
     // Restore env to avoid leaking state into sibling tests.
@@ -219,7 +226,10 @@ fn auth_token_can_come_from_config_file() {
     let handle = EditorServerHandle::start_with_auth(port, fixture_state(), token);
     thread::sleep(Duration::from_millis(120));
     assert_eq!(probe(port, "GET", "/api/scene", None), 401);
-    assert_eq!(probe(port, "GET", "/api/scene", Some("file-sourced-token")), 200);
+    assert_eq!(
+        probe(port, "GET", "/api/scene", Some("file-sourced-token")),
+        200
+    );
     handle.stop();
 
     std::fs::remove_file(&path).ok();

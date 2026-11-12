@@ -76,11 +76,21 @@ fn a_glb_is_parsed_once_however_many_nodes_and_frames_draw_it() {
     let mut sizes = Vec::new();
     for _frame in 0..5 {
         for id in &ids {
-            sizes.push(RenderServer3DAdapter::resolve_mesh(&tree, *id).vertices.len());
+            sizes.push(
+                RenderServer3DAdapter::resolve_mesh(&tree, *id)
+                    .vertices
+                    .len(),
+            );
         }
     }
-    assert!(sizes.iter().all(|n| *n > 24), "enemy.glb must resolve, got {sizes:?}");
-    assert!(sizes.windows(2).all(|w| w[0] == w[1]), "every call draws the same mesh");
+    assert!(
+        sizes.iter().all(|n| *n > 24),
+        "enemy.glb must resolve, got {sizes:?}"
+    );
+    assert!(
+        sizes.windows(2).all(|w| w[0] == w[1]),
+        "every call draws the same mesh"
+    );
     assert_eq!(
         gltf_import_count() - before,
         1,

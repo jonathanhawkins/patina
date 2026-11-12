@@ -163,7 +163,7 @@ impl fmt::Display for SemVer {
 
 impl PartialOrd for SemVer {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.precedence_cmp(other))
+        Some(self.cmp(other))
     }
 }
 

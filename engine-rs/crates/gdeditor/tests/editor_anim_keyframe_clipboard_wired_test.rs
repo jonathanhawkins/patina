@@ -87,7 +87,11 @@ fn copy_paste_keyframe_creates_key_at_new_time() {
     let mut state = EditorState::new(SceneTree::new());
     let mut anim = Animation::new("test", 5.0);
     let mut track = AnimationTrack::new("Node:position");
-    track.add_keyframe(KeyFrame::new(0.0, Variant::Float(1.0), TransitionType::Linear));
+    track.add_keyframe(KeyFrame::new(
+        0.0,
+        Variant::Float(1.0),
+        TransitionType::Linear,
+    ));
     anim.tracks.push(track);
     state.animations.insert("test".to_string(), anim);
 
@@ -100,7 +104,10 @@ fn copy_paste_keyframe_creates_key_at_new_time() {
         "/api/animation/keyframe/copy",
         r#"{"animation":"test","track_index":0,"keyframe_indices":[0]}"#,
     );
-    assert!(copy.contains("200 OK"), "copy should return 200, got:\n{copy}");
+    assert!(
+        copy.contains("200 OK"),
+        "copy should return 200, got:\n{copy}"
+    );
 
     // Paste with a +1.0s offset -> a duplicate key at t = 0.0 + 1.0 = 1.0.
     let paste = http_post(
@@ -108,12 +115,18 @@ fn copy_paste_keyframe_creates_key_at_new_time() {
         "/api/animation/keyframe/paste",
         r#"{"animation":"test","track_index":0,"time_offset":1.0}"#,
     );
-    assert!(paste.contains("200 OK"), "paste should return 200, got:\n{paste}");
+    assert!(
+        paste.contains("200 OK"),
+        "paste should return 200, got:\n{paste}"
+    );
 
     // Read the animation back: track 0 now has a key at t=1.0.
     {
         let s = handle.state().lock().unwrap();
-        let anim = s.animations.get("test").expect("animation should still exist");
+        let anim = s
+            .animations
+            .get("test")
+            .expect("animation should still exist");
         let times: Vec<f64> = anim.tracks[0].keyframes().iter().map(|k| k.time).collect();
         assert!(
             times.iter().any(|&t| (t - 1.0).abs() < 1e-9),

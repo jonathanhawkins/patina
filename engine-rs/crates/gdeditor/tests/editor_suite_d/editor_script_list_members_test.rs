@@ -18,7 +18,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -62,7 +66,10 @@ fn script_editor_populates_list_and_members() {
         "Sort alphabetically",
         r#"id="script-name-label""#,
     ] {
-        assert!(html.contains(needle), "script editor missing chrome `{needle}`");
+        assert!(
+            html.contains(needle),
+            "script editor missing chrome `{needle}`"
+        );
     }
 
     // Wiring: opening a script populates the list, members, and label.
@@ -72,7 +79,10 @@ fn script_editor_populates_list_and_members() {
         "function renderScriptMembers",
         "function renderScriptList",
     ] {
-        assert!(html.contains(fn_name), "script editor missing population wiring `{fn_name}`");
+        assert!(
+            html.contains(fn_name),
+            "script editor missing population wiring `{fn_name}`"
+        );
     }
     // renderScript (which loads a document) drives the chrome update.
     assert!(

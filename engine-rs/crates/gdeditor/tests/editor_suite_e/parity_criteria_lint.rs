@@ -100,8 +100,9 @@ fn parity_criteria_lint_no_ticked_unimplemented_view() {
         if !crit.checked {
             continue;
         }
-        let Some((_, views)) =
-            VIEW_DEPENDENT_CRITERIA.iter().find(|(id, _)| *id == crit.id.as_str())
+        let Some((_, views)) = VIEW_DEPENDENT_CRITERIA
+            .iter()
+            .find(|(id, _)| *id == crit.id.as_str())
         else {
             continue;
         };

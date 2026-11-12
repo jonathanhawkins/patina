@@ -2,7 +2,9 @@
 
 use gdcore::{set_path_roots, FileAccess, FileMode};
 use gdobject::class_db::{class_exists, clear_for_testing, is_parent_class, register_io_classes};
-use gdscript_interop::interpreter::{set_engine_editor_hint, set_engine_frames_per_second, Interpreter};
+use gdscript_interop::interpreter::{
+    set_engine_editor_hint, set_engine_frames_per_second, Interpreter,
+};
 use gdvariant::Variant;
 use std::path::PathBuf;
 

@@ -394,7 +394,8 @@ fn gate9_input_map() {
 #[test]
 fn gate10_integration_test_count() {
     let tests_dir = workspace_root().join("tests");
-    let count = walk_test_entries(&tests_dir).into_iter()
+    let count = walk_test_entries(&tests_dir)
+        .into_iter()
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
     assert!(
@@ -419,11 +420,10 @@ fn gate10_subsystem_test_coverage() {
     ];
 
     for sub in &required_subsystems {
-        let has = walk_test_entries(&tests_dir).into_iter()
-            .any(|e| {
-                let name = e.file_name().to_string_lossy().to_lowercase();
-                name.contains(sub) && name.ends_with("_test.rs")
-            });
+        let has = walk_test_entries(&tests_dir).into_iter().any(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            name.contains(sub) && name.ends_with("_test.rs")
+        });
         assert!(has, "must have tests covering subsystem: {sub}");
     }
 }
@@ -477,7 +477,8 @@ fn headless_milestone_report() {
         .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("Cargo.toml").exists())
         .count();
 
-    let test_file_count = walk_test_entries(&ws.join("tests")).into_iter()
+    let test_file_count = walk_test_entries(&ws.join("tests"))
+        .into_iter()
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
 
@@ -634,11 +635,15 @@ fn walk_test_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.file_name().map_or(false, |n| n != "support" && n != "fixtures") {
+                if p.file_name()
+                    .map_or(false, |n| n != "support" && n != "fixtures")
+                {
                     stack.push(p);
                 }
             } else {

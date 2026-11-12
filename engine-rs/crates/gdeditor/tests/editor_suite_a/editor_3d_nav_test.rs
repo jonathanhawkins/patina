@@ -30,7 +30,11 @@ fn build_scene() -> SceneTree {
     let crate_id = tree
         .add_child(root, Node::new("Crate", "MeshInstance3D"))
         .unwrap();
-    node3d::set_position(&mut tree, crate_id, gdcore::math::Vector3::new(1.0, 0.5, -2.0));
+    node3d::set_position(
+        &mut tree,
+        crate_id,
+        gdcore::math::Vector3::new(1.0, 0.5, -2.0),
+    );
     tree
 }
 
@@ -118,7 +122,10 @@ fn editor_3d_orbit_rotates_camera() {
 fn editor_3d_zoom_changes_distance() {
     let (handle, port) = start();
     let zin = http_post(port, "/api/viewport/3d/zoom", r#"{"delta":1.0}"#);
-    assert!(field(&zin, "distance") < 14.0, "zoom in should shrink distance: {zin}");
+    assert!(
+        field(&zin, "distance") < 14.0,
+        "zoom in should shrink distance: {zin}"
+    );
     let zout = http_post(port, "/api/viewport/3d/zoom", r#"{"delta":-3.0}"#);
     assert!(
         field(&zout, "distance") > field(&zin, "distance"),
@@ -180,7 +187,10 @@ fn editor_3d_nav_persists_across_requests() {
     );
     // And a read-only GET reflects the accumulated state.
     let s = http_get(port, "/api/viewport/3d/state");
-    assert!((field(&s, "yaw") - yaw_b).abs() < 1e-3, "GET state should match last orbit: {s}");
+    assert!(
+        (field(&s, "yaw") - yaw_b).abs() < 1e-3,
+        "GET state should match last orbit: {s}"
+    );
     handle.stop();
 }
 
@@ -216,8 +226,14 @@ fn editor_3d_move_gizmo_drags_node() {
         "/api/viewport/3d/gizmo/begin",
         &format!(r#"{{"x":{tx},"y":{ty}}}"#),
     );
-    assert!(begin.contains("\"dragging\":true"), "should grab a gizmo axis: {begin}");
-    assert!(begin.contains("\"axis\":\"x\""), "should grab the X axis: {begin}");
+    assert!(
+        begin.contains("\"dragging\":true"),
+        "should grab a gizmo axis: {begin}"
+    );
+    assert!(
+        begin.contains("\"axis\":\"x\""),
+        "should grab the X axis: {begin}"
+    );
 
     let (tx2, ty2) = vp.world_to_screen(gdcore::math::Vector3::new(len * 2.5, 0.0, 0.0));
     let upd = http_post(
@@ -227,7 +243,10 @@ fn editor_3d_move_gizmo_drags_node() {
     );
     assert!(field(&upd, "x") > 0.5, "node should move along +X: {upd}");
     // The move stays on the grabbed axis (Y/Z barely change).
-    assert!(field(&upd, "y").abs() < 0.5 && field(&upd, "z").abs() < 0.5, "move is axis-locked: {upd}");
+    assert!(
+        field(&upd, "y").abs() < 0.5 && field(&upd, "z").abs() < 0.5,
+        "move is axis-locked: {upd}"
+    );
     http_post(port, "/api/viewport/3d/gizmo/end", "");
     handle.stop();
 }
@@ -251,8 +270,12 @@ fn editor_3d_shift_click_multi_select() {
     gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let a = tree.add_child(root, Node::new("A", "MeshInstance3D")).unwrap();
-    let b = tree.add_child(root, Node::new("B", "MeshInstance3D")).unwrap();
+    let a = tree
+        .add_child(root, Node::new("A", "MeshInstance3D"))
+        .unwrap();
+    let b = tree
+        .add_child(root, Node::new("B", "MeshInstance3D"))
+        .unwrap();
     node3d::set_position(&mut tree, a, gdcore::math::Vector3::ZERO);
     node3d::set_position(&mut tree, b, gdcore::math::Vector3::new(4.0, 0.0, 0.0));
 
@@ -266,8 +289,16 @@ fn editor_3d_shift_click_multi_select() {
     let (bx, by) = vp.world_to_screen(gdcore::math::Vector3::new(4.0, 0.0, 0.0));
 
     // Plain click selects A only.
-    let r1 = http_post(port, "/api/viewport/3d/select", &format!(r#"{{"x":{ax},"y":{ay}}}"#));
-    assert_eq!(id_array(&r1), vec![a.raw()], "plain click selects only A: {r1}");
+    let r1 = http_post(
+        port,
+        "/api/viewport/3d/select",
+        &format!(r#"{{"x":{ax},"y":{ay}}}"#),
+    );
+    assert_eq!(
+        id_array(&r1),
+        vec![a.raw()],
+        "plain click selects only A: {r1}"
+    );
     // Shift-add B → both selected.
     let r2 = http_post(
         port,
@@ -285,7 +316,11 @@ fn editor_3d_shift_click_multi_select() {
         "/api/viewport/3d/select",
         &format!(r#"{{"x":{bx},"y":{by},"add":true}}"#),
     );
-    assert_eq!(id_array(&r3), vec![a.raw()], "toggling B off leaves only A: {r3}");
+    assert_eq!(
+        id_array(&r3),
+        vec![a.raw()],
+        "toggling B off leaves only A: {r3}"
+    );
     handle.stop();
 }
 
@@ -312,10 +347,19 @@ fn editor_3d_frame_focuses_selection() {
         "/api/viewport/3d/select",
         &format!(r#"{{"x":{sx},"y":{sy}}}"#),
     );
-    assert!(sel.contains(&format!("\"selected\":{}", n.raw())), "select the node: {sel}");
+    assert!(
+        sel.contains(&format!("\"selected\":{}", n.raw())),
+        "select the node: {sel}"
+    );
     let f = http_post(port, "/api/viewport/3d/frame", "");
-    assert!((field(&f, "focus_x") - 4.0).abs() < 0.1, "focus moves to the node: {f}");
-    assert!((field(&f, "distance") - 5.0).abs() < 0.1, "distance set to a fit: {f}");
+    assert!(
+        (field(&f, "focus_x") - 4.0).abs() < 0.1,
+        "focus moves to the node: {f}"
+    );
+    assert!(
+        (field(&f, "distance") - 5.0).abs() < 0.1,
+        "distance set to a fit: {f}"
+    );
     handle.stop();
 }
 
@@ -325,12 +369,20 @@ fn editor_3d_view_presets_snap_camera() {
     let (handle, port) = start();
     let top = http_post(port, "/api/viewport/3d/view_preset", r#"{"preset":"top"}"#);
     assert!(field(&top, "pitch") < -1.0, "top view looks down: {top}");
-    let front = http_post(port, "/api/viewport/3d/view_preset", r#"{"preset":"front"}"#);
+    let front = http_post(
+        port,
+        "/api/viewport/3d/view_preset",
+        r#"{"preset":"front"}"#,
+    );
     assert!(
         field(&front, "yaw").abs() < 1e-3 && field(&front, "pitch").abs() < 1e-3,
         "front view is axis-aligned: {front}"
     );
-    let right = http_post(port, "/api/viewport/3d/view_preset", r#"{"preset":"right"}"#);
+    let right = http_post(
+        port,
+        "/api/viewport/3d/view_preset",
+        r#"{"preset":"right"}"#,
+    );
     assert!(
         (field(&right, "yaw") - std::f64::consts::FRAC_PI_2).abs() < 1e-3,
         "right view yaw is 90°: {right}"
@@ -341,7 +393,14 @@ fn editor_3d_view_presets_snap_camera() {
 /// Sets up a server with a single MeshInstance3D at the origin, selected, in the
 /// given gizmo mode. Returns (handle, port, node-raw-id) and a viewport matching
 /// the server's default camera for projecting gizmo handle positions.
-fn start_gizmo(mode: &str) -> (EditorServerHandle, u16, u64, gdeditor::viewport_3d::Viewport3D) {
+fn start_gizmo(
+    mode: &str,
+) -> (
+    EditorServerHandle,
+    u16,
+    u64,
+    gdeditor::viewport_3d::Viewport3D,
+) {
     gdobject::class_db::register_3d_classes();
     gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
@@ -360,7 +419,12 @@ fn start_gizmo(mode: &str) -> (EditorServerHandle, u16, u64, gdeditor::viewport_
         "/api/viewport/3d/gizmo_mode",
         &format!(r#"{{"mode":"{mode}"}}"#),
     );
-    (handle, port, n.raw(), gdeditor::editor_server::default_editor_viewport_3d())
+    (
+        handle,
+        port,
+        n.raw(),
+        gdeditor::editor_server::default_editor_viewport_3d(),
+    )
 }
 
 /// Moving a nested node's gizmo applies the parent transform exactly once: the
@@ -387,8 +451,15 @@ fn editor_3d_gizmo_move_respects_parent_transform() {
     let vp = gdeditor::editor_server::default_editor_viewport_3d();
     let cw = gdcore::math::Vector3::new(5.0, 2.0, 0.0);
     let (sx, sy) = vp.world_to_screen(cw);
-    let sel = http_post(port, "/api/viewport/3d/select", &format!(r#"{{"x":{sx},"y":{sy}}}"#));
-    assert!(sel.contains(&format!("\"selected\":{}", child.raw())), "select child: {sel}");
+    let sel = http_post(
+        port,
+        "/api/viewport/3d/select",
+        &format!(r#"{{"x":{sx},"y":{sy}}}"#),
+    );
+    assert!(
+        sel.contains(&format!("\"selected\":{}", child.raw())),
+        "select child: {sel}"
+    );
     http_post(port, "/api/viewport/3d/gizmo_mode", r#"{"mode":"move"}"#);
 
     let len = gdeditor::viewport_3d_render::gizmo_arrow_length(&vp);
@@ -434,7 +505,10 @@ fn editor_3d_gizmo_snap_rounds_translation() {
         "/api/viewport/3d/gizmo/begin",
         &format!(r#"{{"x":{tx},"y":{ty},"snap":true}}"#),
     );
-    assert!(begin.contains("\"dragging\":true"), "should grab the X axis: {begin}");
+    assert!(
+        begin.contains("\"dragging\":true"),
+        "should grab the X axis: {begin}"
+    );
     let (tx2, ty2) = vp.world_to_screen(gdcore::math::Vector3::new(len + 2.7, 0.0, 0.0));
     let upd = http_post(
         port,
@@ -442,7 +516,10 @@ fn editor_3d_gizmo_snap_rounds_translation() {
         &format!(r#"{{"x":{tx2},"y":{ty2}}}"#),
     );
     let x = field(&upd, "x");
-    assert!((x - x.round()).abs() < 1e-3, "snapped X should be a whole unit, got {x}: {upd}");
+    assert!(
+        (x - x.round()).abs() < 1e-3,
+        "snapped X should be a whole unit, got {x}: {upd}"
+    );
     assert!(x >= 1.0, "should have moved at least one unit: {upd}");
     http_post(port, "/api/viewport/3d/gizmo/end", "");
     handle.stop();
@@ -461,16 +538,28 @@ fn editor_3d_move_gizmo_plane_drag() {
         "/api/viewport/3d/gizmo/begin",
         &format!(r#"{{"x":{px},"y":{py}}}"#),
     );
-    assert!(begin.contains("\"dragging\":true"), "should grab a plane handle: {begin}");
-    assert!(begin.contains("\"axis\":\"xy\""), "should grab the XY plane: {begin}");
+    assert!(
+        begin.contains("\"dragging\":true"),
+        "should grab a plane handle: {begin}"
+    );
+    assert!(
+        begin.contains("\"axis\":\"xy\""),
+        "should grab the XY plane: {begin}"
+    );
     let (px2, py2) = vp.world_to_screen(gdcore::math::Vector3::new(pf + 2.0, pf, 0.0));
     let upd = http_post(
         port,
         "/api/viewport/3d/gizmo/update",
         &format!(r#"{{"x":{px2},"y":{py2}}}"#),
     );
-    assert!(field(&upd, "x") > 1.0, "node should move in X within the plane: {upd}");
-    assert!(field(&upd, "z").abs() < 0.5, "plane drag keeps Z fixed: {upd}");
+    assert!(
+        field(&upd, "x") > 1.0,
+        "node should move in X within the plane: {upd}"
+    );
+    assert!(
+        field(&upd, "z").abs() < 0.5,
+        "plane drag keeps Z fixed: {upd}"
+    );
     http_post(port, "/api/viewport/3d/gizmo/end", "");
     handle.stop();
 }
@@ -489,10 +578,20 @@ fn editor_3d_rotate_gizmo_rotates_node() {
         "/api/viewport/3d/gizmo/begin",
         &format!(r#"{{"x":{px},"y":{py}}}"#),
     );
-    assert!(begin.contains("\"dragging\":true"), "should grab a rotate ring: {begin}");
+    assert!(
+        begin.contains("\"dragging\":true"),
+        "should grab a rotate ring: {begin}"
+    );
     // Drag to a different screen angle around the center → non-zero rotation.
-    let upd = http_post(port, "/api/viewport/3d/gizmo/update", r#"{"x":320,"y":120}"#);
-    assert!(upd.contains("\"angle\""), "rotate update should apply an angle: {upd}");
+    let upd = http_post(
+        port,
+        "/api/viewport/3d/gizmo/update",
+        r#"{"x":320,"y":120}"#,
+    );
+    assert!(
+        upd.contains("\"angle\""),
+        "rotate update should apply an angle: {upd}"
+    );
     http_post(port, "/api/viewport/3d/gizmo/end", "");
     handle.stop();
 }
@@ -509,7 +608,10 @@ fn editor_3d_scale_gizmo_scales_node() {
         "/api/viewport/3d/gizmo/begin",
         &format!(r#"{{"x":{px},"y":{py}}}"#),
     );
-    assert!(begin.contains("\"dragging\":true"), "should grab a scale handle: {begin}");
+    assert!(
+        begin.contains("\"dragging\":true"),
+        "should grab a scale handle: {begin}"
+    );
     // Drag further out along the X handle → factor > 1.
     let (px2, py2) = vp.world_to_screen(gdcore::math::Vector3::new(len * 2.0, 0.0, 0.0));
     let upd = http_post(
@@ -517,7 +619,10 @@ fn editor_3d_scale_gizmo_scales_node() {
         "/api/viewport/3d/gizmo/update",
         &format!(r#"{{"x":{px2},"y":{py2}}}"#),
     );
-    assert!(field(&upd, "factor") > 1.0, "scale update should grow the factor: {upd}");
+    assert!(
+        field(&upd, "factor") > 1.0,
+        "scale update should grow the factor: {upd}"
+    );
     http_post(port, "/api/viewport/3d/gizmo/end", "");
     handle.stop();
 }
@@ -582,7 +687,10 @@ fn editor_3d_state_has_orthonormal_view_basis() {
     for key in ["bx", "by", "bz"] {
         let v = vec3_field(&s, key);
         let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        assert!((len - 1.0).abs() < 1e-3, "{key} not unit length ({len}): {s}");
+        assert!(
+            (len - 1.0).abs() < 1e-3,
+            "{key} not unit length ({len}): {s}"
+        );
     }
     handle.stop();
 }
@@ -594,9 +702,15 @@ fn editor_3d_reset_restores_default() {
     http_post(port, "/api/viewport/3d/orbit", r#"{"dx":200,"dy":80}"#);
     http_post(port, "/api/viewport/3d/zoom", r#"{"delta":2.0}"#);
     let r = http_post(port, "/api/viewport/3d/reset", "");
-    assert!((field(&r, "distance") - 14.0).abs() < 1e-3, "reset distance: {r}");
+    assert!(
+        (field(&r, "distance") - 14.0).abs() < 1e-3,
+        "reset distance: {r}"
+    );
     assert!((field(&r, "yaw") - 0.6).abs() < 1e-3, "reset yaw: {r}");
-    assert!((field(&r, "pitch") - (-0.5)).abs() < 1e-3, "reset pitch: {r}");
+    assert!(
+        (field(&r, "pitch") - (-0.5)).abs() < 1e-3,
+        "reset pitch: {r}"
+    );
     handle.stop();
 }
 
@@ -640,7 +754,8 @@ fn editor_scene_recommends_matching_main_view() {
     let mut tn = SceneTree::new();
     let rn = tn.root_id();
     let level = tn.add_child(rn, Node::new("Level", "Node")).unwrap();
-    tn.add_child(level, Node::new("Box", "MeshInstance3D")).unwrap();
+    tn.add_child(level, Node::new("Box", "MeshInstance3D"))
+        .unwrap();
     let pn = free_port();
     let hn = EditorServerHandle::start(pn, EditorState::new(tn));
     thread::sleep(Duration::from_millis(100));
@@ -673,7 +788,10 @@ fn editor_3d_freelook_speed_controls() {
     // Wheel up (factor > 1) speeds up free-look; wheel down (factor < 1) slows it.
     let base = field(&http_get(port, "/api/viewport/3d/state"), "fly_speed");
     let faster = http_post(port, "/api/viewport/3d/fly/speed", r#"{"factor":1.08}"#);
-    assert!(field(&faster, "fly_speed") > base, "wheel-up should speed up freelook: {faster}");
+    assert!(
+        field(&faster, "fly_speed") > base,
+        "wheel-up should speed up freelook: {faster}"
+    );
     let slower = http_post(port, "/api/viewport/3d/fly/speed", r#"{"factor":0.5}"#);
     assert!(
         field(&slower, "fly_speed") < field(&faster, "fly_speed"),
@@ -682,10 +800,18 @@ fn editor_3d_freelook_speed_controls() {
 
     // At a fixed speed, a Shift-boosted move (×3) travels much farther than ×1.
     let p0 = http_get(port, "/api/viewport/3d/state");
-    let plain = http_post(port, "/api/viewport/3d/fly/move", r#"{"x":0,"y":0,"z":1,"speed":1.0}"#);
+    let plain = http_post(
+        port,
+        "/api/viewport/3d/fly/move",
+        r#"{"x":0,"y":0,"z":1,"speed":1.0}"#,
+    );
     let d_plain = moved(&p0, &plain);
     let p1 = http_get(port, "/api/viewport/3d/state");
-    let boosted = http_post(port, "/api/viewport/3d/fly/move", r#"{"x":0,"y":0,"z":1,"speed":3.0}"#);
+    let boosted = http_post(
+        port,
+        "/api/viewport/3d/fly/move",
+        r#"{"x":0,"y":0,"z":1,"speed":3.0}"#,
+    );
     let d_boost = moved(&p1, &boosted);
     assert!(
         d_boost > d_plain * 2.0,

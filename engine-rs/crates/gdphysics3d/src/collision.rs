@@ -658,16 +658,16 @@ fn sphere_convex(
     const EPS: f32 = 1e-4;
 
     // Centre inside: push out through the face it is closest to.
-    let (max_s, max_n) = planes
-        .iter()
-        .map(|(n, d)| (n.dot(c) - d, *n))
-        .fold((f32::NEG_INFINITY, Vector3::ZERO), |acc, x| {
+    let (max_s, max_n) = planes.iter().map(|(n, d)| (n.dot(c) - d, *n)).fold(
+        (f32::NEG_INFINITY, Vector3::ZERO),
+        |acc, x| {
             if x.0 > acc.0 {
                 x
             } else {
                 acc
             }
-        });
+        },
+    );
     if max_s <= 0.0 {
         return Some(CollisionResult3D {
             colliding: true,
@@ -761,6 +761,7 @@ fn sphere_capsule(
 }
 
 /// Capsule vs capsule. Returns the normal pointing from A toward B.
+#[allow(clippy::too_many_arguments)]
 fn capsule_capsule(
     pos_a: Vector3,
     rot_a: Quaternion,
@@ -1747,11 +1748,19 @@ pub fn supporting_face(
                 p[v] = b * h[v];
                 pos + rot.xform(Vector3::new(p[0], p[1], p[2]))
             };
-            Some(vec![corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0), corner(1.0, -1.0)])
+            Some(vec![
+                corner(1.0, 1.0),
+                corner(-1.0, 1.0),
+                corner(-1.0, -1.0),
+                corner(1.0, -1.0),
+            ])
         }
         Shape3D::ConvexPolygonShape { points } if !points.is_empty() => {
             let dn = d.normalized();
-            let best = points.iter().map(|p| p.dot(dn)).fold(f32::NEG_INFINITY, f32::max);
+            let best = points
+                .iter()
+                .map(|p| p.dot(dn))
+                .fold(f32::NEG_INFINITY, f32::max);
             let mut on: Vec<Vector3> = Vec::new();
             for p in points.iter().copied().filter(|p| best - p.dot(dn) < 1e-3) {
                 if !on.iter().any(|q| (*q - p).length_squared() < 1e-10) {
@@ -1763,7 +1772,10 @@ pub fn supporting_face(
                 let [u, v] = basis_perpendicular(dn);
                 on.sort_by(|a, b| {
                     let (pa, pb) = (*a - centre, *b - centre);
-                    pa.dot(v).atan2(pa.dot(u)).partial_cmp(&pb.dot(v).atan2(pb.dot(u))).unwrap()
+                    pa.dot(v)
+                        .atan2(pa.dot(u))
+                        .partial_cmp(&pb.dot(v).atan2(pb.dot(u)))
+                        .unwrap()
                 });
             }
             Some(on.into_iter().map(|p| pos + rot.xform(p)).collect())
@@ -1795,7 +1807,11 @@ pub fn manifold_between_faces(
     // The clip polygon must be a real polygon; the other face (polygon or
     // edge) is clipped against it.
     let a_clips = face_a.len() >= 3;
-    let (clip, subject) = if a_clips { (face_a, face_b) } else { (face_b, face_a) };
+    let (clip, subject) = if a_clips {
+        (face_a, face_b)
+    } else {
+        (face_b, face_a)
+    };
     let [u, v] = basis_perpendicular(n);
     let flat = |p: Vector3| (p.dot(u), p.dot(v));
     let mut clip2: Vec<(f32, f32)> = clip.iter().map(|&p| flat(p)).collect();
@@ -1859,7 +1875,8 @@ pub fn manifold_between_faces(
         let q = p + n * t;
         let (on_a, on_b) = if a_clips { (q, p) } else { (p, q) };
         let depth = (on_a - on_b).dot(n);
-        if depth > -max_separation && !out.iter().any(|m| (m.on_b - on_b).length_squared() < 1e-10) {
+        if depth > -max_separation && !out.iter().any(|m| (m.on_b - on_b).length_squared() < 1e-10)
+        {
             out.push(ManifoldPoint3D { on_a, on_b, depth });
         }
     }
@@ -1883,8 +1900,10 @@ pub fn prune_contact_points(normal: Vector3, centre: Vector3, points: &mut Vec<M
             r - n * r.dot(n)
         })
         .collect();
-    let depth_sq: Vec<f32> =
-        points.iter().map(|p| (p.on_b - p.on_a).length_squared().max(MIN_SQ)).collect();
+    let depth_sq: Vec<f32> = points
+        .iter()
+        .map(|p| (p.on_b - p.on_a).length_squared().max(MIN_SQ))
+        .collect();
     let pick = |f: &dyn Fn(usize) -> f32, skip: Option<usize>| -> usize {
         let mut best = None;
         let mut val = f32::NEG_INFINITY;
@@ -1900,8 +1919,14 @@ pub fn prune_contact_points(normal: Vector3, centre: Vector3, points: &mut Vec<M
         }
         best.unwrap_or(0)
     };
-    let p1 = pick(&|i| projected[i].length_squared().max(MIN_SQ) * depth_sq[i], None);
-    let p2 = pick(&|i| (projected[i] - projected[p1]).length_squared().max(MIN_SQ) * depth_sq[i], Some(p1));
+    let p1 = pick(
+        &|i| projected[i].length_squared().max(MIN_SQ) * depth_sq[i],
+        None,
+    );
+    let p2 = pick(
+        &|i| (projected[i] - projected[p1]).length_squared().max(MIN_SQ) * depth_sq[i],
+        Some(p1),
+    );
     let perp = (projected[p2] - projected[p1]).cross(n);
     let (mut p3, mut p4) = (None, None);
     let (mut lo, mut hi) = (0.0f32, 0.0f32);
@@ -1918,8 +1943,11 @@ pub fn prune_contact_points(normal: Vector3, centre: Vector3, points: &mut Vec<M
             p4 = Some(i);
         }
     }
-    let keep: Vec<ManifoldPoint3D> =
-        [Some(p1), p3, Some(p2), p4].into_iter().flatten().map(|i| points[i]).collect();
+    let keep: Vec<ManifoldPoint3D> = [Some(p1), p3, Some(p2), p4]
+        .into_iter()
+        .flatten()
+        .map(|i| points[i])
+        .collect();
     *points = keep;
 }
 
@@ -1934,8 +1962,9 @@ fn merge_into_manifolds(
     if points.is_empty() {
         return;
     }
-    if let Some((_, m)) =
-        manifolds.iter_mut().find(|(first, _)| first.dot(normal) >= MANIFOLD_NORMAL_COS)
+    if let Some((_, m)) = manifolds
+        .iter_mut()
+        .find(|(first, _)| first.dot(normal) >= MANIFOLD_NORMAL_COS)
     {
         m.normal = m.normal + normal;
         m.points.extend(points);
@@ -1962,21 +1991,41 @@ pub fn contact_manifolds(
     max_separation: f32,
 ) -> Vec<ContactManifold3D> {
     let mut manifolds: Vec<(Vector3, ContactManifold3D)> = Vec::new();
-    let faced =
-        |s: &Shape3D| matches!(s, Shape3D::BoxShape { .. } | Shape3D::ConvexPolygonShape { .. });
+    let faced = |s: &Shape3D| {
+        matches!(
+            s,
+            Shape3D::BoxShape { .. } | Shape3D::ConvexPolygonShape { .. }
+        )
+    };
     match (
         concave_faces_for(shape_a, shape_b, pos_a, rot_a, pos_b, rot_b),
         concave_faces_for(shape_b, shape_a, pos_b, rot_b, pos_a, rot_a),
     ) {
         (Some((faces, backface)), None) if faced(shape_b) => {
             soup_manifolds(
-                faces.as_ref(), backface, pos_a, rot_a, pos_b, rot_b, shape_b, max_separation, false,
+                faces.as_ref(),
+                backface,
+                pos_a,
+                rot_a,
+                pos_b,
+                rot_b,
+                shape_b,
+                max_separation,
+                false,
                 &mut manifolds,
             );
         }
         (None, Some((faces, backface))) if faced(shape_a) => {
             soup_manifolds(
-                faces.as_ref(), backface, pos_b, rot_b, pos_a, rot_a, shape_a, max_separation, true,
+                faces.as_ref(),
+                backface,
+                pos_b,
+                rot_b,
+                pos_a,
+                rot_a,
+                shape_a,
+                max_separation,
+                true,
                 &mut manifolds,
             );
         }
@@ -1994,7 +2043,11 @@ pub fn contact_manifolds(
     }
     // Pruning measures lever arms from the convex shape's centre (Jolt: body
     // 1's centre of mass).
-    let centre = if faced(shape_a) && !faced(shape_b) { pos_a } else { pos_b };
+    let centre = if faced(shape_a) && !faced(shape_b) {
+        pos_a
+    } else {
+        pos_b
+    };
     manifolds
         .into_iter()
         .map(|(_, mut m)| {
@@ -2045,7 +2098,11 @@ fn soup_manifolds(
         if flip {
             let pts = pts
                 .into_iter()
-                .map(|p| ManifoldPoint3D { on_a: p.on_b, on_b: p.on_a, depth: p.depth })
+                .map(|p| ManifoldPoint3D {
+                    on_a: p.on_b,
+                    on_b: p.on_a,
+                    depth: p.depth,
+                })
                 .collect();
             merge_into_manifolds(out, n * -1.0, pts);
         } else {
@@ -2063,7 +2120,10 @@ mod tests {
         let r = test_sphere_sphere(Vector3::ZERO, 1.0, Vector3::ZERO, 0.5);
         assert!(r.colliding);
         assert!((r.depth - 1.5).abs() < 1e-6);
-        assert!(r.normal.length_squared() > 0.99, "normal must be finite and unit");
+        assert!(
+            r.normal.length_squared() > 0.99,
+            "normal must be finite and unit"
+        );
     }
 
     #[test]
@@ -2834,18 +2894,39 @@ mod tests {
             Vector3::new(10.0, 0.0, 10.0),
             Vector3::new(-10.0, 0.0, 10.0),
         );
-        Shape3D::ConcavePolygonShape { faces: vec![a, b, c, a, c, d], backface_collision: false }
+        Shape3D::ConcavePolygonShape {
+            faces: vec![a, b, c, a, c, d],
+            backface_collision: false,
+        }
     }
 
     fn unit_box() -> Shape3D {
-        Shape3D::BoxShape { half_extents: Vector3::new(0.5, 0.5, 0.5) }
+        Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        }
     }
 
     fn manifolds_on_floor(pos: Vector3, rot: Quaternion) -> Vec<ContactManifold3D> {
         let floor = manifold_floor();
-        let hit = test_collision_rot(Vector3::ZERO, Quaternion::IDENTITY, &floor, pos, rot, &unit_box());
+        let hit = test_collision_rot(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &floor,
+            pos,
+            rot,
+            &unit_box(),
+        );
         assert!(hit.colliding, "fixture must touch the floor");
-        contact_manifolds(Vector3::ZERO, Quaternion::IDENTITY, &floor, pos, rot, &unit_box(), &hit, 0.021)
+        contact_manifolds(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &floor,
+            pos,
+            rot,
+            &unit_box(),
+            &hit,
+            0.021,
+        )
     }
 
     /// A box resting flat across both floor triangles: ONE manifold (the two
@@ -2858,9 +2939,13 @@ mod tests {
         assert_eq!(m[0].points.len(), 4, "{:?}", m[0].points);
         for p in &m[0].points {
             assert!((p.depth - 0.01).abs() < 1e-4, "{p:?}");
-            let corner = ((p.on_b.x - 0.2).abs() - 0.5).abs() < 1e-4 && ((p.on_b.z + 0.3).abs() - 0.5).abs() < 1e-4;
+            let corner = ((p.on_b.x - 0.2).abs() - 0.5).abs() < 1e-4
+                && ((p.on_b.z + 0.3).abs() - 0.5).abs() < 1e-4;
             assert!(corner, "not a corner: {p:?}");
-            assert!(p.on_a.y.abs() < 1e-5 && (p.on_b.y + 0.01).abs() < 1e-4, "{p:?}");
+            assert!(
+                p.on_a.y.abs() < 1e-5 && (p.on_b.y + 0.01).abs() < 1e-4,
+                "{p:?}"
+            );
         }
     }
 
@@ -2868,16 +2953,23 @@ mod tests {
     /// ends, symmetric about the box, so the pair exerts no roll or yaw.
     #[test]
     fn a_box_on_its_edge_gets_two_contacts_at_the_edge_ends() {
-        let rot = Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), std::f32::consts::FRAC_PI_4);
+        let rot =
+            Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), std::f32::consts::FRAC_PI_4);
         let y = 0.5 * std::f32::consts::SQRT_2 - 0.01;
         let m = manifolds_on_floor(Vector3::new(1.0, y, 2.0), rot);
         assert_eq!(m.len(), 1, "{m:?}");
         let mut pts = m[0].points.clone();
         assert_eq!(pts.len(), 2, "{pts:?}");
         pts.sort_by(|a, b| a.on_b.z.total_cmp(&b.on_b.z));
-        assert!((pts[0].on_b.z - 1.5).abs() < 1e-4 && (pts[1].on_b.z - 2.5).abs() < 1e-4, "{pts:?}");
+        assert!(
+            (pts[0].on_b.z - 1.5).abs() < 1e-4 && (pts[1].on_b.z - 2.5).abs() < 1e-4,
+            "{pts:?}"
+        );
         for p in &pts {
-            assert!((p.on_b.x - 1.0).abs() < 1e-3 && (p.depth - 0.01).abs() < 1e-3, "{p:?}");
+            assert!(
+                (p.on_b.x - 1.0).abs() < 1e-3 && (p.depth - 0.01).abs() < 1e-3,
+                "{p:?}"
+            );
         }
     }
 
@@ -2886,7 +2978,11 @@ mod tests {
     #[test]
     fn manifold_points_keep_speculative_separation_only() {
         let floor = manifold_floor();
-        let hit = CollisionResult3D { colliding: true, normal: Vector3::new(0.0, 1.0, 0.0), depth: 0.0 };
+        let hit = CollisionResult3D {
+            colliding: true,
+            normal: Vector3::new(0.0, 1.0, 0.0),
+            depth: 0.0,
+        };
         for (gap, expect) in [(0.01f32, 4usize), (0.03, 0)] {
             let m = contact_manifolds(
                 Vector3::ZERO,
@@ -2910,16 +3006,42 @@ mod tests {
     /// slab's edge at x = 5 is clipped there, normal from the slab (A) up.
     #[test]
     fn box_on_box_manifold_is_the_face_overlap() {
-        let slab = Shape3D::BoxShape { half_extents: Vector3::new(5.0, 0.5, 5.0) };
+        let slab = Shape3D::BoxShape {
+            half_extents: Vector3::new(5.0, 0.5, 5.0),
+        };
         let (pa, pb) = (Vector3::new(0.0, -0.5, 0.0), Vector3::new(4.7, 0.48, 0.0));
-        let hit = test_collision_rot(pa, Quaternion::IDENTITY, &slab, pb, Quaternion::IDENTITY, &unit_box());
+        let hit = test_collision_rot(
+            pa,
+            Quaternion::IDENTITY,
+            &slab,
+            pb,
+            Quaternion::IDENTITY,
+            &unit_box(),
+        );
         assert!(hit.colliding);
-        let m = contact_manifolds(pa, Quaternion::IDENTITY, &slab, pb, Quaternion::IDENTITY, &unit_box(), &hit, 0.021);
+        let m = contact_manifolds(
+            pa,
+            Quaternion::IDENTITY,
+            &slab,
+            pb,
+            Quaternion::IDENTITY,
+            &unit_box(),
+            &hit,
+            0.021,
+        );
         assert_eq!(m.len(), 1);
-        assert!(m[0].normal.y > 0.999, "normal from the slab up into the box: {:?}", m[0].normal);
+        assert!(
+            m[0].normal.y > 0.999,
+            "normal from the slab up into the box: {:?}",
+            m[0].normal
+        );
         assert_eq!(m[0].points.len(), 4, "{:?}", m[0].points);
         let xs: Vec<f32> = m[0].points.iter().map(|p| p.on_b.x).collect();
-        assert!(xs.iter().all(|&x| (x - 4.2).abs() < 1e-4 || (x - 5.0).abs() < 1e-4), "{xs:?}");
+        assert!(
+            xs.iter()
+                .all(|&x| (x - 4.2).abs() < 1e-4 || (x - 5.0).abs() < 1e-4),
+            "{xs:?}"
+        );
     }
 
     /// Jolt's pruning keeps four points that span the contact: of a 3 x 3
@@ -2930,13 +3052,20 @@ mod tests {
         for i in -1..=1 {
             for j in -1..=1 {
                 let p = Vector3::new(i as f32, 0.0, j as f32);
-                pts.push(ManifoldPoint3D { on_a: p, on_b: p - Vector3::new(0.0, 0.01, 0.0), depth: 0.01 });
+                pts.push(ManifoldPoint3D {
+                    on_a: p,
+                    on_b: p - Vector3::new(0.0, 0.01, 0.0),
+                    depth: 0.01,
+                });
             }
         }
         prune_contact_points(Vector3::new(0.0, 1.0, 0.0), Vector3::ZERO, &mut pts);
         assert_eq!(pts.len(), 4);
         for p in &pts {
-            assert!(p.on_a.x.abs() == 1.0 && p.on_a.z.abs() == 1.0, "kept a non-corner {p:?}");
+            assert!(
+                p.on_a.x.abs() == 1.0 && p.on_a.z.abs() == 1.0,
+                "kept a non-corner {p:?}"
+            );
         }
     }
 }

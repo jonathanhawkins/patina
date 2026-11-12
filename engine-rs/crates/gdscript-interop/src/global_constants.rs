@@ -1176,7 +1176,7 @@ pub fn global_enum_member(enum_name: &str, member: &str) -> Option<Variant> {
     // a `&&'static str`, and `member` borrows the caller's expression, so the
     // lifetimes do not unify. The longest set is `Key` at 193 entries and most
     // comparisons fail on the first byte, so the difference is not measurable.
-    if !global_enum_members(enum_name)?.iter().any(|m| *m == member) {
+    if !global_enum_members(enum_name)?.contains(&member) {
         return None;
     }
     global_constant(member)

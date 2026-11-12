@@ -1256,6 +1256,7 @@ impl AudioEffect for AudioEffectPitchShift {
                 let fm = frames as f64;
                 let i0 = (((base % fm) + fm) % fm) as usize;
                 let i1 = (i0 + 1) % frames;
+                #[allow(clippy::needless_range_loop)] // `c` indexes both the ring and `acc`
                 for c in 0..ch.min(8) {
                     let a = self.ring[i0 * ch + c];
                     let b = self.ring[i1 * ch + c];

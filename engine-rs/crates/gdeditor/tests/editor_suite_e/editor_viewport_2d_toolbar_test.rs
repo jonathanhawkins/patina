@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,28 +53,46 @@ fn viewport_2d_toolbar_full_parity() {
     for needle in [
         "id=\"vp2d-toolbar\"",
         // list-select + edit-pivot
-        "id=\"vp2d-list-select\"", "Show list of selectable nodes at position clicked.",
-        "id=\"vp2d-pivot\"", "rotation pivot",
+        "id=\"vp2d-list-select\"",
+        "Show list of selectable nodes at position clicked.",
+        "id=\"vp2d-pivot\"",
+        "rotation pivot",
         // pan + ruler
-        "id=\"vp2d-pan\"", "Pan Mode (G)",
-        "id=\"vp2d-ruler\"", "Ruler Mode (M)",
+        "id=\"vp2d-pan\"",
+        "Pan Mode (G)",
+        "id=\"vp2d-ruler\"",
+        "Ruler Mode (M)",
         // local space
-        "id=\"vp2d-local-space\"", "Use Local Space (T)",
+        "id=\"vp2d-local-space\"",
+        "Use Local Space (T)",
         // smart/grid snap + snapping options menu
-        "id=\"vp2d-smart-snap\"", "smart snapping",
-        "id=\"vp2d-grid-snap\"", "grid snapping",
-        "id=\"vp2d-snap-config\"", "Snapping Options",
+        "id=\"vp2d-smart-snap\"",
+        "smart snapping",
+        "id=\"vp2d-grid-snap\"",
+        "grid snapping",
+        "id=\"vp2d-snap-config\"",
+        "Snapping Options",
         // lock/unlock + group/ungroup
-        "id=\"vp2d-lock\"", "id=\"vp2d-unlock\"",
-        "id=\"vp2d-group\"", "id=\"vp2d-ungroup\"",
+        "id=\"vp2d-lock\"",
+        "id=\"vp2d-unlock\"",
+        "id=\"vp2d-group\"",
+        "id=\"vp2d-ungroup\"",
         // skeleton + view menus
-        "id=\"vp2d-skeleton\"", "Skeleton Options",
+        "id=\"vp2d-skeleton\"",
+        "Skeleton Options",
         "id=\"vp2d-view\"",
         // zoom widget
-        "id=\"vp2d-zoom\"", "id=\"vp2d-zoom-out\"", "id=\"vp2d-zoom-in\"", "id=\"vp2d-zoom-reset\"",
+        "id=\"vp2d-zoom\"",
+        "id=\"vp2d-zoom-out\"",
+        "id=\"vp2d-zoom-in\"",
+        "id=\"vp2d-zoom-reset\"",
         // representative menu items (ship as JS literals)
-        "Use Rotation Snap", "Snap to Guides", "Configure Snap...",
-        "Show Bones", "Center Selection", "Frame Selection",
+        "Use Rotation Snap",
+        "Snap to Guides",
+        "Configure Snap...",
+        "Show Bones",
+        "Center Selection",
+        "Frame Selection",
     ] {
         assert!(
             html.contains(needle),

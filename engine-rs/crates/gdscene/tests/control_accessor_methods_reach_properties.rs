@@ -60,9 +60,9 @@ fn panel_is_painted(items: &[ControlDrawItem]) -> bool {
         }
         // Godot's default Panel box is translucent and rounded, which is one
         // polygon (pat-9ww3e).
-        ControlDrawItem::Polygon { points, .. } => points.iter().all(|p| {
-            p.x >= x0 - 1.0 && p.y >= y0 - 1.0 && p.x <= x1 + 1.0 && p.y <= y1 + 1.0
-        }),
+        ControlDrawItem::Polygon { points, .. } => points
+            .iter()
+            .all(|p| p.x >= x0 - 1.0 && p.y >= y0 - 1.0 && p.x <= x1 + 1.0 && p.y <= y1 + 1.0),
         _ => false,
     })
 }

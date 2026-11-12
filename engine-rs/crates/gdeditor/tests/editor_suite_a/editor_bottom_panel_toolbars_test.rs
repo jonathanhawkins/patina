@@ -18,7 +18,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,13 +53,13 @@ fn output_panel_renders_toolbar() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"output-clear\"",   // Clear (editor_log.cpp clear_button)
+        "id=\"output-clear\"", // Clear (editor_log.cpp clear_button)
         "Clear Output",
-        "id=\"output-copy\"",    // Copy (copy_button)
+        "id=\"output-copy\"", // Copy (copy_button)
         "Copy Selection",
         "id=\"output-collapse\"", // Collapse-duplicates toggle (collapse_button)
         "Collapse duplicate messages",
-        "id=\"output-search\"",  // Filter Messages box (search_box)
+        "id=\"output-search\"", // Filter Messages box (search_box)
         "Filter Messages",
         // Standard / Errors / Warnings / Editor message-type toggles.
         "id=\"output-filter-std\"",
@@ -78,18 +82,18 @@ fn debugger_panel_renders_full_toolbar() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"debug-btn-skip-bp\"",        // Skip Breakpoints (skip_breakpoints)
+        "id=\"debug-btn-skip-bp\"", // Skip Breakpoints (skip_breakpoints)
         "Skip Breakpoints",
-        "id=\"debug-btn-ignore-errors\"",  // Ignore Error Breaks (ignore_error_breaks)
+        "id=\"debug-btn-ignore-errors\"", // Ignore Error Breaks (ignore_error_breaks)
         "Ignore Error Breaks",
-        "id=\"debug-btn-copy-error\"",     // Copy Error (copy)
+        "id=\"debug-btn-copy-error\"", // Copy Error (copy)
         "Copy Error",
-        "id=\"debug-btn-step-in\"",        // Step Into (step)
-        "id=\"debug-btn-step-over\"",      // Step Over (next)
-        "id=\"debug-btn-step-out\"",       // Step Out (out)
-        "id=\"debug-btn-break\"",          // Break (dobreak)
+        "id=\"debug-btn-step-in\"",   // Step Into (step)
+        "id=\"debug-btn-step-over\"", // Step Over (next)
+        "id=\"debug-btn-step-out\"",  // Step Out (out)
+        "id=\"debug-btn-break\"",     // Break (dobreak)
         "title=\"Break\"",
-        "id=\"debug-btn-continue\"",       // Continue (docontinue)
+        "id=\"debug-btn-continue\"", // Continue (docontinue)
     ] {
         assert!(
             html.contains(needle),

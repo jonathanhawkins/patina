@@ -434,7 +434,7 @@ impl InspectorPanel {
             Some(class) => self
                 .class_favorites
                 .get(&class)
-                .map_or(false, |s| s.contains(property)),
+                .is_some_and(|s| s.contains(property)),
             None => false,
         }
     }

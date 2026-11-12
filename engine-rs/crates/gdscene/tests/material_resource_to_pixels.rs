@@ -87,7 +87,11 @@ fn material_resource_to_pixels() {
         "emission_enabled = true\nemission = Color(1, 0, 0, 1)",
     ));
 
-    assert_eq!(flat.len(), emissive.len(), "same viewport, same pixel count");
+    assert_eq!(
+        flat.len(),
+        emissive.len(),
+        "same viewport, same pixel count"
+    );
 
     let differing = flat
         .iter()

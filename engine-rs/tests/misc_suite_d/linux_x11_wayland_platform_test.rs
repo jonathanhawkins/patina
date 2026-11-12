@@ -8,7 +8,6 @@ use gdplatform::linux::{
 };
 use gdplatform::window::WindowConfig;
 
-
 // The Windows/Linux "platform layer" ClassDB tests were removed 2026-11-03:
 // they asserted Patina-invented classes (`WindowsPlatformLayer`,
 // `LinuxPlatformLayer`) that Godot does not have. The backends below are

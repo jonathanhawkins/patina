@@ -239,6 +239,10 @@ fn oracle_scene_count() -> usize {
     std::fs::read_dir(repo_root().join("fixtures/oracle_outputs"))
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with("_properties.json"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with("_properties.json")
+        })
         .count()
 }

@@ -1,4 +1,3 @@
-
 //! pat-mgixk.31: `set_X`/`get_X`/`is_X` calls on 3D nodes reach their
 //! properties, including the INDEXED `Light3D.set_param`/`get_param`.
 //!

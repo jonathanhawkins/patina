@@ -25,7 +25,11 @@ fn hp_of(tree: &SceneTree, id: gdscene::NodeId) -> i64 {
     }
 }
 
-fn add_scripted_enemy(tree: &mut SceneTree, parent: gdscene::NodeId, name: &str) -> gdscene::NodeId {
+fn add_scripted_enemy(
+    tree: &mut SceneTree,
+    parent: gdscene::NodeId,
+    name: &str,
+) -> gdscene::NodeId {
     let id = tree.add_child(parent, Node::new(name, "Node2D")).unwrap();
     let script = GDScriptNodeInstance::from_source(ENEMY_SCRIPT, id).unwrap();
     tree.attach_script(id, Box::new(script));
@@ -58,15 +62,28 @@ fn scene_tree_group_broadcast() {
     assert_eq!(hp_of(&tree, e2), 90, "Enemy2 took 10 damage");
 
     // --- call_group_flags DEFERRED: queued, applied only at the flush ---
-    tree.call_group_flags(GROUP_CALL_DEFERRED, "enemies", "take_damage", &[Variant::Int(5)]);
+    tree.call_group_flags(
+        GROUP_CALL_DEFERRED,
+        "enemies",
+        "take_damage",
+        &[Variant::Int(5)],
+    );
     assert_eq!(
         tree.pending_deferred_count(),
         2,
         "one deferred call queued per member"
     );
-    assert_eq!(hp_of(&tree, e1), 90, "deferred call must not apply before the flush");
+    assert_eq!(
+        hp_of(&tree, e1),
+        90,
+        "deferred call must not apply before the flush"
+    );
 
     tree.process_deferred_calls();
-    assert_eq!(hp_of(&tree, e1), 85, "deferred take_damage(5) applied after flush");
+    assert_eq!(
+        hp_of(&tree, e1),
+        85,
+        "deferred take_damage(5) applied after flush"
+    );
     assert_eq!(hp_of(&tree, e2), 85);
 }

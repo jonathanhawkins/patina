@@ -39,7 +39,10 @@ fn viewport_gizmo_scale() {
     );
     let (sx, sy) = scale_factors(x.current_transform());
     assert!((sx - 2.0).abs() < 1e-5, "X handle scales X by 2x, got {sx}");
-    assert!((sy - 1.0).abs() < 1e-5, "X handle leaves Y unscaled, got {sy}");
+    assert!(
+        (sy - 1.0).abs() < 1e-5,
+        "X handle leaves Y unscaled, got {sy}"
+    );
 
     // Y-axis handle: scales Y only.
     let y = scale_drag(
@@ -48,8 +51,14 @@ fn viewport_gizmo_scale() {
         Vector2::new(100.0, 250.0),
     );
     let (sx, sy) = scale_factors(y.current_transform());
-    assert!((sx - 1.0).abs() < 1e-5, "Y handle leaves X unscaled, got {sx}");
-    assert!((sy - 1.5).abs() < 1e-5, "Y handle scales Y by 1.5x, got {sy}");
+    assert!(
+        (sx - 1.0).abs() < 1e-5,
+        "Y handle leaves X unscaled, got {sx}"
+    );
+    assert!(
+        (sy - 1.5).abs() < 1e-5,
+        "Y handle scales Y by 1.5x, got {sy}"
+    );
 
     // Uniform handle: dragging diagonally doubles the distance from the pivot,
     // scaling both axes proportionally.
@@ -59,8 +68,14 @@ fn viewport_gizmo_scale() {
         Vector2::new(300.0, 300.0),
     );
     let (ux, uy) = scale_factors(uniform.current_transform());
-    assert!((ux - 2.0).abs() < 1e-5, "uniform handle scales X by 2x, got {ux}");
-    assert!((uy - 2.0).abs() < 1e-5, "uniform handle scales Y by 2x, got {uy}");
+    assert!(
+        (ux - 2.0).abs() < 1e-5,
+        "uniform handle scales X by 2x, got {ux}"
+    );
+    assert!(
+        (uy - 2.0).abs() < 1e-5,
+        "uniform handle scales Y by 2x, got {uy}"
+    );
     assert!(
         (ux - uy).abs() < 1e-6,
         "the uniform handle scales both axes equally"

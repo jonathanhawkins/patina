@@ -96,7 +96,11 @@ fn skinning_deforms_rendered_mesh_per_bone_pose() {
     let skin = identity_skin();
 
     // Rest: both bones identity -> skinning is a no-op.
-    let rest_mesh = skin_mesh(&mesh, &skin, &[Transform3D::IDENTITY, Transform3D::IDENTITY]);
+    let rest_mesh = skin_mesh(
+        &mesh,
+        &skin,
+        &[Transform3D::IDENTITY, Transform3D::IDENTITY],
+    );
     // Posed: bone 1 slides +X, shearing the top of the quad to the right.
     let posed_mesh = skin_mesh(
         &mesh,
@@ -111,7 +115,10 @@ fn skinning_deforms_rendered_mesh_per_bone_pose() {
     );
 
     // Skinning at rest must equal the original geometry.
-    assert_eq!(rest_mesh.vertices, mesh.vertices, "rest skin changed geometry");
+    assert_eq!(
+        rest_mesh.vertices, mesh.vertices,
+        "rest skin changed geometry"
+    );
     // Posing must move the two top vertices and leave the bottom two.
     assert_eq!(posed_mesh.vertices[0], mesh.vertices[0]);
     assert_eq!(posed_mesh.vertices[1], mesh.vertices[1]);
@@ -177,7 +184,10 @@ fn four_influence_skinning_renders() {
     let poses = vec![Transform3D::IDENTITY; 4];
     let skinned = skin_mesh(&mesh, &skin, &poses);
     for (a, b) in mesh.vertices.iter().zip(skinned.vertices.iter()) {
-        assert!((*a - *b).length() < 1e-4, "identity 4-influence blend moved a vertex");
+        assert!(
+            (*a - *b).length() < 1e-4,
+            "identity 4-influence blend moved a vertex"
+        );
     }
 
     let fb = render_mesh(skinned);

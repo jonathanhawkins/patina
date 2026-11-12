@@ -328,7 +328,11 @@ impl ContactConstraint2D {
 
         let mut points = Vec::with_capacity(manifold.points.len());
         for (index, &world_point) in manifold.points.iter().enumerate() {
-            let depth = manifold.depths.get(index).copied().unwrap_or(manifold.depth);
+            let depth = manifold
+                .depths
+                .get(index)
+                .copied()
+                .unwrap_or(manifold.depth);
             let r_a = world_point - com_a;
             let r_b = world_point - com_b;
 
@@ -744,7 +748,12 @@ fn block_solve(
 ) -> bool {
     let n = c.normal;
     let (p0, p1) = (c.points[0], c.points[1]);
-    let (ra0, rb0, ra1, rb1) = (cross(p0.r_a, n), cross(p0.r_b, n), cross(p1.r_a, n), cross(p1.r_b, n));
+    let (ra0, rb0, ra1, rb1) = (
+        cross(p0.r_a, n),
+        cross(p0.r_b, n),
+        cross(p1.r_a, n),
+        cross(p1.r_b, n),
+    );
     let m = a.inv_mass + b.inv_mass;
     let k11 = m + a.inv_inertia * ra0 * ra0 + b.inv_inertia * rb0 * rb0;
     let k22 = m + a.inv_inertia * ra1 * ra1 + b.inv_inertia * rb1 * rb1;

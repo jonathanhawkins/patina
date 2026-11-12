@@ -43,10 +43,8 @@ use gdvariant::Variant;
 fn res_root() -> &'static PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "patina_mgixk21_native_base_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("patina_mgixk21_native_base_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp project dir is creatable");
         std::fs::write(
             dir.join("base.gd"),

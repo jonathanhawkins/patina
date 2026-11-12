@@ -255,7 +255,11 @@ impl SharedRing {
 /// The live platform device's queue, published for diagnostics: the device
 /// lives on the game thread, but the editor's API thread has to read it.
 #[cfg(not(target_arch = "wasm32"))]
-static LIVE_DEVICE: Mutex<Option<(Arc<Mutex<SharedRing>>, u32, u16)>> = Mutex::new(None);
+type LiveDevice = (Arc<Mutex<SharedRing>>, u32, u16);
+
+/// The live platform device's queue (ring, sample rate, channels).
+#[cfg(not(target_arch = "wasm32"))]
+static LIVE_DEVICE: Mutex<Option<LiveDevice>> = Mutex::new(None);
 
 /// Counters for the most recently opened platform device, if any.
 #[cfg(not(target_arch = "wasm32"))]

@@ -139,7 +139,8 @@ fn viewport_frame_stream() {
     let (head, body) = split_response(&resp);
     assert!(head.contains("200 OK"), "PNG GET failed: {head}");
     assert!(
-        head.to_ascii_lowercase().contains("content-type: image/png"),
+        head.to_ascii_lowercase()
+            .contains("content-type: image/png"),
         "missing image/png content-type: {head}"
     );
     assert!(
@@ -222,10 +223,7 @@ fn parse_json_body(resp: &[u8]) -> serde_json::Value {
 }
 
 /// Depth-first search for a node in a `node_to_json_tree` payload by name.
-fn find_node_by_name<'a>(
-    tree: &'a serde_json::Value,
-    name: &str,
-) -> Option<&'a serde_json::Value> {
+fn find_node_by_name<'a>(tree: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
     if tree.get("name").and_then(|v| v.as_str()) == Some(name) {
         return Some(tree);
     }
@@ -287,9 +285,7 @@ fn scene_tree_panel() {
 
     // Add a "Hero" Node3D under "Main" — the add endpoint must return the
     // created node's id so the client can follow up with a select/rename.
-    let add_body = format!(
-        r#"{{"parent_id":{main_id},"name":"Hero","class_name":"Node3D"}}"#
-    );
+    let add_body = format!(r#"{{"parent_id":{main_id},"name":"Hero","class_name":"Node3D"}}"#);
     let resp_add = http_post_raw(port, "/api/node/add", &add_body);
     let (head_add, _) = split_response(&resp_add);
     assert!(head_add.contains("200 OK"), "add failed: {head_add}");
@@ -303,8 +299,7 @@ fn scene_tree_panel() {
     // The next GET /api/scene must reflect the insertion.
     let after_add = parse_json_body(&http_get_raw(port, "/api/scene"));
     let root_after_add = after_add.get("nodes").unwrap();
-    let hero = find_node_by_name(root_after_add, "Hero")
-        .expect("Hero node missing after add");
+    let hero = find_node_by_name(root_after_add, "Hero").expect("Hero node missing after add");
     assert_eq!(
         hero.get("id").and_then(|v| v.as_u64()),
         Some(hero_id),
@@ -316,7 +311,10 @@ fn scene_tree_panel() {
     let rename_body = format!(r#"{{"node_id":{hero_id},"new_name":"Player"}}"#);
     let resp_rename = http_post_raw(port, "/api/node/rename", &rename_body);
     let (head_rename, _) = split_response(&resp_rename);
-    assert!(head_rename.contains("200 OK"), "rename failed: {head_rename}");
+    assert!(
+        head_rename.contains("200 OK"),
+        "rename failed: {head_rename}"
+    );
 
     let after_rename = parse_json_body(&http_get_raw(port, "/api/scene"));
     let root_after_rename = after_rename.get("nodes").unwrap();
@@ -324,8 +322,8 @@ fn scene_tree_panel() {
         find_node_by_name(root_after_rename, "Hero").is_none(),
         "old name 'Hero' must be gone after rename"
     );
-    let player = find_node_by_name(root_after_rename, "Player")
-        .expect("Player node missing after rename");
+    let player =
+        find_node_by_name(root_after_rename, "Player").expect("Player node missing after rename");
     assert_eq!(
         player.get("id").and_then(|v| v.as_u64()),
         Some(hero_id),
@@ -333,9 +331,7 @@ fn scene_tree_panel() {
     );
 
     // Reparent Player from under Main to directly under root.
-    let reparent_body = format!(
-        r#"{{"node_id":{hero_id},"new_parent_id":{root_id}}}"#
-    );
+    let reparent_body = format!(r#"{{"node_id":{hero_id},"new_parent_id":{root_id}}}"#);
     let resp_reparent = http_post_raw(port, "/api/node/reparent", &reparent_body);
     let (head_reparent, _) = split_response(&resp_reparent);
     assert!(
@@ -357,8 +353,7 @@ fn scene_tree_panel() {
         top_level_names.contains(&"Player"),
         "Player must be directly under root after reparent, got: {top_level_names:?}"
     );
-    let main_after = find_node_by_name(root_after_reparent, "Main")
-        .expect("Main still present");
+    let main_after = find_node_by_name(root_after_reparent, "Main").expect("Main still present");
     let main_kids: Vec<&str> = main_after
         .get("children")
         .and_then(|v| v.as_array())
@@ -379,7 +374,10 @@ fn scene_tree_panel() {
     let delete_body = format!(r#"{{"node_id":{hero_id}}}"#);
     let resp_delete = http_post_raw(port, "/api/node/delete", &delete_body);
     let (head_delete, _) = split_response(&resp_delete);
-    assert!(head_delete.contains("200 OK"), "delete failed: {head_delete}");
+    assert!(
+        head_delete.contains("200 OK"),
+        "delete failed: {head_delete}"
+    );
 
     let after_delete = parse_json_body(&http_get_raw(port, "/api/scene"));
     let root_after_delete = after_delete.get("nodes").unwrap();
@@ -447,15 +445,23 @@ fn inspector_round_trip() {
     // asked for an `/api/inspector` with Transform/Rendering/Physics/Script/
     // Misc buckets that Godot's inspector does not use; Godot groups by class
     // section and property group, which the client does from this list).
-    let sel = http_post_raw(port, "/api/node/select", &format!(r#"{{"node_id":{main_id}}}"#));
+    let sel = http_post_raw(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{main_id}}}"#),
+    );
     assert!(split_response(&sel).0.contains("200 OK"), "select failed");
     let fetch = || {
         let resp = http_get_raw(port, "/api/selected");
         let (head, _) = split_response(&resp);
         assert!(head.contains("200 OK"), "inspector GET failed: {head}");
-        assert!(head.contains("Access-Control-Allow-Origin: *"), "CORS header required: {head}");
         assert!(
-            head.to_ascii_lowercase().contains("content-type: application/json"),
+            head.contains("Access-Control-Allow-Origin: *"),
+            "CORS header required: {head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/json"),
             "inspector endpoint must return JSON: {head}"
         );
         parse_json_body(&resp)
@@ -470,26 +476,46 @@ fn inspector_round_trip() {
             .clone()
     };
     let nums = |v: &serde_json::Value| -> Vec<f64> {
-        v["value"]["value"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default()
+        v["value"]["value"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+            .unwrap_or_default()
     };
 
     let payload = fetch();
-    assert_eq!(payload["id"].as_u64(), Some(main_id), "inspector payload must echo node id");
+    assert_eq!(
+        payload["id"].as_u64(),
+        Some(main_id),
+        "inspector payload must echo node id"
+    );
     assert_eq!(payload["name"], "Main");
     assert_eq!(payload["class"], "Node3D");
     let position = prop(&payload, "position");
-    assert_eq!(position["type"], "Vector3", "position entry must report Vector3 type");
-    assert_eq!(nums(&position), vec![1.0, 2.0, 3.0], "position must round-trip");
+    assert_eq!(
+        position["type"], "Vector3",
+        "position entry must report Vector3 type"
+    );
+    assert_eq!(
+        nums(&position),
+        vec![1.0, 2.0, 3.0],
+        "position must round-trip"
+    );
     // A property the class does not declare is still shown, not dropped.
     let flag = prop(&payload, "my_flag");
-    assert_eq!(flag["value"]["value"], true, "my_flag must round-trip: {flag}");
+    assert_eq!(
+        flag["value"]["value"], true,
+        "my_flag must round-trip: {flag}"
+    );
 
     // Write a new position and confirm the next fetch reflects it.
     let set_pos_2 = format!(
         r#"{{"node_id":{main_id},"property":"position","value":{{"type":"Vector3","value":[7.0,8.0,9.0]}}}}"#
     );
     let resp_set_2 = http_post_raw(port, "/api/property/set", &set_pos_2);
-    assert!(split_response(&resp_set_2).0.contains("200 OK"), "second position set failed");
+    assert!(
+        split_response(&resp_set_2).0.contains("200 OK"),
+        "second position set failed"
+    );
     assert_eq!(nums(&prop(&fetch(), "position")), vec![7.0, 8.0, 9.0]);
 
     handle.stop();
@@ -595,10 +621,7 @@ fn asset_browser_list_dir_sorts_dirs_first() {
     );
 
     // project.godot must be tagged as Config.
-    let project_entry: &DirChild = children
-        .iter()
-        .find(|c| c.name == "project.godot")
-        .unwrap();
+    let project_entry: &DirChild = children.iter().find(|c| c.name == "project.godot").unwrap();
     assert!(!project_entry.is_directory);
     assert_eq!(project_entry.icon, FileIcon::Config);
     assert!(
@@ -684,9 +707,7 @@ fn asset_browser_drag_drop_texture_onto_viewport2d_creates_sprite() {
     dnd.update_hover(DropTarget::Viewport2D { x: 128.0, y: 96.0 });
     match dnd.current_validity() {
         Some(DropValidity::Valid(DropAction::CreateNodeFromResource)) => {}
-        other => panic!(
-            "expected Valid(CreateNodeFromResource) over Viewport2D, got {other:?}"
-        ),
+        other => panic!("expected Valid(CreateNodeFromResource) over Viewport2D, got {other:?}"),
     }
     assert!(dnd.can_drop(), "valid hover must accept drop");
 
@@ -727,10 +748,7 @@ fn asset_browser_drag_drop_script_onto_viewport_is_rejected() {
         }
         other => panic!("expected Invalid for script-on-viewport, got {other:?}"),
     }
-    assert!(
-        !dnd.can_drop(),
-        "can_drop must be false for invalid hover"
-    );
+    assert!(!dnd.can_drop(), "can_drop must be false for invalid hover");
 
     // Dropping while invalid still returns None (no completion).
     assert!(
@@ -806,7 +824,10 @@ fn asset_browser_filesystem_dir_http_lists_children() {
         "scripts/ has exactly one child: {children:?}"
     );
     let child = &children[0];
-    assert_eq!(child.get("name").and_then(|v| v.as_str()), Some("player.gd"));
+    assert_eq!(
+        child.get("name").and_then(|v| v.as_str()),
+        Some("player.gd")
+    );
     assert_eq!(child.get("is_dir").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(
         child.get("path").and_then(|v| v.as_str()),
@@ -925,8 +946,8 @@ fn asset_browser_viewport_drop_texture_http_creates_sprite2d() {
     // The created Sprite2D must be observable via GET /api/scene.
     let after = parse_json_body(&http_get_raw(port, "/api/scene"));
     let root_after = after.get("nodes").unwrap();
-    let icon_node = find_node_by_name(root_after, "icon")
-        .expect("expected Sprite2D 'icon' after texture drop");
+    let icon_node =
+        find_node_by_name(root_after, "icon").expect("expected Sprite2D 'icon' after texture drop");
     assert_eq!(
         icon_node.get("class").and_then(|v| v.as_str()),
         Some("Sprite2D"),
@@ -1095,9 +1116,9 @@ fn script_editor_round_trip() {
         !spans.is_empty(),
         "highlighter must emit at least one span: {hl_payload}"
     );
-    let has_keyword = spans.iter().any(|s| {
-        s.get("kind").and_then(|v| v.as_str()) == Some("Keyword")
-    });
+    let has_keyword = spans
+        .iter()
+        .any(|s| s.get("kind").and_then(|v| v.as_str()) == Some("Keyword"));
     assert!(
         has_keyword,
         "highlight output must contain at least one Keyword span: {hl_payload}"
@@ -1134,7 +1155,11 @@ fn script_editor_round_trip() {
 fn make_asset_browser_server() -> (EditorServerHandle, u16, TempDir) {
     let dir = TempDir::new().unwrap();
     // Create project structure
-    fs::write(dir.path().join("project.godot"), "[application]\nconfig/name=\"AssetBrowser\"\n").unwrap();
+    fs::write(
+        dir.path().join("project.godot"),
+        "[application]\nconfig/name=\"AssetBrowser\"\n",
+    )
+    .unwrap();
     fs::create_dir_all(dir.path().join("scenes")).unwrap();
     fs::write(dir.path().join("scenes/main.tscn"), "[gd_scene]").unwrap();
     fs::write(dir.path().join("scenes/player.tscn"), "[gd_scene]").unwrap();
@@ -1154,8 +1179,7 @@ fn make_asset_browser_server() -> (EditorServerHandle, u16, TempDir) {
     tree.add_child(root, Node::new("Main", "Node2D")).unwrap();
     let mut state = EditorState::new(tree);
     // Replace the default cwd-based asset browser with one rooted at the temp dir.
-    state.asset_browser =
-        FileSystemDock::new(EditorFileSystem::new(dir.path()));
+    state.asset_browser = FileSystemDock::new(EditorFileSystem::new(dir.path()));
     let handle = EditorServerHandle::start(port, state);
     thread::sleep(Duration::from_millis(100));
     (handle, port, dir)
@@ -1183,7 +1207,11 @@ fn asset_browser() {
 
     // 1. Root listing shows every folder and project.godot.
     let resp = http_get_raw(port, "/api/filesystem/dir?path=res://");
-    assert!(txt(resp.clone()).contains("200 OK"), "dir listing failed: {}", txt(resp.clone()));
+    assert!(
+        txt(resp.clone()).contains("200 OK"),
+        "dir listing failed: {}",
+        txt(resp.clone())
+    );
     let body = parse_json_body(&resp);
     let names: Vec<String> = body["entries"]
         .as_array()
@@ -1192,12 +1220,18 @@ fn asset_browser() {
         .filter_map(|e| e["name"].as_str().map(str::to_string))
         .collect();
     for want in ["scenes", "scripts", "textures", "audio", "models"] {
-        assert!(names.iter().any(|n| n == want), "root must list `{want}`: {names:?}");
+        assert!(
+            names.iter().any(|n| n == want),
+            "root must list `{want}`: {names:?}"
+        );
     }
 
     // 2. A sub-directory lists its files.
     let scenes = txt(http_get_raw(port, "/api/filesystem/dir?path=res://scenes"));
-    assert!(scenes.contains("main.tscn") && scenes.contains("player.tscn"), "{scenes}");
+    assert!(
+        scenes.contains("main.tscn") && scenes.contains("player.tscn"),
+        "{scenes}"
+    );
 
     // 3. Favourites round-trip.
     let add = parse_json_body(&http_post_raw(
@@ -1215,15 +1249,22 @@ fn asset_browser() {
 
     // 4. The recursive tree reaches nested files.
     let tree = txt(http_get_raw(port, "/api/filesystem/tree?root=res://"));
-    assert!(tree.contains("icon.png") && tree.contains("tree.glb"), "{tree}");
+    assert!(
+        tree.contains("icon.png") && tree.contains("tree.glb"),
+        "{tree}"
+    );
 
     // 5. Drag a texture into the viewport: Godot creates a Sprite2D for it.
     let scene = parse_json_body(&http_get_raw(port, "/api/scene"));
-    let parent = scene["nodes"]["children"][0]["id"].as_u64().expect("Main id");
+    let parent = scene["nodes"]["children"][0]["id"]
+        .as_u64()
+        .expect("Main id");
     let drop = parse_json_body(&http_post_raw(
         port,
         "/api/asset/drop_to_viewport",
-        &format!(r#"{{"asset_path":"res://textures/icon.png","asset_type":"texture","parent_id":{parent}}}"#),
+        &format!(
+            r#"{{"asset_path":"res://textures/icon.png","asset_type":"texture","parent_id":{parent}}}"#
+        ),
     ));
     assert_eq!(drop["node_class"], "Sprite2D", "{drop}");
     assert_eq!(drop["name"], "icon");

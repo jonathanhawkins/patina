@@ -137,7 +137,9 @@ fn albedo_solid_texture_multiplies_flat_color() {
         albedo: Color::WHITE,
         ..Default::default()
     };
-    mat.albedo_texture = Some(Arc::new(TextureImage::solid(Color::new(0.0, 1.0, 0.0, 1.0))));
+    mat.albedo_texture = Some(Arc::new(TextureImage::solid(Color::new(
+        0.0, 1.0, 0.0, 1.0,
+    ))));
     let fb = render(facing_quad(), mat, None);
 
     let c = fb.get_pixel(W / 2, H / 2);

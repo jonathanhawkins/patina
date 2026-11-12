@@ -502,7 +502,7 @@ impl StackFrame {
     /// Returns true if this frame is from engine code (gd* crates).
     pub fn is_engine_frame(&self) -> bool {
         self.crate_name()
-            .map_or(false, |c| c.starts_with("gd") || c.starts_with("patina"))
+            .is_some_and(|c| c.starts_with("gd") || c.starts_with("patina"))
     }
 }
 
@@ -1230,7 +1230,7 @@ impl CrashCollector {
             });
         }
         // Sort by count descending.
-        result.sort_by(|a, b| b.count.cmp(&a.count));
+        result.sort_by_key(|f| std::cmp::Reverse(f.count));
         result
     }
 
@@ -1318,7 +1318,7 @@ impl CrashCollector {
             .filter(|f| {
                 self.sig_timestamps
                     .get(&f.signature)
-                    .map_or(false, |ts| f.is_accelerating(ts))
+                    .is_some_and(|ts| f.is_accelerating(ts))
             })
             .count();
 

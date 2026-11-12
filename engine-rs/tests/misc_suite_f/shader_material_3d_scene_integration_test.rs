@@ -41,11 +41,20 @@ fn classdb_shader_material_has_expected_properties() {
     // (doc/classes/ShaderMaterial.xml); uniforms surface as `shader_parameter/*`
     // per shader. This test used to require `shader_code` / `shader_type` /
     // `render_mode`, which are not ShaderMaterial properties in Godot.
-    assert!(names.contains(&"shader"), "missing shader property: {names:?}");
+    assert!(
+        names.contains(&"shader"),
+        "missing shader property: {names:?}"
+    );
     for not_godot in ["shader_code", "shader_type", "render_mode"] {
-        assert!(!names.contains(&not_godot), "{not_godot} is not a Godot property");
+        assert!(
+            !names.contains(&not_godot),
+            "{not_godot} is not a Godot property"
+        );
     }
-    assert!(gdobject::class_db::is_parent_class("ShaderMaterial", "Material"));
+    assert!(gdobject::class_db::is_parent_class(
+        "ShaderMaterial",
+        "Material"
+    ));
 }
 
 // ===========================================================================

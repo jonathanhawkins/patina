@@ -335,10 +335,10 @@ fn a_disabled_probe_contributes_nothing() {
         render_editor_3d_frame(&vp, &load(&format!("{DEFAULT_PROBE}ambient_mode = 0\n")));
 
     // Guard: the floor must actually draw, or two empty frames are "identical".
-    let empty = render_editor_3d_frame(&vp, &load(&DEFAULT_PROBE.replace(
-        "mesh = \"primitive:PlaneMesh\"",
-        "",
-    )));
+    let empty = render_editor_3d_frame(
+        &vp,
+        &load(&DEFAULT_PROBE.replace("mesh = \"primitive:PlaneMesh\"", "")),
+    );
     assert!(
         differing_pixels(&default_probe.pixels, &empty.pixels) > 0,
         "fixture check: the floor must render, or this comparison is vacuous"
@@ -366,10 +366,8 @@ fn a_default_probe_replaces_the_ambient_with_its_capture() {
     let vp = viewport();
     let default_probe = load(DEFAULT_PROBE);
     let framed = render_editor_3d_frame(&vp, &default_probe);
-    let ambient_off = render_editor_3d_frame(
-        &vp,
-        &load(&format!("{DEFAULT_PROBE}ambient_mode = 0\n")),
-    );
+    let ambient_off =
+        render_editor_3d_frame(&vp, &load(&format!("{DEFAULT_PROBE}ambient_mode = 0\n")));
 
     // Guard the fixture actually produced a probe, or this passes vacuously.
     let inputs = editor_3d_render_inputs(&vp, &default_probe);
@@ -391,7 +389,9 @@ fn a_default_probe_replaces_the_ambient_with_its_capture() {
     );
     let red_colour = render_editor_3d_frame(
         &vp,
-        &load(&format!("{DEFAULT_PROBE}ambient_color = Color(1, 0, 0, 1)\n")),
+        &load(&format!(
+            "{DEFAULT_PROBE}ambient_color = Color(1, 0, 0, 1)\n"
+        )),
     );
     assert_eq!(
         differing_pixels(&framed.pixels, &red_colour.pixels),

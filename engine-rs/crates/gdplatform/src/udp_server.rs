@@ -107,28 +107,23 @@ impl UdpServer {
             return ERR_UNCONFIGURED;
         };
         let mut buf = vec![0u8; RECV_BUFFER];
-        loop {
-            match socket.recv_from(&mut buf) {
-                Ok((len, from)) => {
-                    // A source not seen before becomes a pending connection.
-                    // The cap is on PENDING addresses, not on packets: dropping
-                    // traffic from a peer already known would be a silent data
-                    // loss that no error code reports.
-                    let known = self.received.contains_key(&from);
-                    if !known {
-                        if self.pending.len() >= self.max_pending_connections {
-                            continue;
-                        }
-                        self.pending.push_back(from);
-                    }
-                    self.received
-                        .entry(from)
-                        .or_default()
-                        .push_back(buf[..len].to_vec());
+        // WouldBlock (or any error) is the normal end of a non-blocking drain.
+        while let Ok((len, from)) = socket.recv_from(&mut buf) {
+            // A source not seen before becomes a pending connection.
+            // The cap is on PENDING addresses, not on packets: dropping
+            // traffic from a peer already known would be a silent data
+            // loss that no error code reports.
+            let known = self.received.contains_key(&from);
+            if !known {
+                if self.pending.len() >= self.max_pending_connections {
+                    continue;
                 }
-                // WouldBlock is the normal end of a non-blocking drain.
-                Err(_) => break,
+                self.pending.push_back(from);
             }
+            self.received
+                .entry(from)
+                .or_default()
+                .push_back(buf[..len].to_vec());
         }
         OK
     }

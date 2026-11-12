@@ -111,7 +111,9 @@ fn raycast3d_miss_when_mask_excludes_layer() {
     let mut physics = PhysicsServer3D::new();
     physics.sync_to_physics(&tree);
 
-    assert!(!raycast3d::force_raycast_update(&mut tree, &physics, ray_id));
+    assert!(!raycast3d::force_raycast_update(
+        &mut tree, &physics, ray_id
+    ));
     assert!(!raycast3d::is_colliding(&tree, ray_id));
 
     raycast3d::set_collision_mask(&mut tree, ray_id, 0b0010);
@@ -184,7 +186,9 @@ fn shapecast3d_reports_overlap() {
     let mut physics = PhysicsServer3D::new();
     physics.sync_to_physics(&tree);
 
-    assert!(shapecast3d::force_shapecast_update(&mut tree, &physics, cast_id));
+    assert!(shapecast3d::force_shapecast_update(
+        &mut tree, &physics, cast_id
+    ));
     assert!(shapecast3d::is_colliding(&tree, cast_id));
     assert!(shapecast3d::get_collision_count(&tree, cast_id) >= 1);
     assert_eq!(shapecast3d::get_collider(&tree, cast_id, 0), Some(body_id));

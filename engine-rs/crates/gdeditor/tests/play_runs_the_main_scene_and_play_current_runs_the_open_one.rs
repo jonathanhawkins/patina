@@ -24,7 +24,8 @@ fn request(port: u16, method: &str, path: &str, body: &str) -> String {
 }
 
 fn runtime_paths(port: u16) -> Vec<String> {
-    let v: serde_json::Value = serde_json::from_str(&request(port, "GET", "/api/runtime/scene", "")).expect("json");
+    let v: serde_json::Value =
+        serde_json::from_str(&request(port, "GET", "/api/runtime/scene", "")).expect("json");
     let mut out = Vec::new();
     fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
         if let Some(p) = n["path"].as_str() {
@@ -45,15 +46,27 @@ fn play_runs_the_projects_main_scene_and_play_current_runs_the_open_scene() {
         .join("../../../games/platformer")
         .canonicalize()
         .expect("games/platformer fixture");
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
     std::thread::sleep(Duration::from_millis(100));
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{}"}}"#, project.display()));
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{}"}}"#, project.display()),
+    );
     let load = request(
         port,
         "POST",
         "/api/scene/load",
-        &format!(r#"{{"path":"{}"}}"#, project.join("level/level.tscn").display()),
+        &format!(
+            r#"{{"path":"{}"}}"#,
+            project.join("level/level.tscn").display()
+        ),
     );
     assert!(load.contains("\"ok\""), "load: {load}");
 
@@ -73,10 +86,23 @@ fn play_runs_the_projects_main_scene_and_play_current_runs_the_open_scene() {
         let state = handle.state();
         let s = state.lock().unwrap();
         let root = s.scene_tree.root_id();
-        let top: Vec<String> = s.scene_tree.get_node(root).unwrap().children().iter()
-            .map(|&c| s.scene_tree.get_node(c).unwrap().name().to_string()).collect();
-        assert_eq!(top, vec!["Level".to_string()], "the editor must still hold level.tscn");
-        assert!(s.scene_file.as_deref().is_some_and(|f| f.ends_with("level/level.tscn")));
+        let top: Vec<String> = s
+            .scene_tree
+            .get_node(root)
+            .unwrap()
+            .children()
+            .iter()
+            .map(|&c| s.scene_tree.get_node(c).unwrap().name().to_string())
+            .collect();
+        assert_eq!(
+            top,
+            vec!["Level".to_string()],
+            "the editor must still hold level.tscn"
+        );
+        assert!(s
+            .scene_file
+            .as_deref()
+            .is_some_and(|f| f.ends_with("level/level.tscn")));
     }
 
     // Play Current Scene (F6): the open level, which has no player of its own.
@@ -84,7 +110,14 @@ fn play_runs_the_projects_main_scene_and_play_current_runs_the_open_scene() {
     assert!(r.contains("\"ok\":true"), "play current: {r}");
     let current = runtime_paths(port);
     request(port, "POST", "/api/runtime/stop", "");
-    assert!(current.iter().any(|p| p == "/root/Level"), "{:?}", current.iter().take(8).collect::<Vec<_>>());
-    assert!(!current.iter().any(|p| p.ends_with("/Player")), "level.tscn alone has no Player");
+    assert!(
+        current.iter().any(|p| p == "/root/Level"),
+        "{:?}",
+        current.iter().take(8).collect::<Vec<_>>()
+    );
+    assert!(
+        !current.iter().any(|p| p.ends_with("/Player")),
+        "level.tscn alone has no Player"
+    );
     handle.stop();
 }

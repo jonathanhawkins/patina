@@ -456,8 +456,16 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0],
             primitive_type: PrimitiveType::Points,
-            bone_weights: if rigged { vec![[1.0, 0.0, 0.0, 0.0]] } else { Vec::new() },
-            bone_indices: if rigged { vec![[1, 0, 0, 0]] } else { Vec::new() },
+            bone_weights: if rigged {
+                vec![[1.0, 0.0, 0.0, 0.0]]
+            } else {
+                Vec::new()
+            },
+            bone_indices: if rigged {
+                vec![[1, 0, 0, 0]]
+            } else {
+                Vec::new()
+            },
             lods: Vec::new(),
         };
         mesh.surfaces.push(surface(true));
@@ -469,13 +477,19 @@ mod tests {
         let poses = [Transform3D::IDENTITY, translate(5.0, 0.0, 0.0)];
         let out = skin_mesh(&mesh, &skin, &poses);
 
-        assert!(approx(out.vertices[2], Vector3::new(5.5, 1.0, 0.0)), "primary");
+        assert!(
+            approx(out.vertices[2], Vector3::new(5.5, 1.0, 0.0)),
+            "primary"
+        );
         assert!(
             approx(out.surfaces[0].vertices[0], Vector3::new(5.0, 1.0, 0.0)),
             "rigged extra surface follows bind 1: {:?}",
             out.surfaces[0].vertices[0]
         );
-        assert!(out.surfaces[0].bone_weights.is_empty(), "baked: influences cleared");
+        assert!(
+            out.surfaces[0].bone_weights.is_empty(),
+            "baked: influences cleared"
+        );
         assert!(
             approx(out.surfaces[1].vertices[0], Vector3::new(0.0, 1.0, 0.0)),
             "an unrigged surface is untouched"

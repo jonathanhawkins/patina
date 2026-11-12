@@ -19,8 +19,8 @@
 //! terminator is `OP_ENUM_SIZE` (12), not `OP_MAX`.
 
 use gdobject::class_db::{
-    class_exists, class_get_integer_constant, class_has_enum, get_property_list,
-    is_parent_class, register_3d_classes,
+    class_exists, class_get_integer_constant, class_has_enum, get_property_list, is_parent_class,
+    register_3d_classes,
 };
 use gdvariant::Variant;
 
@@ -104,11 +104,7 @@ fn visualshadernode_uint_family_registered() {
 
     // -- UIntFunc.Function ----------------------------------------------------
     assert!(class_has_enum("VisualShaderNodeUIntFunc", "Function"));
-    for (name, value) in [
-        ("FUNC_NEGATE", 0),
-        ("FUNC_BITWISE_NOT", 1),
-        ("FUNC_MAX", 2),
-    ] {
+    for (name, value) in [("FUNC_NEGATE", 0), ("FUNC_BITWISE_NOT", 1), ("FUNC_MAX", 2)] {
         assert_constant("VisualShaderNodeUIntFunc", name, value);
     }
 

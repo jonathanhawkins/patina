@@ -362,7 +362,7 @@ fn effect_from_sub_resource(
         AudioEffectDelay, AudioEffectDistortion, AudioEffectFilter, AudioEffectFilterCascade,
         AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectPanner, AudioEffectPhaser,
         AudioEffectPitchShift, AudioEffectRecord, AudioEffectReverb, AudioEffectSpectrumAnalyzer,
-        AudioEffectStereoEnhance, ChorusVoice, DistortionMode, FilterMode, CHORUS_MAX_VOICES,
+        AudioEffectStereoEnhance, ChorusVoice, DistortionMode, CHORUS_MAX_VOICES,
     };
 
     let f = |name: &str, default: f32| -> f32 {

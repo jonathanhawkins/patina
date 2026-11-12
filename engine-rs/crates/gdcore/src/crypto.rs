@@ -108,14 +108,14 @@ impl HashingContext {
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
 
-        for i in 0..64 {
+        for (&k, &wi) in Self::K.iter().zip(w.iter()) {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
             let temp1 = h
                 .wrapping_add(s1)
                 .wrapping_add(ch)
-                .wrapping_add(Self::K[i])
-                .wrapping_add(w[i]);
+                .wrapping_add(k)
+                .wrapping_add(wi);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -351,7 +351,7 @@ impl AesContext {
         if !self.started {
             return Err("AES context not started");
         }
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err("AES update() requires a multiple of 16 bytes");
         }
         // Cloned so the `&mut self` chaining below does not fight the borrow.
@@ -443,7 +443,7 @@ impl AesContext {
                 Ok(buf)
             }
             AesMode::Decrypt => {
-                if data.is_empty() || data.len() % 16 != 0 {
+                if data.is_empty() || !data.len().is_multiple_of(16) {
                     return Err("AES ciphertext length must be multiple of 16");
                 }
                 let mut buf = data.to_vec();

@@ -58,7 +58,8 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
     let mut ml = MainLoop::new(play);
     ml.step(1.0 / 60.0);
     let car_select = ml.tree().get_node_by_path("/root/CarSelect").unwrap();
-    ml.tree_mut().call_script_method(car_select, "_on_mini_van_pressed", &[]);
+    ml.tree_mut()
+        .call_script_method(car_select, "_on_mini_van_pressed", &[]);
     for _ in 0..30 {
         ml.step(1.0 / 60.0);
     }
@@ -97,7 +98,11 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
     let doc = gdresource::import_gltf(&gltf).unwrap();
     // The geometry of the node's OWN glTF mesh, straight from the document.
     let own = |p: &str| {
-        let index = match tree.get_node(node(p)).unwrap().get_property("gltf_mesh_index") {
+        let index = match tree
+            .get_node(node(p))
+            .unwrap()
+            .get_property("gltf_mesh_index")
+        {
             Variant::Int(i) => i,
             other => panic!("{p} has no gltf_mesh_index: {other:?}"),
         };
@@ -115,7 +120,10 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
     );
     assert_eq!(grass, own("TownModel/Terrain/GrassMesh"));
     assert_eq!(road, own("TownModel/Terrain/RoadMesh"));
-    assert_ne!(tire, grass, "HugeTireMesh and GrassMesh drew the same geometry");
+    assert_ne!(
+        tire, grass,
+        "HugeTireMesh and GrassMesh drew the same geometry"
+    );
 
     // 2. root_scale=0.01: a tree's mesh sits at the authored instance scale
     //    (Tree: 0.375) times the file's own x100 `tree` node times 0.01.
@@ -138,7 +146,11 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
     match &sky.material {
         SkyMaterial::Procedural(m) => {
             // sky_day.tres: sky_top_color = Color(7.123351e-06, 0.6897872, 0.89266914, 1)
-            assert!((m.sky_top_color.g - 0.6897872).abs() < 1e-5, "{:?}", m.sky_top_color);
+            assert!(
+                (m.sky_top_color.g - 0.6897872).abs() < 1e-5,
+                "{:?}",
+                m.sky_top_color
+            );
             assert!((m.sky_top_color.b - 0.89266914).abs() < 1e-5);
         }
         other => panic!("sky_day.tres is a ProceduralSkyMaterial, got {other:?}"),
@@ -147,7 +159,11 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
     let sun = &inputs.scene_lights[0];
     assert!((sun.energy - 1.45).abs() < 1e-6);
     let want = gdcore::math::Vector3::new(0.496732, -0.819152, 0.286788);
-    assert!((sun.direction - want).length() < 1e-4, "{:?}", sun.direction);
+    assert!(
+        (sun.direction - want).length() < 1e-4,
+        "{:?}",
+        sun.direction
+    );
     assert!(sun.shadow_enabled);
 
     // 4. Textures on the draw items.
@@ -158,22 +174,36 @@ fn the_town_renders_with_its_meshes_trees_environment_and_textures() {
             .and_then(|m| m.albedo_texture.as_ref())
             .map(|t| (t.width, t.height))
     };
-    assert_eq!(tex("TownModel/Terrain/GrassMesh"), Some((1024, 1024)), "grass.tres -> grass.webp");
-    assert_eq!(tex("TownModel/Terrain/RoadMesh"), Some((1024, 1024)), "cement.tres -> cement.webp");
+    assert_eq!(
+        tex("TownModel/Terrain/GrassMesh"),
+        Some((1024, 1024)),
+        "grass.tres -> grass.webp"
+    );
+    assert_eq!(
+        tex("TownModel/Terrain/RoadMesh"),
+        Some((1024, 1024)),
+        "cement.tres -> cement.webp"
+    );
     // Leav_material.tres (extracted): texture, transparency = 4, cull_mode = 2.
     let leaf = item(leaves).material.as_ref().expect("leaves material");
-    assert_eq!(tex(leaves), Some((512, 1024)), "Leav_material_baseColor.png");
+    assert_eq!(
+        tex(leaves),
+        Some((512, 1024)),
+        "Leav_material_baseColor.png"
+    );
     assert_ne!(leaf.transparency, Transparency::Disabled);
     assert_eq!(leaf.cull_mode, CullMode::Disabled);
     // A script write into the shared Environment reaches the frame.
     let we = node("WorldEnvironment");
     let probe = gdcore::math::Color::new(0.25, 0.5, 0.75, 1.0);
-    ml.tree_mut()
-        .get_node_mut(we)
-        .unwrap()
-        .set_property("__subres__environment__fog_light_color", Variant::Color(probe));
+    ml.tree_mut().get_node_mut(we).unwrap().set_property(
+        "__subres__environment__fog_light_color",
+        Variant::Color(probe),
+    );
     let tree = ml.tree();
     let env2 = gdscene::world_environment::runtime_environment_3d(tree, Some(cam)).unwrap();
-    assert_eq!(env2.fog_light_color, probe, "`environment.fog_light_color = c` must render");
-
+    assert_eq!(
+        env2.fog_light_color, probe,
+        "`environment.fog_light_color = c` must render"
+    );
 }

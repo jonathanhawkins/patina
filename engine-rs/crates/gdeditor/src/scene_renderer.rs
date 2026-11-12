@@ -512,7 +512,10 @@ fn edit_view_inputs(
     tree: &mut SceneTree,
     project_root: &str,
     viewport_size: Vector2,
-) -> (Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>, Vec<crate::viewport_2d_render::Render2DItem>) {
+) -> (
+    Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    Vec<crate::viewport_2d_render::Render2DItem>,
+) {
     // Root Controls anchor to the GAME's base resolution, as Godot's 2D editor
     // lays them out inside the game rect — the edited scene's own and every
     // previewed sub-scene's alike. Anchoring to the editor panel stretched a
@@ -583,7 +586,9 @@ fn instance_preview_items(
     let layout_size = viewport_size;
     let mut out = Vec::new();
     for id in tree.all_nodes_in_tree_order() {
-        let Some(node) = tree.get_node(id) else { continue };
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
         // An instance the edited tree already holds EXPANDED draws through its
         // own nodes; a preview on top would draw it twice (pat-hivyf).
         if node.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY) {
@@ -666,7 +671,10 @@ fn merge_previews_by_layer_and_z(
     let mut pending = previews.into_iter().peekable();
     for item in items {
         let key = (item.canvas_layer, item.z_index);
-        while pending.peek().is_some_and(|p| (p.canvas_layer, p.z_index) < key) {
+        while pending
+            .peek()
+            .is_some_and(|p| (p.canvas_layer, p.z_index) < key)
+        {
             out.push(pending.next().unwrap());
         }
         out.push(item);
@@ -717,7 +725,7 @@ fn render_scene_inner_with_previews(
     // `None` means "no overlay set supplied" — draw every gizmo, which is what
     // every pre-existing caller expects. It is NOT the same as an empty set.
     let shows = |o: crate::viewport_2d::CanvasOverlay| -> bool {
-        overlays.map_or(true, |set| set.is_enabled(o))
+        overlays.is_none_or(|set| set.is_enabled(o))
     };
     let mut fb = FrameBuffer::new(width, height, BG_COLOR);
     let z = zoom as f32;
@@ -1925,7 +1933,10 @@ fn draw_selection_rect(fb: &mut FrameBuffer, tl: Vector2, size: Vector2) {
     for corner in &[tl, tr, br, bl] {
         draw::fill_rect(
             fb,
-            Rect2::new(Vector2::new(corner.x - cs, corner.y - cs), Vector2::new(cs * 2.0, cs * 2.0)),
+            Rect2::new(
+                Vector2::new(corner.x - cs, corner.y - cs),
+                Vector2::new(cs * 2.0, cs * 2.0),
+            ),
             COLOR_SELECTED,
         );
     }
@@ -3300,9 +3311,14 @@ mod tests {
         gdobject::class_db::clear_for_testing();
         let (mut tree, node_id) = make_tree_with_node2d();
         let before = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
-        tree.get_node_mut(node_id).unwrap().set_name("SomeOtherLongName");
+        tree.get_node_mut(node_id)
+            .unwrap()
+            .set_name("SomeOtherLongName");
         let after = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
-        assert!(before.pixels == after.pixels, "a node's name must not change the canvas");
+        assert!(
+            before.pixels == after.pixels,
+            "a node's name must not change the canvas"
+        );
     }
 
     // -- bitmap font tests ------------------------------------------------

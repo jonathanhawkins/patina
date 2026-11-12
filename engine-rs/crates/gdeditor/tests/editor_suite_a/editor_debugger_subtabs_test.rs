@@ -15,7 +15,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,7 +53,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -66,8 +73,18 @@ fn debugger_subtabs_show_live_data() {
     let (handle, port) = make_server();
 
     // Errors tab: record a runtime error/warning, list it, clear it.
-    assert!(http_post(port, "/api/debug/record_error", r#"{"level":"error","message":"Null instance"}"#).contains("200 OK"));
-    assert!(http_post(port, "/api/debug/record_error", r#"{"level":"warning","message":"Deprecated call"}"#).contains("200 OK"));
+    assert!(http_post(
+        port,
+        "/api/debug/record_error",
+        r#"{"level":"error","message":"Null instance"}"#
+    )
+    .contains("200 OK"));
+    assert!(http_post(
+        port,
+        "/api/debug/record_error",
+        r#"{"level":"warning","message":"Deprecated call"}"#
+    )
+    .contains("200 OK"));
     let errs = body_json(&http_get(port, "/api/debug/errors"));
     let arr = errs["errors"].as_array().unwrap();
     assert_eq!(arr.len(), 2, "Errors tab lists recorded errors/warnings");
@@ -75,30 +92,63 @@ fn debugger_subtabs_show_live_data() {
     assert_eq!(arr[1]["level"], serde_json::json!("warning"));
 
     // Evaluator: evaluate an expression.
-    let ev = body_json(&http_post(port, "/api/debug/evaluate", r#"{"expression":"2 + 3"}"#));
-    assert_eq!(ev["result"], serde_json::json!("5"), "Evaluator computes expressions");
+    let ev = body_json(&http_post(
+        port,
+        "/api/debug/evaluate",
+        r#"{"expression":"2 + 3"}"#,
+    ));
+    assert_eq!(
+        ev["result"],
+        serde_json::json!("5"),
+        "Evaluator computes expressions"
+    );
 
     // Break + Skip-Breakpoints act on the session.
-    assert_eq!(body_json(&http_post(port, "/api/debug/break", "{}"))["state"], serde_json::json!("break"));
-    assert_eq!(body_json(&http_post(port, "/api/debug/skip_breakpoints", r#"{"enabled":true}"#))["skip_breakpoints"], serde_json::json!(true));
+    assert_eq!(
+        body_json(&http_post(port, "/api/debug/break", "{}"))["state"],
+        serde_json::json!("break")
+    );
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/debug/skip_breakpoints",
+            r#"{"enabled":true}"#
+        ))["skip_breakpoints"],
+        serde_json::json!(true)
+    );
 
     // Video RAM / Misc / Network sub-tab data.
     let info = body_json(&http_get(port, "/api/debug/info"));
-    assert!(!info["video_ram"].as_array().unwrap().is_empty(), "Video RAM lists resources");
+    assert!(
+        !info["video_ram"].as_array().unwrap().is_empty(),
+        "Video RAM lists resources"
+    );
     assert!(info["misc"].is_object(), "Misc data present");
     assert!(info["network"].is_object(), "Network data present");
 
     // Clear empties the Errors list.
     assert!(http_post(port, "/api/debug/clear_errors", "{}").contains("200 OK"));
-    assert_eq!(body_json(&http_get(port, "/api/debug/errors"))["errors"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        body_json(&http_get(port, "/api/debug/errors"))["errors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 
     // The served panel wires the sub-tab data loads + Evaluator + actions.
     let html = http_get(port, "/editor");
     for needle in [
-        "function loadDebuggerSubtab", "function renderDebugErrors", "function renderDebugInfo",
-        "id=\"dbg-eval-input\"", "id=\"dbg-eval-run\"",
-        "/api/debug/evaluate", "/api/debug/skip_breakpoints", "/api/debug/info",
-        "id=\"dbg-vram-list\"", "id=\"net-rpc-body\"",
+        "function loadDebuggerSubtab",
+        "function renderDebugErrors",
+        "function renderDebugInfo",
+        "id=\"dbg-eval-input\"",
+        "id=\"dbg-eval-run\"",
+        "/api/debug/evaluate",
+        "/api/debug/skip_breakpoints",
+        "/api/debug/info",
+        "id=\"dbg-vram-list\"",
+        "id=\"net-rpc-body\"",
     ] {
         assert!(html.contains(needle), "debugger panel missing `{needle}`");
     }

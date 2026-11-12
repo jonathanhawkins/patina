@@ -225,13 +225,7 @@ pub fn call_xr_node_method(
         "get_float" => Variant::Float(match get_input(tree, id, &name_arg()) {
             Variant::Float(v) => v,
             Variant::Int(v) => v as f64,
-            Variant::Bool(b) => {
-                if b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Variant::Bool(b) if b => 1.0,
             _ => 0.0,
         }),
         "get_vector2" => match get_input(tree, id, &name_arg()) {

@@ -326,7 +326,7 @@ impl UndoRedoManager {
     /// If a group is active, the ops are collected instead.
     pub fn push(&mut self, mut action: UndoAction) {
         if self.group_depth > 0 {
-            self.group_ops.extend(action.ops.drain(..));
+            self.group_ops.append(&mut action.ops);
             if self.group_label.is_empty() {
                 self.group_label = action.label;
             }

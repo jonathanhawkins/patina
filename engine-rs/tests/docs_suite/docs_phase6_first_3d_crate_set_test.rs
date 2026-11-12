@@ -35,12 +35,8 @@ fn cargo_manifests_exist_for_3d_slice() {
 #[test]
 fn crate_boundaries_are_documented() {
     let spec = repo_root().join("docs/3D_ARCHITECTURE_SPEC.md");
-    let body = std::fs::read_to_string(&spec).unwrap_or_else(|e| {
-        panic!(
-            "3D architecture spec must exist at {}: {e}",
-            spec.display()
-        )
-    });
+    let body = std::fs::read_to_string(&spec)
+        .unwrap_or_else(|e| panic!("3D architecture spec must exist at {}: {e}", spec.display()));
     for name in FIRST_3D_CRATE_SET {
         assert!(
             body.contains(name),

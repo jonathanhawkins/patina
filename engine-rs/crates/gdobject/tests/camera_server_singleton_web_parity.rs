@@ -76,7 +76,10 @@ fn camera_texture_instantiates_as_a_texture2d() {
     // on GenericObject (that one lives on the private `ObjectBase`).
     assert_eq!(obj.get_class(), "CameraTexture");
     // It carries its own feed binding...
-    assert_props("CameraTexture", &["camera_feed_id", "which_feed", "camera_is_active"]);
+    assert_props(
+        "CameraTexture",
+        &["camera_feed_id", "which_feed", "camera_is_active"],
+    );
     // ...and is a Texture2D, which is the property that makes it bindable.
     assert!(is_parent_class("CameraTexture", "Texture2D"));
 }
@@ -123,11 +126,7 @@ fn camera_feed_carries_its_datatype_and_position_enums() {
     ] {
         assert_eq!(class_get_integer_constant("CameraFeed", name), Some(value));
     }
-    for (name, value) in [
-        ("FEED_UNSPECIFIED", 0),
-        ("FEED_FRONT", 1),
-        ("FEED_BACK", 2),
-    ] {
+    for (name, value) in [("FEED_UNSPECIFIED", 0), ("FEED_FRONT", 1), ("FEED_BACK", 2)] {
         assert_eq!(class_get_integer_constant("CameraFeed", name), Some(value));
     }
 }
@@ -138,7 +137,10 @@ fn camera_feed_carries_its_datatype_and_position_enums() {
 #[test]
 fn camera_feed_property_surface_is_only_the_three_godot_has() {
     register_viewport_classes();
-    assert_props("CameraFeed", &["feed_is_active", "feed_transform", "formats"]);
+    assert_props(
+        "CameraFeed",
+        &["feed_is_active", "feed_transform", "formats"],
+    );
     for not_a_prop in ["id", "name", "position"] {
         assert!(
             !props("CameraFeed").iter().any(|p| p == not_a_prop),

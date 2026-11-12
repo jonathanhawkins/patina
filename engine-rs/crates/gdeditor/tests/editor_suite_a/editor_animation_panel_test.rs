@@ -114,7 +114,10 @@ fn http_post(port: u16, path: &str, body: &str) -> String {
         let mut s = None;
         for attempt in 0..20 {
             match TcpStream::connect(format!("127.0.0.1:{port}")) {
-                Ok(c) => { s = Some(c); break; }
+                Ok(c) => {
+                    s = Some(c);
+                    break;
+                }
                 Err(_) if attempt < 19 => thread::sleep(Duration::from_millis(50)),
                 Err(e) => panic!("failed to connect: {e}"),
             }
@@ -159,21 +162,34 @@ fn animation_timeline_tracks_and_keyframes() {
     let kfs = tracks[0]["keyframes"].as_array().unwrap();
     assert_eq!(kfs.len(), 2, "two keyframes inserted");
     let times: Vec<f64> = kfs.iter().map(|k| k["time"].as_f64().unwrap()).collect();
-    assert!(times.contains(&0.0) && times.contains(&1.0), "keyframes at 0 and 1: {times:?}");
+    assert!(
+        times.contains(&0.0) && times.contains(&1.0),
+        "keyframes at 0 and 1: {times:?}"
+    );
 
     // Keyframes are editable — remove one.
-    assert!(http_post(port, "/api/animation/keyframe/remove", r#"{"animation":"walk","track_index":0,"keyframe_index":0}"#).contains("200 OK"));
+    assert!(http_post(
+        port,
+        "/api/animation/keyframe/remove",
+        r#"{"animation":"walk","track_index":0,"keyframe_index":0}"#
+    )
+    .contains("200 OK"));
     let after = body_json(&http_get(port, "/api/animation?name=walk"));
-    assert_eq!(after["tracks"][0]["keyframes"].as_array().unwrap().len(), 1, "keyframe removed");
+    assert_eq!(
+        after["tracks"][0]["keyframes"].as_array().unwrap().len(),
+        1,
+        "keyframe removed"
+    );
 
     // The served ANIMATION panel renders the timeline + track list + toolbar.
     let html = http_get(port, "/editor");
     for needle in [
         "id=\"animation-panel\"",
-        "id=\"anim-timeline-canvas\"",  // the timeline (ruler/playhead/keyframes)
-        "id=\"anim-tracks\"",           // the track list
-        "id=\"anim-new-btn\"", "id=\"anim-play-btn\"",
-        "function renderAnimTracks",    // track rendering wiring
+        "id=\"anim-timeline-canvas\"", // the timeline (ruler/playhead/keyframes)
+        "id=\"anim-tracks\"",          // the track list
+        "id=\"anim-new-btn\"",
+        "id=\"anim-play-btn\"",
+        "function renderAnimTracks", // track rendering wiring
     ] {
         assert!(html.contains(needle), "animation panel missing `{needle}`");
     }

@@ -37,7 +37,11 @@ fn build_3d_scene() -> SceneTree {
     let crate_id = tree
         .add_child(root, Node::new("Crate", "MeshInstance3D"))
         .unwrap();
-    node3d::set_position(&mut tree, crate_id, gdcore::math::Vector3::new(1.0, 0.5, -2.0));
+    node3d::set_position(
+        &mut tree,
+        crate_id,
+        gdcore::math::Vector3::new(1.0, 0.5, -2.0),
+    );
     tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
     tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
         .unwrap();
@@ -163,7 +167,8 @@ fn http_get_body_bytes(port: u16, path: &str) -> Vec<u8> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
     let mut buf = Vec::new();
@@ -201,16 +206,28 @@ fn editor_update_frame_ex_streams_bmp_keeps_png_on_full_quality() {
     handle.update_frame_ex(fb_a, true);
     let png_a = http_get_body_bytes(port, "/api/viewport/png");
     let bmp_a = http_get_body_bytes(port, "/api/viewport");
-    assert!(png_a.starts_with(&[137, 80, 78, 71]), "PNG signature after full-quality frame");
-    assert!(bmp_a.starts_with(b"BM"), "BMP signature after full-quality frame");
+    assert!(
+        png_a.starts_with(&[137, 80, 78, 71]),
+        "PNG signature after full-quality frame"
+    );
+    assert!(
+        bmp_a.starts_with(b"BM"),
+        "BMP signature after full-quality frame"
+    );
 
     // Low-res in-motion frame B → BMP updates; PNG cache stays the frame-A PNG.
     handle.update_frame_ex(fb_b, false);
     let png_b = http_get_body_bytes(port, "/api/viewport/png");
     let bmp_b = http_get_body_bytes(port, "/api/viewport");
-    assert_eq!(png_b, png_a, "PNG cache must stay put during a low-res in-motion frame");
+    assert_eq!(
+        png_b, png_a,
+        "PNG cache must stay put during a low-res in-motion frame"
+    );
     assert_ne!(bmp_b, bmp_a, "BMP live stream must update to the new frame");
-    assert!(bmp_b.starts_with(b"BM"), "BMP still valid after the in-motion frame");
+    assert!(
+        bmp_b.starts_with(b"BM"),
+        "BMP still valid after the in-motion frame"
+    );
 
     handle.stop();
 }
@@ -232,7 +249,12 @@ fn editor_3d_viewport_navigation_and_meshes() {
 
     // --- Persisted camera: orbit/zoom mutate it, reset restores ---
     let s0 = json_body(&http_get(port, "/api/viewport/3d/state")).to_string();
-    let after_orbit = json_body(&http_post(port, "/api/viewport/3d/orbit", r#"{"dx":60,"dy":25}"#)).to_string();
+    let after_orbit = json_body(&http_post(
+        port,
+        "/api/viewport/3d/orbit",
+        r#"{"dx":60,"dy":25}"#,
+    ))
+    .to_string();
     assert_ne!(after_orbit, s0, "orbit must change the persisted 3D camera");
     let s_orbit = json_body(&http_get(port, "/api/viewport/3d/state")).to_string();
     assert_ne!(s_orbit, s0, "orbit persists across a fresh state read");
@@ -252,12 +274,23 @@ fn editor_3d_viewport_navigation_and_meshes() {
         let st = handle.state().lock().unwrap();
         scene_renderer::render_scene_with_zoom_pan(&st.scene_tree, None, W, H, 1.0, (0.0, 0.0))
     };
-    assert!(distinct_colors(&fb_3d) >= 2, "the MeshInstance3D scene renders geometry in 3D");
-    assert!(fb_3d.pixels != fb_2d.pixels, "the 3D mesh render differs from the 2D render");
+    assert!(
+        distinct_colors(&fb_3d) >= 2,
+        "the MeshInstance3D scene renders geometry in 3D"
+    );
+    assert!(
+        fb_3d.pixels != fb_2d.pixels,
+        "the 3D mesh render differs from the 2D render"
+    );
 
     // --- The 3D viewport picks a node (box-select over the whole frame) ---
-    let pick_resp = http_post(port, "/api/viewport/3d/box_select", &format!(r#"{{"x1":0,"y1":0,"x2":{W},"y2":{H}}}"#));
-    let picked: serde_json::Value = serde_json::from_str(json_body(&pick_resp)).expect("box_select returns JSON");
+    let pick_resp = http_post(
+        port,
+        "/api/viewport/3d/box_select",
+        &format!(r#"{{"x1":0,"y1":0,"x2":{W},"y2":{H}}}"#),
+    );
+    let picked: serde_json::Value =
+        serde_json::from_str(json_body(&pick_resp)).expect("box_select returns JSON");
     assert!(
         !picked["selected_nodes"].as_array().unwrap().is_empty(),
         "box-select over the frame picks the 3D node(s)"

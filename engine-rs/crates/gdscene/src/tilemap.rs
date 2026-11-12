@@ -1656,7 +1656,7 @@ pub fn resolve_terrain_tile(terrain: &TerrainType, bitmask: u8) -> Option<(i32, 
     for (&candidate_mask, &tile) in &terrain.bitmask_tiles {
         if candidate_mask & bitmask == candidate_mask {
             let bits = candidate_mask.count_ones();
-            if best.map_or(true, |(_, _)| bits > best.unwrap().0.count_ones()) {
+            if best.is_none_or(|(_, _)| bits > best.unwrap().0.count_ones()) {
                 best = Some((candidate_mask, tile));
             }
         }

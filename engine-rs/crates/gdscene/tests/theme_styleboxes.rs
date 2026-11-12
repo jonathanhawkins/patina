@@ -154,7 +154,9 @@ fn the_typed_and_legacy_stylebox_stores_agree() {
         // pat-9ww3e): no background, so no legacy colour may claim one.
         if let Some(StyleBox::Empty(_)) = theme.get_stylebox(control, property) {
             assert!(
-                theme.get_item(ThemePropertyType::Stylebox, control, property).is_none(),
+                theme
+                    .get_item(ThemePropertyType::Stylebox, control, property)
+                    .is_none(),
                 "{control}/{property} is an empty box but a legacy colour still paints it"
             );
             continue;

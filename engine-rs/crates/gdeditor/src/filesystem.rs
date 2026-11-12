@@ -347,13 +347,6 @@ pub struct FileSystemEntry {
     pub child_count: usize,
 }
 
-/// The filesystem dock panel, providing a file browser for the editor.
-///
-/// Mirrors Godot 4.x's FileSystem dock with:
-/// - Directory tree view with expand/collapse
-/// - File type icons
-/// - Text filter/search
-/// - Favorites list
 /// The dock's split display mode, mirroring Godot's
 /// `FileSystemDock::DisplayMode` (upstream/godot/editor/docks/filesystem_dock.h):
 /// a single combined tree, or a split with a separate file list laid out
@@ -380,6 +373,7 @@ impl FsDisplayMode {
 
     /// Parse a token back to a mode, defaulting to `TreeOnly` for anything
     /// unrecognized.
+    #[allow(clippy::should_implement_trait)] // infallible, so not `FromStr`
     pub fn from_str(s: &str) -> Self {
         match s {
             "vsplit" => FsDisplayMode::VSplit,
@@ -404,6 +398,13 @@ impl FsDisplayMode {
     }
 }
 
+/// The filesystem dock panel, providing a file browser for the editor.
+///
+/// Mirrors Godot 4.x's FileSystem dock with:
+/// - Directory tree view with expand/collapse
+/// - File type icons
+/// - Text filter/search
+/// - Favorites list
 #[derive(Debug)]
 pub struct FileSystemDock {
     /// The underlying filesystem.
@@ -815,9 +816,7 @@ impl FileSystemDock {
                 continue;
             }
 
-            let depth = path_str.matches('/').count()
-                + if path_str.contains('/') { 0 } else { 0 }
-                + if parent_str.is_empty() { 0 } else { 1 };
+            let depth = path_str.matches('/').count() + if parent_str.is_empty() { 0 } else { 1 };
 
             let name = file_path
                 .file_name()
@@ -1569,8 +1568,12 @@ mod gdignore_tests {
         std::fs::write(dir.join("ignored/.gdignore"), "").unwrap();
         std::fs::write(dir.join("nested_project/project.godot"), "").unwrap();
         let fs = EditorFileSystem::new(&dir);
-        let names: Vec<String> =
-            fs.list_dir("res://").unwrap().into_iter().map(|c| c.name).collect();
+        let names: Vec<String> = fs
+            .list_dir("res://")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         assert!(names.contains(&"kept".to_string()), "{names:?}");
         assert!(!names.contains(&"ignored".to_string()), "{names:?}");
         assert!(!names.contains(&"nested_project".to_string()), "{names:?}");

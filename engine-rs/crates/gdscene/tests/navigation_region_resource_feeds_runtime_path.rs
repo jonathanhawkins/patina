@@ -125,7 +125,12 @@ fn navigation_region_resource_feeds_runtime_path() {
 
     // The published next waypoint stays inside the authored region (x within
     // [0,20], y within [0,40]) rather than cutting outside it.
-    let next = match ml.tree().get_node(agent).unwrap().get_property("next_path_position") {
+    let next = match ml
+        .tree()
+        .get_node(agent)
+        .unwrap()
+        .get_property("next_path_position")
+    {
         gdvariant::Variant::Vector2(v) => v,
         other => panic!("next_path_position should be a Vector2, got {other:?}"),
     };

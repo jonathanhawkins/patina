@@ -2062,7 +2062,10 @@ mod tests {
             let out = tmp.join("out_web_no_payload");
             let cfg = ExportConfig::new("web", "Game").with_resource("game.tscn");
             let result = PackageExecutor::new(cfg, &tmp, &out).run();
-            assert!(!result.success, "a web export with no wasm payload must fail loudly");
+            assert!(
+                !result.success,
+                "a web export with no wasm payload must fail loudly"
+            );
         }
 
         for platform in &["linux", "windows", "macos", "web"] {
@@ -2074,7 +2077,11 @@ mod tests {
             } else {
                 exec.run()
             };
-            assert!(result.success, "packaging failed for {platform}: {:?}", result.messages);
+            assert!(
+                result.success,
+                "packaging failed for {platform}: {:?}",
+                result.messages
+            );
             assert!(
                 result.output_path.contains(platform),
                 "output should contain platform name for {platform}"

@@ -37,7 +37,12 @@ fn cargo_doc_workspace_succeeds() {
     );
 
     // Verify some expected doc output files exist
-    let doc_dir = root.join("target/doc");
+    // `cargo doc` writes to `$CARGO_TARGET_DIR/doc` when that is set (the child
+    // inherits it), so look there — a fixed `target/doc` reads a stale tree.
+    let doc_dir = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => root.join(dir).join("doc"),
+        None => root.join("target/doc"),
+    };
     assert!(
         doc_dir.exists(),
         "Doc output directory not found at {:?}",

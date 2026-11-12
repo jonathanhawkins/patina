@@ -36,7 +36,9 @@ fn read_audit() -> String {
 #[test]
 fn audit_document_exists() {
     assert!(
-        repo_root().join("prd/PHASE8_EDITOR_PARITY_AUDIT.md").exists(),
+        repo_root()
+            .join("prd/PHASE8_EDITOR_PARITY_AUDIT.md")
+            .exists(),
         "Phase 8 audit document must exist"
     );
 }
@@ -153,7 +155,9 @@ fn audit_evidence_file_count_guard() {
 #[test]
 fn editor_compat_exports_type_aliases() {
     // Verify that the Godot-compatible type aliases compile and resolve.
-    use gdeditor::editor_compat::{EditorInspector, EditorInspectorPluginManager, EditorProperty, EditorUndoRedoManager};
+    use gdeditor::editor_compat::{
+        EditorInspector, EditorInspectorPluginManager, EditorProperty, EditorUndoRedoManager,
+    };
 
     // These are type aliases — we just need to prove they exist and resolve.
     let _: fn() -> EditorInspector = || gdeditor::inspector::InspectorPanel::new();
@@ -310,10 +314,9 @@ fn editor_interface_method_count_guard() {
     // Total: 31 (including new, Debug impl is a trait not counted)
     // We guard at >= 25 to catch accidental removal without being brittle
     // on minor additions.
-    let source = fs::read_to_string(
-        workspace_root().join("crates/gdeditor/src/editor_interface.rs"),
-    )
-    .expect("editor_interface.rs must exist");
+    let source =
+        fs::read_to_string(workspace_root().join("crates/gdeditor/src/editor_interface.rs"))
+            .expect("editor_interface.rs must exist");
 
     let pub_fn_count = source
         .lines()
@@ -345,10 +348,8 @@ fn editor_server_module_exists() {
 
 #[test]
 fn editor_server_source_is_substantial() {
-    let source = fs::read_to_string(
-        workspace_root().join("crates/gdeditor/src/editor_server.rs"),
-    )
-    .expect("editor_server.rs must be readable");
+    let source = fs::read_to_string(workspace_root().join("crates/gdeditor/src/editor_server.rs"))
+        .expect("editor_server.rs must be readable");
     let line_count = source.lines().count();
     assert!(
         line_count >= 100,
@@ -461,11 +462,7 @@ fn gdeditor_editor_modules_breadth_guard() {
     let module_count = fs::read_dir(&src)
         .expect("must be able to list gdeditor/src")
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map_or(false, |ext| ext == "rs")
-        })
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
 
     assert!(

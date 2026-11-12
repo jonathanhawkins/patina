@@ -105,9 +105,7 @@ pub fn seed_script_visible_settings(settings: &ProjectSettings, project_root: &P
     // The tick rate specifically, because `Engine.physics_ticks_per_second`
     // reads a process-wide atomic that defaults to 60 rather than consulting
     // the settings store `seed_script_settings_for_this_thread` just filled.
-    gdscript_interop::publish_engine_physics_ticks_per_second(
-        settings.physics_ticks_per_second(),
-    );
+    gdscript_interop::publish_engine_physics_ticks_per_second(settings.physics_ticks_per_second());
 }
 
 /// Publishes `settings` to the script-visible `ProjectSettings` singleton for

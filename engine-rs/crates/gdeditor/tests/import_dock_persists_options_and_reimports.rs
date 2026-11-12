@@ -337,9 +337,15 @@ fn a_dock_created_sidecar_names_its_importer_and_source() {
         text.contains("compress/mode=1"),
         "an enum label must be stored as Godot's index:\n{text}"
     );
-    assert!(!text.contains("compress/mode=\"Lossy\""), "never the label:\n{text}");
+    assert!(
+        !text.contains("compress/mode=\"Lossy\""),
+        "never the label:\n{text}"
+    );
     // …and the dock reads that index back as its label.
-    let info = json_of(&http_get(port, "/api/import_settings?path=res%3A//hero.png"));
+    let info = json_of(&http_get(
+        port,
+        "/api/import_settings?path=res%3A//hero.png",
+    ));
     assert_eq!(
         option_value(&info, "compress/mode"),
         serde_json::json!("Lossy"),

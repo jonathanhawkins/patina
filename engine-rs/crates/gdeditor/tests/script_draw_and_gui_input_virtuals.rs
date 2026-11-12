@@ -23,9 +23,9 @@
 //! so "the machinery exists but nothing calls it" fails.
 
 use gdcore::math::{Color, Vector2};
+use gdeditor::viewport_2d_render::{build_runtime_render_list, Render2DItem, Render2DKind};
 use gdplatform::input::{InputEvent, MouseButton};
 use gdscene::node::{Node, NodeId};
-use gdeditor::viewport_2d_render::{build_runtime_render_list, Render2DItem, Render2DKind};
 use gdscene::scene_tree::SceneTree;
 use gdscene::GDScriptNodeInstance;
 use gdvariant::Variant;

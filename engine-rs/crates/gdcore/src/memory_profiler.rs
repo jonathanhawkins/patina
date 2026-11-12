@@ -351,7 +351,7 @@ impl MemoryProfiler {
         if !by_tag.is_empty() {
             out.push_str("\nBy category:\n");
             let mut tags: Vec<_> = by_tag.into_iter().collect();
-            tags.sort_by(|a, b| b.1.cmp(&a.1));
+            tags.sort_by_key(|t| std::cmp::Reverse(t.1));
             for (tag, bytes) in tags {
                 out.push_str(&format!("  {}: {} bytes\n", tag.as_str(), bytes));
             }

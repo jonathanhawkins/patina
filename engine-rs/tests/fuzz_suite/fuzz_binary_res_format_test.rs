@@ -64,10 +64,10 @@ fn build_pck_archive(files: &[(&str, &[u8])]) -> Vec<u8> {
     buf.extend_from_slice(&3u32.to_le_bytes()); // ver_minor
     buf.extend_from_slice(&0u32.to_le_bytes()); // ver_patch
     buf.extend_from_slice(&0u32.to_le_bytes()); // pack_flags (no PACK_REL_FILEBASE)
-    // file_base (u64): Godot 4's v2 header carries it right after pack_flags
-    // (file_access_pack.cpp `try_open_pack`). 0 with REL_FILEBASE clear means
-    // entry offsets are absolute. This builder used to omit it, so every
-    // archive it wrote was shifted 8 bytes and failed to parse.
+                                                // file_base (u64): Godot 4's v2 header carries it right after pack_flags
+                                                // (file_access_pack.cpp `try_open_pack`). 0 with REL_FILEBASE clear means
+                                                // entry offsets are absolute. This builder used to omit it, so every
+                                                // archive it wrote was shifted 8 bytes and failed to parse.
     buf.extend_from_slice(&0u64.to_le_bytes());
 
     // Reserved: 16 x u32 = 64 bytes
@@ -436,6 +436,9 @@ fn load_res_binary_rejects_a_header_only_resource_without_panicking() {
     let err = load_res_binary(&data, "res://lib.res")
         .expect_err("a truncated binary resource must not load")
         .to_string();
-    assert!(!err.contains("not yet supported"), "binary resources ARE supported: {err}");
+    assert!(
+        !err.contains("not yet supported"),
+        "binary resources ARE supported: {err}"
+    );
     eprintln!("truncated .res error: {err}");
 }

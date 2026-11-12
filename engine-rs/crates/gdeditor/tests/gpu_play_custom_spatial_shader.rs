@@ -66,7 +66,12 @@ fn play() -> (PreparedPlay3DFrame, HashMap<String, u64>) {
         .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
     std::thread::sleep(Duration::from_millis(100));
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{project}"}}"#));
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{project}"}}"#),
+    );
     let load = request(
         port,
         "POST",
@@ -111,7 +116,9 @@ fn play() -> (PreparedPlay3DFrame, HashMap<String, u64>) {
     out
 }
 
-fn inputs_mut(p: &mut PreparedPlay3DFrame) -> &mut gdeditor::viewport_3d_render::Editor3DRenderInputs {
+fn inputs_mut(
+    p: &mut PreparedPlay3DFrame,
+) -> &mut gdeditor::viewport_3d_render::Editor3DRenderInputs {
     match &mut p.scene {
         Play3DScene::Camera { inputs, .. } => inputs,
         _ => panic!("the fixture plays through its Camera3D"),
@@ -119,8 +126,16 @@ fn inputs_mut(p: &mut PreparedPlay3DFrame) -> &mut gdeditor::viewport_3d_render:
 }
 
 /// Applies `f` to the draw item of node `id`.
-fn edit(p: &mut PreparedPlay3DFrame, id: u64, f: impl FnOnce(&mut gdeditor::viewport_3d_render::Render3DItem)) {
-    f(inputs_mut(p).items.iter_mut().find(|i| i.node_id == id).expect("item"));
+fn edit(
+    p: &mut PreparedPlay3DFrame,
+    id: u64,
+    f: impl FnOnce(&mut gdeditor::viewport_3d_render::Render3DItem),
+) {
+    f(inputs_mut(p)
+        .items
+        .iter_mut()
+        .find(|i| i.node_id == id)
+        .expect("item"));
 }
 
 /// RGB at (x, y).
@@ -130,12 +145,22 @@ fn px(img: &gdrender2d::renderer::Bgra8Image, x: u32, y: u32) -> [u8; 3] {
 }
 
 /// Pixels that differ between two frames inside `[x0, x1) x [y0, y1)`.
-fn diff(a: &gdrender2d::renderer::Bgra8Image, b: &gdrender2d::renderer::Bgra8Image, x0: u32, x1: u32, y0: u32, y1: u32) -> usize {
+fn diff(
+    a: &gdrender2d::renderer::Bgra8Image,
+    b: &gdrender2d::renderer::Bgra8Image,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+) -> usize {
     let mut n = 0;
     for y in y0..y1 {
         for x in x0..x1 {
             let (p, q) = (px(a, x, y), px(b, x, y));
-            if p.iter().zip(q).any(|(c, d)| (*c as i32 - d as i32).abs() > 3) {
+            if p.iter()
+                .zip(q)
+                .any(|(c, d)| (*c as i32 - d as i32).abs() > 3)
+            {
                 n += 1;
             }
         }
@@ -162,7 +187,10 @@ fn the_draw_items_carry_the_shader_and_the_label_flags() {
             .unwrap_or_else(|| panic!("{name} is drawn"))
     };
     // The custom shader reaches the draw item AND transpiles for the GPU.
-    let mat = item("Stripes").shader_material.as_ref().expect("Stripes has its ShaderMaterial");
+    let mat = item("Stripes")
+        .shader_material
+        .as_ref()
+        .expect("Stripes has its ShaderMaterial");
     let module = gdrender3d::spatial_wgsl::module_for(mat)
         .expect("a spatial shader")
         .unwrap_or_else(|e| panic!("stripes.gdshader must transpile: {e}"));
@@ -170,18 +198,27 @@ fn the_draw_items_carry_the_shader_and_the_label_flags() {
     assert!(!module.writes_alpha);
     assert_eq!(module.uniforms.len(), 2, "stripe_color, stripes");
     assert!(module.uniforms[0].source_color);
-    assert!(!gdeditor::viewport_3d_render::has_gpu_unsupported_spatial_shader(
-        inputs_mut(&mut p)
-    ));
+    assert!(!gdeditor::viewport_3d_render::has_gpu_unsupported_spatial_shader(inputs_mut(&mut p)));
 
     let items = &inputs_mut(&mut p).items;
     let item = |name: &str| items.iter().find(|i| i.node_id == ids[name]).unwrap();
     let xray = item("XRay").material.as_ref().expect("label material");
-    assert!(xray.no_depth_test, "player.tscn-style `no_depth_test = true`");
-    assert_eq!(xray.cull_mode, CullMode::Disabled, "double_sided defaults to true");
+    assert!(
+        xray.no_depth_test,
+        "player.tscn-style `no_depth_test = true`"
+    );
+    assert_eq!(
+        xray.cull_mode,
+        CullMode::Disabled,
+        "double_sided defaults to true"
+    );
     let back = item("Backface").material.as_ref().expect("label material");
     assert!(!back.double_sided);
-    assert_eq!(back.cull_mode, CullMode::Back, "authored `double_sided = false`");
+    assert_eq!(
+        back.cull_mode,
+        CullMode::Back,
+        "authored `double_sided = false`"
+    );
 }
 
 #[test]
@@ -203,7 +240,11 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
     let bottom = row(140);
     let transitions = top
         .windows(2)
-        .filter(|w| w[0].iter().zip(w[1]).any(|(a, b)| (*a as i32 - b as i32).abs() > 40))
+        .filter(|w| {
+            w[0].iter()
+                .zip(w[1])
+                .any(|(a, b)| (*a as i32 - b as i32).abs() > 40)
+        })
         .count();
     assert!(
         (6..=8).contains(&transitions),
@@ -217,7 +258,10 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
         "lower half is darker: top {t:?} bottom {b:?}"
     );
     // Leftmost band is the blue base (Godot: (72,127,239)-ish).
-    assert!(t[2] > 180 && t[0] < 120, "leftmost band is the blue base, got {t:?}");
+    assert!(
+        t[2] > 180 && t[0] < 120,
+        "leftmost band is the blue base, got {t:?}"
+    );
 
     // -- whole-frame differential: drop only the ShaderMaterial ------------
     // Each control mutates ONE field of the same snapshot, renders, and puts
@@ -238,12 +282,22 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
 
     // -- no_depth_test: XRAY red pixels over the grey wall -----------------
     let red_in_wall = |f: &gdrender2d::renderer::Bgra8Image| {
-        (192..266).flat_map(|x| (86..156).map(move |y| (x, y))).filter(|&(x, y)| reddish(px(f, x, y))).count()
+        (192..266)
+            .flat_map(|x| (86..156).map(move |y| (x, y)))
+            .filter(|&(x, y)| reddish(px(f, x, y)))
+            .count()
     };
-    edit(&mut p, ids["XRay"], |i| i.material.as_mut().unwrap().no_depth_test = false);
+    edit(&mut p, ids["XRay"], |i| {
+        i.material.as_mut().unwrap().no_depth_test = false
+    });
     let tested_frame = p.render_world();
-    edit(&mut p, ids["XRay"], |i| i.material.as_mut().unwrap().no_depth_test = true);
-    assert!(red_in_wall(&frame) > 40, "XRAY draws over the wall, as in Godot");
+    edit(&mut p, ids["XRay"], |i| {
+        i.material.as_mut().unwrap().no_depth_test = true
+    });
+    assert!(
+        red_in_wall(&frame) > 40,
+        "XRAY draws over the wall, as in Godot"
+    );
     // pat-3ljz4: the text is the real TTF face at `font_size` = 64 px EM, one
     // texel per font pixel under `pixel_size`, so the glyphs land where
     // Godot's do. Godot (f00005.png, `r>150 g<90 b<90`): bbox x 198..229,
@@ -257,17 +311,29 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
             }
         }
     }
-    for (got, want, what) in [(x0, 198, "left"), (x1, 229, "right"), (y0, 116, "top"), (y1, 124, "bottom")] {
+    for (got, want, what) in [
+        (x0, 198, "left"),
+        (x1, 229, "right"),
+        (y0, 116, "top"),
+        (y1, 124, "bottom"),
+    ] {
         assert!(
             (got as i32 - want).abs() <= 2,
             "XRAY {what} edge at {got}, Godot {want} (bbox {x0}..{x1} x {y0}..{y1})"
         );
     }
-    assert_eq!(red_in_wall(&tested_frame), 0, "control: depth-tested, the wall hides it");
+    assert_eq!(
+        red_in_wall(&tested_frame),
+        0,
+        "control: depth-tested, the wall hides it"
+    );
 
     // -- double_sided = false: HIDDEN is culled from behind ----------------
     let green = |f: &gdrender2d::renderer::Bgra8Image| {
-        (0..W).flat_map(|x| (0..80).map(move |y| (x, y))).filter(|&(x, y)| greenish(px(f, x, y))).count()
+        (0..W)
+            .flat_map(|x| (0..80).map(move |y| (x, y)))
+            .filter(|&(x, y)| greenish(px(f, x, y)))
+            .count()
     };
     assert_eq!(green(&frame), 0, "Godot shows no HIDDEN label");
     edit(&mut p, ids["Backface"], |i| {
@@ -275,7 +341,10 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
         m.double_sided = true;
         m.cull_mode = CullMode::Disabled;
     });
-    assert!(green(&p.render_world()) > 40, "control: double-sided, it shows");
+    assert!(
+        green(&p.render_world()) > 40,
+        "control: double-sided, it shows"
+    );
 }
 
 #[test]
@@ -294,7 +363,9 @@ fn the_platformer_coin_counter_is_single_sided_and_ignores_depth() {
             .map(|l| format!("{l}\n"))
             .collect();
         let name = block.split('"').nth(1).unwrap();
-        tscn.push_str(&format!("\n[node name=\"{name}\" type=\"Label3D\" parent=\".\"]\n{body}"));
+        tscn.push_str(&format!(
+            "\n[node name=\"{name}\" type=\"Label3D\" parent=\".\"]\n{body}"
+        ));
     }
     gdobject::class_db::register_all_classes();
     let scene = gdscene::packed_scene::PackedScene::from_tscn(&tscn).expect("parses");
@@ -304,12 +375,19 @@ fn the_platformer_coin_counter_is_single_sided_and_ignores_depth() {
     let labels: Vec<_> = tree
         .all_nodes_in_tree_order()
         .into_iter()
-        .filter(|&n| tree.get_node(n).is_some_and(|x| x.class_name() == "Label3D"))
+        .filter(|&n| {
+            tree.get_node(n)
+                .is_some_and(|x| x.class_name() == "Label3D")
+        })
         .collect();
     assert_eq!(labels.len(), 5, "CoinCount + Parallax 1-4");
     for n in labels {
         let (_, m) = gdeditor::sprite3d_render::label3d_geometry(&tree, n).expect("has text");
-        assert_eq!(m.cull_mode, CullMode::Back, "player.tscn authors double_sided = false");
+        assert_eq!(
+            m.cull_mode,
+            CullMode::Back,
+            "player.tscn authors double_sided = false"
+        );
         assert!(m.no_depth_test);
     }
 }

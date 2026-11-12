@@ -387,6 +387,7 @@ impl EditorSettingsDialog {
 
     /// Applies pending changes and returns them.
     /// Returns (keybinding_changes, plugin_changes, theme_changed).
+    #[allow(clippy::type_complexity)]
     pub fn confirm(&mut self) -> (Vec<(String, String)>, Vec<(String, bool)>, bool) {
         let kb_changes: Vec<(String, String)> = self.pending_keybindings.drain().collect();
         for (action, keys) in &kb_changes {

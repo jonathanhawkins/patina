@@ -138,7 +138,11 @@ fn editor_theme_resource_editor_wired_test() {
     let path_str = theme_path.to_str().unwrap();
 
     // Open the Theme resource.
-    let load = http_post(port, "/api/theme/load", &format!(r#"{{"path":"{path_str}"}}"#));
+    let load = http_post(
+        port,
+        "/api/theme/load",
+        &format!(r#"{{"path":"{path_str}"}}"#),
+    );
     assert!(load.contains("200 OK"), "theme load failed:\n{load}");
     assert!(
         load.contains("Button"),
@@ -193,7 +197,11 @@ fn theme_item_remove_persists_to_tres() {
     let theme_path = dir.join("ui.theme.tres");
 
     let mut seed = ThemeResource::new();
-    seed.set_item("Button", "font_color", ThemeItem::color(Color::new(1.0, 0.0, 0.0, 1.0)));
+    seed.set_item(
+        "Button",
+        "font_color",
+        ThemeItem::color(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
     seed.set_item("Label", "font_size", ThemeItem::FontSize(20));
     std::fs::write(&theme_path, seed.to_tres()).unwrap();
 
@@ -202,7 +210,11 @@ fn theme_item_remove_persists_to_tres() {
     thread::sleep(Duration::from_millis(100));
 
     let path_str = theme_path.to_str().unwrap();
-    let load = http_post(port, "/api/theme/load", &format!(r#"{{"path":"{path_str}"}}"#));
+    let load = http_post(
+        port,
+        "/api/theme/load",
+        &format!(r#"{{"path":"{path_str}"}}"#),
+    );
     assert!(load.contains("200 OK"), "load failed:\n{load}");
 
     let remove = http_post(
@@ -242,7 +254,10 @@ fn theme_item_set_rejects_bad_request() {
         "/api/theme/item/set",
         r#"{"control_type":"Button","item_name":"font_color"}"#,
     );
-    assert!(bad.contains("400"), "missing data_type must 400, got:\n{bad}");
+    assert!(
+        bad.contains("400"),
+        "missing data_type must 400, got:\n{bad}"
+    );
 
     // data_type present but the color payload is malformed.
     let bad2 = http_post(

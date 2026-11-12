@@ -594,22 +594,24 @@ impl Default for EnvironmentPreview3D {
         // Godot's editor preview (`_load_default_preview_settings`) also turns
         // on filmic tonemapping and glow (in Forward+/Mobile), so the viewport
         // shows the same tonemapped, bloomed image the runtime would.
-        let mut env = Environment3D::default();
-        env.background_mode = BackgroundMode::Sky;
-        env.ambient_source = AmbientSource::Sky;
-        env.ambient_energy = 0.5;
-        env.tone_mapper = ToneMapper::Filmic;
-        env.glow_enabled = true;
-        env.sky = Some(Sky {
-            material: SkyMaterial::Procedural(preview_sky_material(
-                // Godot's preview pickers default to the stock sky top /
-                // ground colors (`_load_default_preview_settings`).
-                Color::new(0.385, 0.454, 0.55, 1.0),
-                Color::new(0.2, 0.169, 0.133, 1.0),
-            )),
-            process_mode: SkyProcessMode::Automatic,
-            radiance_size: 256,
-        });
+        let env = Environment3D {
+            background_mode: BackgroundMode::Sky,
+            ambient_source: AmbientSource::Sky,
+            ambient_energy: 0.5,
+            tone_mapper: ToneMapper::Filmic,
+            glow_enabled: true,
+            sky: Some(Sky {
+                material: SkyMaterial::Procedural(preview_sky_material(
+                    // Godot's preview pickers default to the stock sky top /
+                    // ground colors (`_load_default_preview_settings`).
+                    Color::new(0.385, 0.454, 0.55, 1.0),
+                    Color::new(0.2, 0.169, 0.133, 1.0),
+                )),
+                process_mode: SkyProcessMode::Automatic,
+                radiance_size: 256,
+            }),
+            ..Default::default()
+        };
 
         Self {
             environment: env,
@@ -769,14 +771,12 @@ impl EnvironmentPreview3D {
             };
 
             match node.class_name() {
-                "WorldEnvironment" => {
-                    if !found_env {
-                        let env = Environment3D::from_properties(
-                            node.properties().map(|(k, v)| (k.as_str(), v)),
-                        );
-                        self.load_from_environment(env);
-                        found_env = true;
-                    }
+                "WorldEnvironment" if !found_env => {
+                    let env = Environment3D::from_properties(
+                        node.properties().map(|(k, v)| (k.as_str(), v)),
+                    );
+                    self.load_from_environment(env);
+                    found_env = true;
                 }
                 "FogVolume" => {
                     let volume = fog_volume_from_node_properties(node.properties());
@@ -805,9 +805,10 @@ pub(crate) fn fog_volume_from_node_properties<'a>(
 
     let props: Vec<(&String, &Variant)> = props.collect();
 
-    let mut volume = FogVolume::default();
-    volume.material =
-        FogMaterial::from_properties(props.iter().copied().map(|(k, v)| (k.as_str(), v)));
+    let mut volume = FogVolume {
+        material: FogMaterial::from_properties(props.iter().copied().map(|(k, v)| (k.as_str(), v))),
+        ..Default::default()
+    };
 
     for (key, value) in props {
         match key.as_str() {

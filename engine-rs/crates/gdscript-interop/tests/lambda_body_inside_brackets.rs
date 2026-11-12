@@ -89,7 +89,11 @@ fn every_gd_file_in_every_game_parses() {
         }
     }
     files.sort();
-    assert!(files.len() >= 30, "expected the games/* scripts, found {}", files.len());
+    assert!(
+        files.len() >= 30,
+        "expected the games/* scripts, found {}",
+        files.len()
+    );
     let failures: Vec<String> = files
         .iter()
         .filter_map(|p| {
@@ -97,7 +101,11 @@ fn every_gd_file_in_every_game_parses() {
             parse(&src).err().map(|e| format!("{}: {e}", p.display()))
         })
         .collect();
-    assert!(failures.is_empty(), "scripts that fail to parse:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "scripts that fail to parse:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]

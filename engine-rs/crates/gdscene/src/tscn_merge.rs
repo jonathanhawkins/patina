@@ -150,7 +150,10 @@ fn header_attrs(header: &str) -> Vec<(String, String)> {
 }
 
 fn attr<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    attrs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 fn unquote(v: &str) -> String {
@@ -258,7 +261,10 @@ fn parse(text: &str) -> Vec<Section> {
     let mut sections: Vec<Section> = Vec::new();
     let mut i = 0;
     while i < text.len() {
-        let line_end = text[i..].find('\n').map(|n| i + n + 1).unwrap_or(text.len());
+        let line_end = text[i..]
+            .find('\n')
+            .map(|n| i + n + 1)
+            .unwrap_or(text.len());
         let line = &text[i..line_end];
         if is_header(line) {
             let (kind, key) = section_key(line);
@@ -292,7 +298,10 @@ fn parse(text: &str) -> Vec<Section> {
             }
             (Some(last), None) => {
                 let pending = std::mem::take(&mut last.trailing);
-                last.props.push(Prop { key: format!("?{}", line.trim()), text: format!("{pending}{line}") });
+                last.props.push(Prop {
+                    key: format!("?{}", line.trim()),
+                    text: format!("{pending}{line}"),
+                });
                 i = line_end;
             }
             (None, _) => {
@@ -343,7 +352,10 @@ fn merged_props(orig: &Section, base: &Section, now: &Section) -> Vec<Prop> {
         match (base.prop(&p.key), now.prop(&p.key)) {
             // Edited: the new value replaces the line.
             (b, Some(n)) if b.map(|b| b.text.trim()) != Some(n.text.trim()) => {
-                out.push(Prop { key: p.key.clone(), text: n.text.trim_start_matches('\n').to_string() });
+                out.push(Prop {
+                    key: p.key.clone(),
+                    text: n.text.trim_start_matches('\n').to_string(),
+                });
             }
             // Removed since the baseline.
             (Some(_), None) => {}
@@ -358,7 +370,10 @@ fn merged_props(orig: &Section, base: &Section, now: &Section) -> Vec<Prop> {
         }
         let edited = base.prop(&n.key).map(|b| b.text.trim()) != Some(n.text.trim());
         if edited {
-            out.push(Prop { key: n.key.clone(), text: n.text.trim_start_matches('\n').to_string() });
+            out.push(Prop {
+                key: n.key.clone(),
+                text: n.text.trim_start_matches('\n').to_string(),
+            });
         }
     }
     out
@@ -370,7 +385,10 @@ fn changed_props(base: &Section, now: &Section) -> Vec<Prop> {
     now.props
         .iter()
         .filter(|n| base.prop(&n.key).map(|b| b.text.trim()) != Some(n.text.trim()))
-        .map(|n| Prop { key: n.key.clone(), text: n.text.trim_start_matches('\n').to_string() })
+        .map(|n| Prop {
+            key: n.key.clone(),
+            text: n.text.trim_start_matches('\n').to_string(),
+        })
         .collect()
 }
 
@@ -439,9 +457,16 @@ pub fn merge_edits(original: &str, baseline: &str, current: &str) -> String {
                 if props.is_empty() && b.header == n.header {
                     continue;
                 }
-                Section { props, trailing: String::new(), ..(*n).clone() }
+                Section {
+                    props,
+                    trailing: String::new(),
+                    ..(*n).clone()
+                }
             }
-            None => Section { trailing: String::new(), ..(*n).clone() },
+            None => Section {
+                trailing: String::new(),
+                ..(*n).clone()
+            },
         };
         insert(&mut out, section, &now[..idx]);
         present.insert(n.key.clone());
@@ -461,10 +486,19 @@ pub fn merge_edits(original: &str, baseline: &str, current: &str) -> String {
         if present.contains(&key) {
             continue;
         }
-        let Some(n) = now_by.get(key.as_str()) else { continue };
+        let Some(n) = now_by.get(key.as_str()) else {
+            continue;
+        };
         let idx = now.iter().position(|s| s.key == key).unwrap_or(0);
         queue.extend(references(&n.text()));
-        insert(&mut out, Section { trailing: String::new(), ..(*n).clone() }, &now[..idx]);
+        insert(
+            &mut out,
+            Section {
+                trailing: String::new(),
+                ..(*n).clone()
+            },
+            &now[..idx],
+        );
         present.insert(key);
     }
 
@@ -480,7 +514,8 @@ pub fn merge_edits(original: &str, baseline: &str, current: &str) -> String {
 /// a node after the node that precedes it in `current`, a connection after the
 /// last connection or node, an `[editable]` at the end.
 fn insert(out: &mut Vec<Section>, mut section: Section, before_in_now: &[Section]) {
-    let last_of = |out: &Vec<Section>, kinds: &[Kind]| out.iter().rposition(|s| kinds.contains(&s.kind));
+    let last_of =
+        |out: &Vec<Section>, kinds: &[Kind]| out.iter().rposition(|s| kinds.contains(&s.kind));
     let at = match section.kind {
         Kind::Ext => last_of(out, &[Kind::Ext, Kind::Head]),
         Kind::Sub => last_of(out, &[Kind::Sub, Kind::Ext, Kind::Head]),
@@ -573,10 +608,19 @@ mod tests {
     fn a_foreign_node_edited_for_the_first_time_becomes_an_override_of_just_that_value() {
         let now = BASE.replace("foo = 1", "foo = 9");
         let out = merge_edits(ORIG, BASE, &now);
-        assert!(out.contains("[node name=\"Skeleton\" parent=\"G\"]\nfoo = 9\n"), "{out}");
+        assert!(
+            out.contains("[node name=\"Skeleton\" parent=\"G\"]\nfoo = 9\n"),
+            "{out}"
+        );
         // Inserted after its parent, so the file still declares parents first.
-        assert!(out.find("name=\"Skeleton\"").unwrap() > out.find("name=\"G\"").unwrap(), "{out}");
-        assert!(out.contains("parent_id_path=PackedInt32Array(2, 7)"), "{out}");
+        assert!(
+            out.find("name=\"Skeleton\"").unwrap() > out.find("name=\"G\"").unwrap(),
+            "{out}"
+        );
+        assert!(
+            out.contains("parent_id_path=PackedInt32Array(2, 7)"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -587,8 +631,14 @@ mod tests {
         );
         let out = merge_edits(ORIG, BASE, &now);
         assert!(!out.contains("Robot"), "{out}");
-        assert!(out.contains("[node name=\"New\" type=\"Node3D\" parent=\".\"]\nvisible = false\n"), "{out}");
-        assert!(out.find("name=\"New\"").unwrap() < out.find("[editable").unwrap(), "{out}");
+        assert!(
+            out.contains("[node name=\"New\" type=\"Node3D\" parent=\".\"]\nvisible = false\n"),
+            "{out}"
+        );
+        assert!(
+            out.find("name=\"New\"").unwrap() < out.find("[editable").unwrap(),
+            "{out}"
+        );
     }
 
     #[test]

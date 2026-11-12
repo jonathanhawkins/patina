@@ -34,7 +34,11 @@ fn scene_state_introspection_test() {
     assert_eq!(state.get_node_type(1), Some("Button"));
 
     // Connection introspection: source / signal / target / method.
-    assert_eq!(state.get_connection_count(), 1, "one connection in the scene");
+    assert_eq!(
+        state.get_connection_count(),
+        1,
+        "one connection in the scene"
+    );
     assert_eq!(state.get_connection_signal(0), Some("pressed"));
     assert_eq!(state.get_connection_source(0), Some("Button"));
     assert_eq!(state.get_connection_target(0), Some("."));

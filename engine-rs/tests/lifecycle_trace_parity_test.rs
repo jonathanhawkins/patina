@@ -369,7 +369,10 @@ func _ready():
         .collect();
 
     // GDScript `emit_signal` is supported, so the emission must be traced.
-    assert!(!signal_events.is_empty(), "my_signal emitted from _ready is traced");
+    assert!(
+        !signal_events.is_empty(),
+        "my_signal emitted from _ready is traced"
+    );
     {
         let ready_idx = events
             .iter()

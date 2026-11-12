@@ -294,6 +294,17 @@ pub fn draw_texture_rect_transformed_shaded(
     )
 }
 
+/// Whether a sampler name refers to the screen/back buffer (pat-s3rrv.202).
+///
+/// Accepts BOTH spellings Godot allows: the legacy built-in `SCREEN_TEXTURE`,
+/// and any uniform the shader declared with `: hint_screen_texture`. Handling
+/// only one of the two is the recurring shape of this bug — the feature works
+/// for whichever spelling the test happened to use and silently does the wrong
+/// thing for the other.
+fn is_screen_sampler(name: &str, screen_uniforms: &[String]) -> bool {
+    matches!(name, "SCREEN_TEXTURE" | "screen_texture") || screen_uniforms.iter().any(|u| u == name)
+}
+
 /// As [`draw_texture_rect_transformed_shaded`], but able to answer
 /// `texture(SCREEN_TEXTURE, …)` from a back-buffer snapshot (pat-s3rrv.183).
 ///
@@ -308,17 +319,6 @@ pub fn draw_texture_rect_transformed_shaded(
 /// Additive rather than a new parameter on the existing function: that one has
 /// call sites in another crate's tests, and this keeps their signature intact.
 #[allow(clippy::too_many_arguments)]
-/// Whether a sampler name refers to the screen/back buffer (pat-s3rrv.202).
-///
-/// Accepts BOTH spellings Godot allows: the legacy built-in `SCREEN_TEXTURE`,
-/// and any uniform the shader declared with `: hint_screen_texture`. Handling
-/// only one of the two is the recurring shape of this bug — the feature works
-/// for whichever spelling the test happened to use and silently does the wrong
-/// thing for the other.
-fn is_screen_sampler(name: &str, screen_uniforms: &[String]) -> bool {
-    matches!(name, "SCREEN_TEXTURE" | "screen_texture") || screen_uniforms.iter().any(|u| u == name)
-}
-
 pub fn draw_texture_rect_transformed_shaded_with_screen(
     fb: &mut FrameBuffer,
     texture: &Texture2D,
@@ -758,6 +758,7 @@ fn axis_spans(dst_len: f32, src_len: f32, mode: NinePatchAxis) -> Vec<(f32, f32,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_nine_patch(
     fb: &mut FrameBuffer,
     texture: &Texture2D,
@@ -830,6 +831,7 @@ pub fn crop_to_region(texture: &Texture2D, region: Rect2) -> Option<Texture2D> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_nine_patch_axes(
     fb: &mut FrameBuffer,
     texture: &Texture2D,
@@ -874,15 +876,15 @@ pub fn draw_nine_patch_axes(
     let dst_y2 = (dst_y3 - mb).max(dst_y1);
 
     // Helper closure: draw a texture sub-region into a destination rect.
-    let mut draw_patch = |fb: &mut FrameBuffer,
-                          dx: f32,
-                          dy: f32,
-                          dw: f32,
-                          dh: f32,
-                          sx: f32,
-                          sy: f32,
-                          sw: f32,
-                          sh: f32| {
+    let draw_patch = |fb: &mut FrameBuffer,
+                      dx: f32,
+                      dy: f32,
+                      dw: f32,
+                      dh: f32,
+                      sx: f32,
+                      sy: f32,
+                      sw: f32,
+                      sh: f32| {
         if dw <= 0.0 || dh <= 0.0 || sw <= 0.0 || sh <= 0.0 {
             return;
         }
@@ -895,17 +897,17 @@ pub fn draw_nine_patch_axes(
     // blits each, so `Tile`/`TileFit` repeat the source instead of scaling it
     // (pat-0q2kx.148). `Stretch` on both axes yields exactly one span and is
     // therefore identical to `draw_patch`.
-    let mut draw_patch_tiled = |fb: &mut FrameBuffer,
-                                dx: f32,
-                                dy: f32,
-                                dw: f32,
-                                dh: f32,
-                                sx: f32,
-                                sy: f32,
-                                sw: f32,
-                                sh: f32,
-                                mode_h: NinePatchAxis,
-                                mode_v: NinePatchAxis| {
+    let draw_patch_tiled = |fb: &mut FrameBuffer,
+                            dx: f32,
+                            dy: f32,
+                            dw: f32,
+                            dh: f32,
+                            sx: f32,
+                            sy: f32,
+                            sw: f32,
+                            sh: f32,
+                            mode_h: NinePatchAxis,
+                            mode_v: NinePatchAxis| {
         if dw <= 0.0 || dh <= 0.0 || sw <= 0.0 || sh <= 0.0 {
             return;
         }

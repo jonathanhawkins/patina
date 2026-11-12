@@ -160,7 +160,11 @@ func _process(delta):
             "get_node_or_null on an absent path must be null (this one already \
              worked, and is the control for the arms that did not)",
         ),
-        ("inside", true, "is_inside_tree() must be true for a node in the tree"),
+        (
+            "inside",
+            true,
+            "is_inside_tree() must be true for a node in the tree",
+        ),
         (
             "got_child",
             true,

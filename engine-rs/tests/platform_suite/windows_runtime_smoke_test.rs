@@ -66,12 +66,22 @@ fn windows_runtime_smoke_window_input_audio() {
     // its window; verify the layer honors that request.
     layer.set_dpi_awareness(DpiAwarenessMode::recommended());
     assert_eq!(layer.dpi_awareness(), DpiAwarenessMode::PerMonitorV2);
-    assert!(layer.is_per_monitor_dpi(), "modern app is per-monitor DPI aware");
+    assert!(
+        layer.is_per_monitor_dpi(),
+        "modern app is per-monitor DPI aware"
+    );
 
     assert_eq!(layer.app_name(), "PatinaWindowsSmoke");
-    assert_eq!(layer.window_size(), (1280, 720), "window created at requested size");
+    assert_eq!(
+        layer.window_size(),
+        (1280, 720),
+        "window created at requested size"
+    );
     assert!(layer.is_foreground(), "new window starts in the foreground");
-    assert!(!layer.should_quit(), "runtime must not want to quit before it starts");
+    assert!(
+        !layer.should_quit(),
+        "runtime must not want to quit before it starts"
+    );
 
     // Windows respects the OS light/dark theme; the default is Light and the
     // runtime must be able to observe a switch (affects title-bar rendering).
@@ -117,7 +127,10 @@ fn windows_runtime_smoke_window_input_audio() {
     }
     layer.end_frame();
 
-    assert!(input.is_key_pressed(Key::Space), "Space registered as pressed");
+    assert!(
+        input.is_key_pressed(Key::Space),
+        "Space registered as pressed"
+    );
     assert!(
         input.is_mouse_button_pressed(MouseButton::Left),
         "left mouse button registered as pressed"
@@ -140,14 +153,20 @@ fn windows_runtime_smoke_window_input_audio() {
     // is wired without depending on a device being present in CI.
     let mut output = NullAudioOutput::new(sample_rate, 2);
     let written = output.write_samples(&decoded);
-    assert_eq!(written, frames as usize, "output accepted every decoded frame");
+    assert_eq!(
+        written, frames as usize,
+        "output accepted every decoded frame"
+    );
     assert_eq!(output.frames_written, frames as usize);
 
     // ---- Phase 4: Clean shutdown -------------------------------------------
     // The user closes the window; the runtime must observe the quit request.
     layer.backend_mut().push_event(WindowEvent::CloseRequested);
     let _ = layer.poll_window_events();
-    assert!(layer.should_quit(), "CloseRequested drives the runtime to quit");
+    assert!(
+        layer.should_quit(),
+        "CloseRequested drives the runtime to quit"
+    );
 }
 
 // ===========================================================================
@@ -157,9 +176,14 @@ fn windows_runtime_smoke_window_input_audio() {
 #[test]
 fn windows_msvc_target_is_registered() {
     let targets = targets_for_platform(Platform::Windows);
-    assert!(!targets.is_empty(), "Windows must have registered desktop targets");
     assert!(
-        targets.iter().any(|t| t.rust_triple == "x86_64-pc-windows-msvc"),
+        !targets.is_empty(),
+        "Windows must have registered desktop targets"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.rust_triple == "x86_64-pc-windows-msvc"),
         "the x86_64 MSVC triple the smoke targets must be registered"
     );
 }
@@ -174,9 +198,10 @@ fn windows_runtime_handles_resize_midloop() {
     let mut layer = WindowsPlatformLayer::new("PatinaWindowsResize", &config);
     assert_eq!(layer.window_size(), (800, 600));
 
-    layer
-        .backend_mut()
-        .push_event(WindowEvent::Resized { width: 1920, height: 1080 });
+    layer.backend_mut().push_event(WindowEvent::Resized {
+        width: 1920,
+        height: 1080,
+    });
     let _ = layer.poll_window_events();
     assert_eq!(
         layer.window_size(),

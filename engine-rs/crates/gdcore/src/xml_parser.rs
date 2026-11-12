@@ -168,6 +168,7 @@ impl XmlParser {
             .count()
     }
 
+    /// Value of the current node's attribute called `name`, if present.
     pub fn named_attribute_value(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()

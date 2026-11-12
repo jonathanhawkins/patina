@@ -108,7 +108,10 @@ fn editor_play_pause_resume() {
     let play = http_post(port, "/api/runtime/play", "{}");
     assert!(play.contains("200 OK"), "play ok: {play}");
     let after_play = status(port);
-    assert_eq!(after_play["running"], true, "scene runs after play: {after_play}");
+    assert_eq!(
+        after_play["running"], true,
+        "scene runs after play: {after_play}"
+    );
     assert_eq!(
         after_play["paused"], false,
         "a freshly-launched scene is not paused: {after_play}"
@@ -119,7 +122,10 @@ fn editor_play_pause_resume() {
     assert!(pause.contains("200 OK"), "pause ok: {pause}");
     let pause_body: serde_json::Value =
         serde_json::from_str(extract_body(&pause)).unwrap_or_else(|e| panic!("pause json: {e}"));
-    assert_eq!(pause_body["paused"], true, "pause reports paused: {pause_body}");
+    assert_eq!(
+        pause_body["paused"], true,
+        "pause reports paused: {pause_body}"
+    );
     let paused = status(port);
     assert_eq!(paused["paused"], true, "status reports paused: {paused}");
     assert_eq!(
@@ -137,6 +143,12 @@ fn editor_play_pause_resume() {
         "second pause resumes (paused=false): {resume_body}"
     );
     let resumed = status(port);
-    assert_eq!(resumed["paused"], false, "status reports resumed: {resumed}");
-    assert_eq!(resumed["running"], true, "scene still running after resume: {resumed}");
+    assert_eq!(
+        resumed["paused"], false,
+        "status reports resumed: {resumed}"
+    );
+    assert_eq!(
+        resumed["running"], true,
+        "scene still running after resume: {resumed}"
+    );
 }

@@ -90,7 +90,8 @@ fn make_server() -> (EditorServerHandle, u16) {
         .unwrap();
     tree.add_child(root, Node::new("OverrideSecond", "ShaderGlobalsOverride"))
         .unwrap();
-    tree.add_child(root, Node::new("NoTexture", "Sprite2D")).unwrap();
+    tree.add_child(root, Node::new("NoTexture", "Sprite2D"))
+        .unwrap();
     let state = EditorState::new(tree);
     let handle = EditorServerHandle::start(port, state);
     thread::sleep(Duration::from_millis(100));
@@ -201,7 +202,9 @@ fn scene_tree_payload_carries_dock_computed_class_warnings() {
 
     let warnings = warnings_of(sprite);
     assert!(
-        warnings.iter().any(|w| w.to_lowercase().contains("texture")),
+        warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("texture")),
         "a Sprite2D with no texture must carry dock::compute_node_warnings' \
          message in the scene payload, got {warnings:?}"
     );

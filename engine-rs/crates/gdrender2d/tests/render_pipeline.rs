@@ -854,7 +854,10 @@ fn unfilled_rect_draws_outline_only() {
     assert_eq!(fb.get_pixel(4, 2), Color::WHITE, "top edge drawn");
     assert_eq!(fb.get_pixel(2, 4), Color::WHITE, "left edge drawn");
     assert_eq!(fb.get_pixel(4, 4), Color::BLACK, "interior untouched");
-    assert!(count_pixels(&fb, Color::WHITE) >= 16, "outline perimeter drawn");
+    assert!(
+        count_pixels(&fb, Color::WHITE) >= 16,
+        "outline perimeter drawn"
+    );
 }
 
 #[test]

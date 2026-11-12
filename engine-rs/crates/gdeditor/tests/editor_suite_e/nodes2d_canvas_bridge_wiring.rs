@@ -37,9 +37,16 @@ fn nodes2d_canvas_bridge_wiring() {
     let root = tree.root_id();
 
     // Red ColorRect at world (40, 40), size 20x20 -> covers (40,40)..(60,60).
-    let rect = tree.add_child(root, Node::new("Rect", "ColorRect")).unwrap();
+    let rect = tree
+        .add_child(root, Node::new("Rect", "ColorRect"))
+        .unwrap();
     node2d::set_position(&mut tree, rect, Vector2::new(40.0, 40.0));
-    set_prop(&mut tree, rect, "size", Variant::Vector2(Vector2::new(20.0, 20.0)));
+    set_prop(
+        &mut tree,
+        rect,
+        "size",
+        Variant::Vector2(Vector2::new(20.0, 20.0)),
+    );
     set_prop(
         &mut tree,
         rect,
@@ -53,10 +60,13 @@ fn nodes2d_canvas_bridge_wiring() {
         &mut tree,
         line,
         "points",
-        Variant::Array(vec![
-            Variant::Vector2(Vector2::new(10.0, 10.0)),
-            Variant::Vector2(Vector2::new(10.0, 90.0)),
-        ].into()),
+        Variant::Array(
+            vec![
+                Variant::Vector2(Vector2::new(10.0, 10.0)),
+                Variant::Vector2(Vector2::new(10.0, 90.0)),
+            ]
+            .into(),
+        ),
     );
     set_prop(&mut tree, line, "width", Variant::Float(4.0));
     set_prop(
@@ -101,9 +111,16 @@ fn nodes2d_canvas_bridge_z_order() {
     let root = tree.root_id();
 
     // Blue rect underneath (z=0), red rect on top (z=10), both (30,30)+40x40.
-    let blue = tree.add_child(root, Node::new("Blue", "ColorRect")).unwrap();
+    let blue = tree
+        .add_child(root, Node::new("Blue", "ColorRect"))
+        .unwrap();
     node2d::set_position(&mut tree, blue, Vector2::new(30.0, 30.0));
-    set_prop(&mut tree, blue, "size", Variant::Vector2(Vector2::new(40.0, 40.0)));
+    set_prop(
+        &mut tree,
+        blue,
+        "size",
+        Variant::Vector2(Vector2::new(40.0, 40.0)),
+    );
     set_prop(
         &mut tree,
         blue,
@@ -114,7 +131,12 @@ fn nodes2d_canvas_bridge_z_order() {
 
     let red = tree.add_child(root, Node::new("Red", "ColorRect")).unwrap();
     node2d::set_position(&mut tree, red, Vector2::new(30.0, 30.0));
-    set_prop(&mut tree, red, "size", Variant::Vector2(Vector2::new(40.0, 40.0)));
+    set_prop(
+        &mut tree,
+        red,
+        "size",
+        Variant::Vector2(Vector2::new(40.0, 40.0)),
+    );
     set_prop(
         &mut tree,
         red,

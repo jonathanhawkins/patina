@@ -41,7 +41,10 @@ fn range_slider_spinbox_value_changed() {
     let (min, max) = (0.0_f64, 10.0_f64);
     let dragged_to_55_percent = min + 0.55 * (max - min); // 5.5
     let changed = set_range_value(&mut tree, slider, dragged_to_55_percent);
-    assert!(changed, "0 -> 6 must report a change (value_changed emitted)");
+    assert!(
+        changed,
+        "0 -> 6 must report a change (value_changed emitted)"
+    );
     assert_eq!(
         get_range_value(&tree, slider),
         6.0,

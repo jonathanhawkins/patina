@@ -394,7 +394,7 @@ impl FogVolume {
                 }
                 // Cone narrows from bottom (y = -half.y) to top (y = half.y)
                 let t = (local_point.y + half.y) / self.size.y; // 0 at bottom, 1 at top
-                if t < 0.0 || t > 1.0 {
+                if !(0.0..=1.0).contains(&t) {
                     return false;
                 }
                 let cone_radius = half.x * (1.0 - t);

@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,7 +54,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -68,8 +75,14 @@ fn output_panel_collapse_and_categories() {
 
     // Trigger an editor log line (adding to a group logs "Added group ...").
     let scene = body_json(&http_get(port, "/api/scene"));
-    let world_id = scene["nodes"]["children"][0]["id"].as_u64().expect("World id");
-    let add = body_json(&http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#)));
+    let world_id = scene["nodes"]["children"][0]["id"]
+        .as_u64()
+        .expect("World id");
+    let add = body_json(&http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#),
+    ));
     assert_eq!(add["ok"], serde_json::json!(true));
 
     // /api/logs tags each message with a category; the editor action is "editor".
@@ -77,26 +90,32 @@ fn output_panel_collapse_and_categories() {
     let arr = logs.as_array().expect("logs is an array");
     assert!(!arr.is_empty(), "there is at least one log entry");
     for e in arr {
-        let cat = e["category"].as_str().expect("each log entry has a category");
+        let cat = e["category"]
+            .as_str()
+            .expect("each log entry has a category");
         assert!(
             matches!(cat, "std" | "error" | "warning" | "editor"),
             "category is a known type, got {cat:?}"
         );
     }
     assert!(
-        arr.iter().any(|e| e["category"] == serde_json::json!("editor")),
+        arr.iter()
+            .any(|e| e["category"] == serde_json::json!("editor")),
         "the editor action produced an 'editor'-category log"
     );
 
     // The served output panel wires collapse-merging + the occurrence badge.
     let html = http_get(port, "/editor");
     for needle in [
-        "collapseLogs",                  // the collapse state
-        "last.e.message === e.message",  // consecutive-duplicate merge
-        "log-count",                     // the occurrence-count badge
-        "e.category || logCat",          // category-driven type
+        "collapseLogs",                 // the collapse state
+        "last.e.message === e.message", // consecutive-duplicate merge
+        "log-count",                    // the occurrence-count badge
+        "e.category || logCat",         // category-driven type
     ] {
-        assert!(html.contains(needle), "output panel missing collapse/category wiring `{needle}`");
+        assert!(
+            html.contains(needle),
+            "output panel missing collapse/category wiring `{needle}`"
+        );
     }
 
     handle.stop();

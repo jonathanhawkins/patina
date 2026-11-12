@@ -77,7 +77,12 @@ fn physical_bone_carries_its_joint_surface() {
     register_3d_classes();
     assert_props(
         "PhysicalBone3D",
-        &["joint_type", "joint_offset", "joint_rotation", "body_offset"],
+        &[
+            "joint_type",
+            "joint_offset",
+            "joint_rotation",
+            "body_offset",
+        ],
     );
     assert!(class_has_enum("PhysicalBone3D", "JointType"));
     for (name, value) in [
@@ -135,8 +140,14 @@ fn physical_bone_carries_a_full_rigid_body_surface() {
         Variant::Float(1.0),
         "a gravity_scale of 0 would leave the ragdoll hanging in the air"
     );
-    assert_eq!(default_of("PhysicalBone3D", "linear_damp"), Variant::Float(0.0));
-    assert_eq!(default_of("PhysicalBone3D", "can_sleep"), Variant::Bool(true));
+    assert_eq!(
+        default_of("PhysicalBone3D", "linear_damp"),
+        Variant::Float(0.0)
+    );
+    assert_eq!(
+        default_of("PhysicalBone3D", "can_sleep"),
+        Variant::Bool(true)
+    );
 }
 
 /// ⚠️ `PhysicalBone3D` is a `PhysicsBody3D`, **not** a `RigidBody3D` — despite
@@ -166,8 +177,14 @@ fn damp_mode_enum_matches_godot() {
     );
     // Both damp modes default to COMBINE (0) — REPLACE would silently override
     // the space's damping.
-    assert_eq!(default_of("PhysicalBone3D", "linear_damp_mode"), Variant::Int(0));
-    assert_eq!(default_of("PhysicalBone3D", "angular_damp_mode"), Variant::Int(0));
+    assert_eq!(
+        default_of("PhysicalBone3D", "linear_damp_mode"),
+        Variant::Int(0)
+    );
+    assert_eq!(
+        default_of("PhysicalBone3D", "angular_damp_mode"),
+        Variant::Int(0)
+    );
 }
 
 /// Godot gives the simulator no properties of its own — it is driven purely by

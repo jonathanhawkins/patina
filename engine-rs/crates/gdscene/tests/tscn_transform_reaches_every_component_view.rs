@@ -28,10 +28,16 @@ fn an_authored_transform_reaches_position_and_scale() {
     let mesh = tree.find_child(main, "Mesh", true).expect("Mesh");
 
     let p = gdscene::node3d::get_position(&tree, mesh);
-    assert!((p - Vector3::new(5.0, 6.0, 7.0)).length() < 1e-4, "position view: {p:?}");
+    assert!(
+        (p - Vector3::new(5.0, 6.0, 7.0)).length() < 1e-4,
+        "position view: {p:?}"
+    );
     match tree.get_node(mesh).unwrap().get_property("scale") {
         gdvariant::Variant::Vector3(s) => {
-            assert!((s - Vector3::new(2.0, 2.0, 2.0)).length() < 1e-4, "scale view: {s:?}")
+            assert!(
+                (s - Vector3::new(2.0, 2.0, 2.0)).length() < 1e-4,
+                "scale view: {s:?}"
+            )
         }
         other => panic!("scale must be a Vector3, got {other:?}"),
     }

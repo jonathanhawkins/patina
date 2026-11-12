@@ -219,7 +219,7 @@ pub fn woff_to_sfnt(data: &[u8]) -> EngineResult<Vec<u8>> {
     for body in bodies {
         let pad = align4(body.len()) - body.len();
         out.extend_from_slice(&body);
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
     }
 
     Ok(out)

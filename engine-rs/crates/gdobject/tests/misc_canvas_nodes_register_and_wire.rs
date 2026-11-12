@@ -85,7 +85,10 @@ fn each_node_carries_its_own_schema() {
     assert_props("Marker2D", &["gizmo_extents"]);
     assert_props("MeshInstance2D", &["mesh", "texture"]);
     assert_props("MultiMeshInstance2D", &["multimesh", "texture"]);
-    assert_props("CanvasGroup", &["fit_margin", "clear_margin", "use_mipmaps"]);
+    assert_props(
+        "CanvasGroup",
+        &["fit_margin", "clear_margin", "use_mipmaps"],
+    );
     assert_props("BackBufferCopy", &["copy_mode", "rect"]);
     assert_props(
         "TouchScreenButton",
@@ -113,7 +116,9 @@ fn mesh_and_multimesh_instances_hold_different_resources() {
         !props("MeshInstance2D").iter().any(|p| p == "multimesh"),
         "MeshInstance2D holds a single mesh"
     );
-    assert!(props("MultiMeshInstance2D").iter().any(|p| p == "multimesh"));
+    assert!(props("MultiMeshInstance2D")
+        .iter()
+        .any(|p| p == "multimesh"));
     assert!(
         !props("MultiMeshInstance2D").iter().any(|p| p == "mesh"),
         "MultiMeshInstance2D holds a MultiMesh instance buffer, not a mesh"
@@ -174,11 +179,23 @@ fn touch_screen_button_declares_its_input_surface() {
     );
     // Visible always by default — a touchscreen-only default would make the
     // button vanish on desktop and look like a broken node.
-    assert_eq!(default_of("TouchScreenButton", "visibility_mode"), Variant::Int(0));
+    assert_eq!(
+        default_of("TouchScreenButton", "visibility_mode"),
+        Variant::Int(0)
+    );
     // The shape is centred and drawn by default (Godot's behaviour).
-    assert_eq!(default_of("TouchScreenButton", "shape_centered"), Variant::Bool(true));
-    assert_eq!(default_of("TouchScreenButton", "shape_visible"), Variant::Bool(true));
-    assert_eq!(default_of("TouchScreenButton", "passby_press"), Variant::Bool(false));
+    assert_eq!(
+        default_of("TouchScreenButton", "shape_centered"),
+        Variant::Bool(true)
+    );
+    assert_eq!(
+        default_of("TouchScreenButton", "shape_visible"),
+        Variant::Bool(true)
+    );
+    assert_eq!(
+        default_of("TouchScreenButton", "passby_press"),
+        Variant::Bool(false)
+    );
 }
 
 /// Godot gives `AudioListener2D` no properties at all — it is driven purely by

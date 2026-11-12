@@ -23,7 +23,9 @@
 //! lit/shadow 115.7/39.3; Patina before 91.7/63.0, after 114.6/38.0.
 
 use gdcore::math::{Color, Vector3};
-use gdrender3d::shader::{pbr_shade, FragmentInput, LightUniform, MaterialTextures, ShaderUniforms};
+use gdrender3d::shader::{
+    pbr_shade, FragmentInput, LightUniform, MaterialTextures, ShaderUniforms,
+};
 use gdserver3d::reflection_probe::{
     CubeFace, ProbeReflection, ReflectionCubemap, ReflectionProbeAmbientMode,
 };
@@ -94,7 +96,14 @@ fn above(pos: Vector3) -> Vector3 {
 fn environment_probe_replaces_the_flat_ambient_with_its_capture() {
     let cube = ReflectionCubemap::new(8, Color::new(0.1, 0.1, 0.1, 1.0));
     let p = Vector3::ZERO;
-    let got = shade(p, 0.0, 1.0, above(p), Some(probe(cube, ReflectionProbeAmbientMode::Environment, 0.0)), vec![]);
+    let got = shade(
+        p,
+        0.0,
+        1.0,
+        above(p),
+        Some(probe(cube, ReflectionProbeAmbientMode::Environment, 0.0)),
+        vec![],
+    );
     assert!(
         got.g > 0.09 && got.g < 0.13,
         "inside an Environment-mode probe the ambient must be the capture's \
@@ -110,7 +119,14 @@ fn environment_probe_replaces_the_flat_ambient_with_its_capture() {
 fn disabled_probe_keeps_the_environment_ambient() {
     let cube = ReflectionCubemap::new(8, Color::new(0.1, 0.1, 0.1, 1.0));
     let p = Vector3::ZERO;
-    let got = shade(p, 0.0, 1.0, above(p), Some(probe(cube, ReflectionProbeAmbientMode::Disabled, 0.0)), vec![]);
+    let got = shade(
+        p,
+        0.0,
+        1.0,
+        above(p),
+        Some(probe(cube, ReflectionProbeAmbientMode::Disabled, 0.0)),
+        vec![],
+    );
     assert!(
         got.g > FLAT_AMBIENT - 0.01 && got.g < FLAT_AMBIENT + 0.03,
         "a Disabled probe must leave the flat ambient alone; got {got:?}"
@@ -122,7 +138,14 @@ fn disabled_probe_keeps_the_environment_ambient() {
 fn constant_color_probe_replaces_the_ambient_with_its_colour() {
     let cube = ReflectionCubemap::new(8, Color::new(0.1, 0.1, 0.1, 1.0));
     let p = Vector3::ZERO;
-    let got = shade(p, 0.0, 1.0, above(p), Some(probe(cube, ReflectionProbeAmbientMode::ConstantColor, 0.0)), vec![]);
+    let got = shade(
+        p,
+        0.0,
+        1.0,
+        above(p),
+        Some(probe(cube, ReflectionProbeAmbientMode::ConstantColor, 0.0)),
+        vec![],
+    );
     assert!(
         got.r < 0.05 && got.b > 0.45 && got.b < 0.56,
         "ConstantColor must REPLACE the ambient with (0, 0, 0.5); got {got:?}"
@@ -133,14 +156,26 @@ fn constant_color_probe_replaces_the_ambient_with_its_colour() {
 /// (blend 0) the flat ambient is back, in the middle of the band it is mixed.
 #[test]
 fn probe_ambient_fades_back_to_the_environment_at_the_box_edge() {
-    let mk = || probe(ReflectionCubemap::new(8, Color::new(0.1, 0.1, 0.1, 1.0)), ReflectionProbeAmbientMode::Environment, 2.0);
+    let mk = || {
+        probe(
+            ReflectionCubemap::new(8, Color::new(0.1, 0.1, 0.1, 1.0)),
+            ReflectionProbeAmbientMode::Environment,
+            2.0,
+        )
+    };
     let at = |x: f32| {
         let p = Vector3::new(x, 0.0, 0.0);
         shade(p, 0.0, 1.0, above(p), Some(mk()), vec![]).g
     };
     let (inside, mid, edge) = (at(0.0), at(9.0), at(10.0));
-    assert!(inside < 0.13, "full-weight interior takes the capture: {inside}");
-    assert!(edge > FLAT_AMBIENT - 0.01, "at the face the env ambient is back: {edge}");
+    assert!(
+        inside < 0.13,
+        "full-weight interior takes the capture: {inside}"
+    );
+    assert!(
+        edge > FLAT_AMBIENT - 0.01,
+        "at the face the env ambient is back: {edge}"
+    );
     assert!(mid > inside && mid < edge, "the band mixes the two: {mid}");
 }
 
@@ -148,7 +183,10 @@ fn probe_ambient_fades_back_to_the_environment_at_the_box_edge() {
 fn half_lit_cube() -> ReflectionCubemap {
     let res = 16;
     let mut cube = ReflectionCubemap::new(res, Color::new(0.0, 0.0, 0.0, 1.0));
-    cube.set_face(CubeFace::PosX, vec![Color::new(1.0, 1.0, 1.0, 1.0); (res * res) as usize]);
+    cube.set_face(
+        CubeFace::PosX,
+        vec![Color::new(1.0, 1.0, 1.0, 1.0); (res * res) as usize],
+    );
     cube
 }
 
@@ -170,8 +208,30 @@ fn a_rough_metal_reflection_is_roughness_filtered() {
     let r = Vector3::new(0.85, 1.0, 0.0).normalized();
     let v = Vector3::new(-r.x, r.y, -r.z);
     let camera = p + v * 3.0;
-    let dark_side = shade(p, 1.0, 0.4, camera, Some(probe(half_lit_cube(), ReflectionProbeAmbientMode::Disabled, 0.0)), vec![]);
-    let mirror = shade(p, 1.0, 0.0, camera, Some(probe(half_lit_cube(), ReflectionProbeAmbientMode::Disabled, 0.0)), vec![]);
+    let dark_side = shade(
+        p,
+        1.0,
+        0.4,
+        camera,
+        Some(probe(
+            half_lit_cube(),
+            ReflectionProbeAmbientMode::Disabled,
+            0.0,
+        )),
+        vec![],
+    );
+    let mirror = shade(
+        p,
+        1.0,
+        0.0,
+        camera,
+        Some(probe(
+            half_lit_cube(),
+            ReflectionProbeAmbientMode::Disabled,
+            0.0,
+        )),
+        vec![],
+    );
     assert!(
         mirror.r < 0.05,
         "control: a perfect mirror (roughness 0) aimed onto the black face \
@@ -191,7 +251,11 @@ fn a_rough_metal_reflection_is_roughness_filtered() {
 fn roughness_levels_preserve_a_uniform_capture() {
     let cube = ReflectionCubemap::new(16, Color::new(0.3, 0.3, 0.3, 1.0));
     for lod in [0.0, 1.5, 3.0, 4.4, 7.0] {
-        for d in [Vector3::new(1.0, 0.2, 0.1), Vector3::new(-0.3, -1.0, 0.4), Vector3::new(0.1, 0.1, 1.0)] {
+        for d in [
+            Vector3::new(1.0, 0.2, 0.1),
+            Vector3::new(-0.3, -1.0, 0.4),
+            Vector3::new(0.1, 0.1, 1.0),
+        ] {
             let c = cube.sample_lod(d, lod);
             assert!((c.r - 0.3).abs() < 1e-3, "lod {lod} dir {d:?}: {c:?}");
         }
@@ -204,7 +268,8 @@ fn roughness_levels_preserve_a_uniform_capture() {
 #[test]
 fn a_directional_light_of_energy_one_delivers_albedo_times_n_dot_l() {
     let p = Vector3::ZERO;
-    let light = LightUniform::directional(Vector3::new(0.0, 1.0, 0.0), Color::new(1.0, 1.0, 1.0, 1.0));
+    let light =
+        LightUniform::directional(Vector3::new(0.0, 1.0, 0.0), Color::new(1.0, 1.0, 1.0, 1.0));
     // No probe, and zero ambient isolated by subtracting the unlit render.
     let lit = shade(p, 0.0, 1.0, above(p), None, vec![light]);
     let unlit = shade(p, 0.0, 1.0, above(p), None, vec![]);

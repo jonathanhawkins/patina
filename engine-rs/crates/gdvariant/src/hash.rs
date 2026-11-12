@@ -24,7 +24,7 @@
 use crate::variant::{CallableRef, Variant};
 
 /// `HASH_MURMUR3_SEED` (`hashfuncs.h:108`).
-pub const HASH_MURMUR3_SEED: u32 = 0x7F07_C65;
+pub const HASH_MURMUR3_SEED: u32 = 0x07F0_7C65;
 
 /// `Variant::Type::ARRAY`'s ordinal, which seeds an array's hash
 /// (`array.cpp:201`).

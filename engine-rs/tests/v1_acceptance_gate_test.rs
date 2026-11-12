@@ -2125,7 +2125,8 @@ fn test_v1_pixel_diff_threshold() {
     let tex = gdrender2d::texture::load_png(golden_path)
         .unwrap_or_else(|| panic!("golden render image must load from {}", golden_path));
 
-    let golden_fb = gdrender2d::renderer::FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels);
+    let golden_fb =
+        gdrender2d::renderer::FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels);
 
     // Verify the golden image has non-trivial content.
     assert!(

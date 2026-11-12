@@ -15,7 +15,9 @@ fn tree_with_controls() -> (SceneTree, [gdscene::node::NodeId; 5]) {
     let root = tree.root_id();
     let ui = tree.add_child(root, Node::new("UI", "Control")).unwrap();
     let plain = tree.add_child(ui, Node::new("Plain", "ColorRect")).unwrap();
-    let vbox = tree.add_child(ui, Node::new("Box", "VBoxContainer")).unwrap();
+    let vbox = tree
+        .add_child(ui, Node::new("Box", "VBoxContainer"))
+        .unwrap();
     let in_box = tree.add_child(vbox, Node::new("Btn", "Button")).unwrap();
     let mut anchored = Node::new("Anchored", "Panel");
     anchored.set_property("layout_mode", Variant::Int(1));
@@ -28,11 +30,23 @@ fn tree_with_controls() -> (SceneTree, [gdscene::node::NodeId; 5]) {
 #[test]
 fn layout_mode_follows_the_parent_kind() {
     let (tree, [ui, plain, vbox, in_box, anchored]) = tree_with_controls();
-    assert_eq!(layout_mode(&tree, ui), 3, "parent is the root Window: UNCONTROLLED");
-    assert_eq!(layout_mode(&tree, plain), 0, "plain Control parent: POSITION");
+    assert_eq!(
+        layout_mode(&tree, ui),
+        3,
+        "parent is the root Window: UNCONTROLLED"
+    );
+    assert_eq!(
+        layout_mode(&tree, plain),
+        0,
+        "plain Control parent: POSITION"
+    );
     assert_eq!(layout_mode(&tree, vbox), 0);
     assert_eq!(layout_mode(&tree, in_box), 2, "Container parent: CONTAINER");
-    assert_eq!(layout_mode(&tree, anchored), 1, "full-rect anchors: ANCHORS");
+    assert_eq!(
+        layout_mode(&tree, anchored),
+        1,
+        "full-rect anchors: ANCHORS"
+    );
 }
 
 #[test]
@@ -56,7 +70,10 @@ fn a_script_reads_the_computed_layout_mode() {
     let (mut tree, [_, _, vbox, ..]) = tree_with_controls();
     let probe = tree.add_child(vbox, Node::new("Probe", "Label")).unwrap();
     let src = "extends Label\nfunc _ready():\n\tset_meta(\"mode\", layout_mode)\n";
-    tree.attach_script(probe, Box::new(GDScriptNodeInstance::from_source(src, probe).unwrap()));
+    tree.attach_script(
+        probe,
+        Box::new(GDScriptNodeInstance::from_source(src, probe).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, probe);
     assert_eq!(
         tree.get_node(probe).unwrap().get_meta("mode"),

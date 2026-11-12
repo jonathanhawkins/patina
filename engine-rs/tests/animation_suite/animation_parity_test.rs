@@ -180,10 +180,7 @@ fn animation_player_method_track_samples_call_payload() {
     let mut anim = Animation::new("fx", 1.0);
     let mut track = AnimationTrack::with_type("Player", "emit_shot", TrackType::Method);
 
-    let call = Variant::Array(vec![
-        Variant::String("shoot".into()),
-        Variant::Int(3),
-    ]);
+    let call = Variant::Array(vec![Variant::String("shoot".into()), Variant::Int(3)]);
     track.add_keyframe(KeyFrame::new(0.5, call.clone(), TransitionType::Nearest));
     anim.tracks.push(track);
 
@@ -193,7 +190,10 @@ fn animation_player_method_track_samples_call_payload() {
     player.advance(0.5);
 
     let values = player.get_current_values();
-    let (prop, sampled) = values.iter().find(|(p, _)| p == "emit_shot").expect("method track sample");
+    let (prop, sampled) = values
+        .iter()
+        .find(|(p, _)| p == "emit_shot")
+        .expect("method track sample");
     assert_eq!(prop, "emit_shot");
     assert_eq!(sampled, &call);
 
@@ -305,10 +305,7 @@ fn tween_property_linear_ease_is_identity() {
     for &et in &[EaseType::In, EaseType::Out, EaseType::InOut] {
         for &t in &[0.0_f64, 0.25, 0.5, 0.75, 1.0] {
             let v = ease(t, et, TransFunc::Linear);
-            assert!(
-                (v - t).abs() < TWEEN_EPS,
-                "linear ease({t}, {et:?}) = {v}"
-            );
+            assert!((v - t).abs() < TWEEN_EPS, "linear ease({t}, {et:?}) = {v}");
         }
     }
 }
@@ -1063,7 +1060,10 @@ fn animation_tree_one_shot_completes_and_returns_to_base() {
     tree.advance(0.5);
     assert_eq!(float_at(&tree.get_current_values(), "x"), 3.0);
     if let Some(AnimationNode::OneShot(one_shot)) = tree.root.as_ref() {
-        assert!(!one_shot.active, "one-shot should deactivate after fade-out");
+        assert!(
+            !one_shot.active,
+            "one-shot should deactivate after fade-out"
+        );
     } else {
         panic!("expected OneShot root");
     }

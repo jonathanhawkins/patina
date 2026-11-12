@@ -49,8 +49,8 @@ fn boot(sound: &str, period: u32) -> (MainLoop, NodeId) {
     let packed = load_scene_from_res("res://player/player.tscn").expect("player.tscn loads");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let player = add_packed_scene_to_tree_from_res(&mut tree, root, &packed)
-        .expect("player.tscn instances");
+    let player =
+        add_packed_scene_to_tree_from_res(&mut tree, root, &packed).expect("player.tscn instances");
     let player_name = tree.get_node(player).unwrap().name().to_string();
     let sound_id = tree
         .get_node_relative(player, sound)

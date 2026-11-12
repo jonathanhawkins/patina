@@ -393,7 +393,8 @@ impl ScriptInstance for GDScriptNodeInstance {
                     // "res://x.gd"`) or an engine class is not a script
                     // class name and is answered by the native check.
                     if let Some(p) = &d.parent_class {
-                        if !p.contains('/') && !p.ends_with(".gd")
+                        if !p.contains('/')
+                            && !p.ends_with(".gd")
                             && !gdobject::class_db::class_exists(p)
                         {
                             names.push(p.clone());
@@ -1190,23 +1191,21 @@ impl SceneTreeAccessor {
         let node_id = tree
             .add_child(root, crate::node::Node::new(name, base_class))
             .ok()?;
-        match GDScriptNodeInstance::from_source(&source, node_id) {
-            Ok(mut instance) => {
-                // Set before boxing so `get_script()` can name the file even if
-                // seeding a value below fails.
-                instance.set_script_file_path(path);
-                for (key, value) in values {
-                    // A `.tres` line naming a var the script no longer declares
-                    // is dropped rather than inventing a property — Godot's
-                    // loader also discards state the current script has no slot
-                    // for. `set_property`'s `false` return says exactly that.
-                    instance.set_property(key, value.clone());
-                }
-                tree.attach_script_with_init_args(node_id, Box::new(instance), init_args)
+        // On a parse error this is non-fatal: the node exists without a live
+        // script (Godot logs and still yields an object); behaviour tests use a
+        // parseable script.
+        if let Ok(mut instance) = GDScriptNodeInstance::from_source(&source, node_id) {
+            // Set before boxing so `get_script()` can name the file even if
+            // seeding a value below fails.
+            instance.set_script_file_path(path);
+            for (key, value) in values {
+                // A `.tres` line naming a var the script no longer declares
+                // is dropped rather than inventing a property — Godot's
+                // loader also discards state the current script has no slot
+                // for. `set_property`'s `false` return says exactly that.
+                instance.set_property(key, value.clone());
             }
-            // Non-fatal: the node exists without a live script (Godot logs and
-            // still yields an object); behaviour tests use a parseable script.
-            Err(_) => {}
+            tree.attach_script_with_init_args(node_id, Box::new(instance), init_args)
         }
         Some(node_id.raw())
     }
@@ -1527,7 +1526,7 @@ fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
 /// Tag byte marking an `ObjectId` as a state-machine playback handle. Distinct
 /// from every other handle family's tag (see the `*_HANDLE_TAG` constants in
 /// `gdscript-interop`).
-const PLAYBACK_HANDLE_TAG: u64 = 0xA5_00_0000_0000_0000;
+const PLAYBACK_HANDLE_TAG: u64 = 0xA500_0000_0000_0000;
 
 thread_local! {
     /// Live playback handles: raw id -> (AnimationTree node id, graph-node name).
@@ -1562,7 +1561,7 @@ fn is_playback_handle(raw: u64) -> bool {
 
 /// Tag byte marking an `ObjectId` as a slide-collision handle. Distinct from
 /// every other family's tag — 0x71 was free in the workspace-wide sweep.
-const KINEMATIC_COLLISION_TAG: u64 = 0x71_00_0000_0000_0000;
+const KINEMATIC_COLLISION_TAG: u64 = 0x7100_0000_0000_0000;
 
 thread_local! {
     /// Live collision handles: raw id -> (character node raw id, contact index).
@@ -1772,7 +1771,7 @@ fn kinematic_collision_call(
 // `World2D` and the space state are **fixed singletons**: Patina has one
 // `PhysicsWorld2D` per tree (`PhysicsServer::world`), so there is nothing to key
 // a registry on. Only the query parameters carry per-call state and need one.
-const PHYS_QUERY_TAG: u64 = 0xA6_00_0000_0000_0000;
+const PHYS_QUERY_TAG: u64 = 0xA600_0000_0000_0000;
 /// `get_world_2d()`'s return value.
 const WORLD_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x01;
 /// `World2D.direct_space_state`'s value.
@@ -2814,7 +2813,9 @@ impl SceneAccess for SceneTreeAccessor {
                 .get_node(nid)
                 .map(|n| n.get_property(crate::canvas_render::WORLD_2D_OWNER_PROP))
             {
-                Some(Variant::Int(0)) => return Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE)),
+                Some(Variant::Int(0)) => {
+                    return Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))
+                }
                 Some(Variant::Int(raw)) if raw > 0 => raw as u64,
                 _ => node,
             };
@@ -3393,7 +3394,11 @@ impl SceneAccess for SceneTreeAccessor {
         }
         // Try script property first — with scene access installed, so a
         // `set = fn` setter can reach the tree (pat-ivcj2).
-        if self.tree_mut().set_script_property_with_access(nid, prop, value.clone()) == Some(true) {
+        if self
+            .tree_mut()
+            .set_script_property_with_access(nid, prop, value.clone())
+            == Some(true)
+        {
             return;
         }
         // Then try node property
@@ -3645,7 +3650,11 @@ impl SceneAccess for SceneTreeAccessor {
                 // the tire slides; Godot's initial value is 0 before the first
                 // tick.
                 "get_skidinfo" | "get_rpm" => {
-                    let key = if method == "get_rpm" { "_wheel_rpm" } else { "_wheel_skidinfo" };
+                    let key = if method == "get_rpm" {
+                        "_wheel_rpm"
+                    } else {
+                        "_wheel_skidinfo"
+                    };
                     let v = match self.tree().get_node(nid).map(|n| n.get_property(key)) {
                         Some(Variant::Float(f)) => f,
                         Some(Variant::Int(i)) => i as f64,
@@ -4916,7 +4925,8 @@ impl SceneAccess for SceneTreeAccessor {
                                 _ => None,
                             })
                             .filter_map(|raw| {
-                                server.body_for_node(NodeId::from_object_id(ObjectId::from_raw(raw)))
+                                server
+                                    .body_for_node(NodeId::from_object_id(ObjectId::from_raw(raw)))
                             })
                             .collect(),
                         _ => Default::default(),
@@ -5402,15 +5412,9 @@ impl SceneAccess for SceneTreeAccessor {
                     let dt = self.tree().script_physics_delta() as f32;
                     // SAFETY: see `physics_3d()` — non-zero addr = live server,
                     // a sibling of the tree, so no aliasing with `tree_mut()`.
-                    let physics3 = unsafe {
-                        &*(addr3 as *const crate::physics_server_3d::PhysicsServer3D)
-                    };
-                    crate::character3d::script_move_and_slide_3d(
-                        self.tree_mut(),
-                        physics3,
-                        nid,
-                        dt,
-                    )
+                    let physics3 =
+                        unsafe { &*(addr3 as *const crate::physics_server_3d::PhysicsServer3D) };
+                    crate::character3d::script_move_and_slide_3d(self.tree_mut(), physics3, nid, dt)
                 });
 
                 match slid {
@@ -6352,7 +6356,7 @@ impl SceneAccess for SceneTreeAccessor {
                     || self
                         .tree()
                         .get_script(nid)
-                        .is_some_and(|s| s.list_signals().iter().any(|sig| *sig == name));
+                        .is_some_and(|s| s.list_signals().contains(&name));
                 Some(Variant::Bool(declared || on_class || in_script))
             }
             // `other.emit_signal("died", 5)` — emitting on ANOTHER node.
@@ -8218,7 +8222,10 @@ impl SceneAccess for SceneTreeAccessor {
         //    and `tween.finished.connect(..)` / `t.connect("finished", ..)` was
         //    refused with ERR_INVALID_PARAMETER — the handler never ran (the
         //    connect pre-check, pat-mgixk.98, broke every tween callback).
-        if tree.get_tween(crate::tween::TweenId::from_raw(node)).is_some() {
+        if tree
+            .get_tween(crate::tween::TweenId::from_raw(node))
+            .is_some()
+        {
             return gdobject::class_db::class_has_signal("Tween", name)
                 || matches!(name, "finished" | "loop_finished" | "step_finished");
         }
@@ -9126,14 +9133,23 @@ impl SceneAccess for SceneTreeAccessor {
             _ => 0,
         };
         let playing = matches!(n.get_property("playing"), Variant::Bool(true));
-        let finished = !playing && if from_end { frame == 0 } else { frame == last as i64 };
+        let finished = !playing
+            && if from_end {
+                frame == 0
+            } else {
+                frame == last as i64
+            };
         let keep_playhead = same_clip && !finished;
         let Some(n) = self.tree_mut().get_node_mut(nid) else {
             return false;
         };
         if keep_playhead {
             n.set_property("playing", Variant::Bool(true));
-            let speed = if custom_speed == 0.0 { 1.0 } else { custom_speed };
+            let speed = if custom_speed == 0.0 {
+                1.0
+            } else {
+                custom_speed
+            };
             n.set_property("speed_scale", Variant::Float(speed));
             return true;
         }
@@ -15116,7 +15132,6 @@ impl SceneTreeAccessor {
             .unwrap_or(true)
     }
 }
-
 
 /// `(add|remove|has)_theme_<kind>_override` -> `(op, property group)`, the
 /// group being the `theme_override_<group>/<name>` spelling a `.tscn` uses.

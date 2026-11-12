@@ -492,7 +492,7 @@ impl SurfaceTool {
             return;
         }
         self.deindex();
-        if self.vertices.is_empty() || self.vertices.len() % 3 != 0 {
+        if self.vertices.is_empty() || !self.vertices.len().is_multiple_of(3) {
             return;
         }
 
@@ -628,7 +628,7 @@ impl Surface3D {
         for lod in &self.lods {
             if lod.error <= threshold && !lod.indices.is_empty() {
                 // Coarsest wins, so keep the largest error that still fits.
-                if chosen.map_or(true, |c| lod.error > c.error) {
+                if chosen.is_none_or(|c| lod.error > c.error) {
                     chosen = Some(lod);
                 }
             }
@@ -1504,7 +1504,7 @@ impl Mesh3D {
     }
 
     /// Computes flat (per-face) normals for triangles and overwrites the normal array.
-    fn compute_flat_normals(vertices: &[Vector3], indices: &[u32], normals: &mut Vec<Vector3>) {
+    fn compute_flat_normals(vertices: &[Vector3], indices: &[u32], normals: &mut [Vector3]) {
         // Accumulate face normals per vertex, then normalize.
         for n in normals.iter_mut() {
             *n = Vector3::ZERO;

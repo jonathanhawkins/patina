@@ -97,7 +97,10 @@ fn batch_rename_applies_counter_pattern() {
         c.raw()
     );
     let resp = http_post(port, "/api/node/batch_rename", &body);
-    assert!(resp.contains("200 OK"), "batch_rename should 200, got:\n{resp}");
+    assert!(
+        resp.contains("200 OK"),
+        "batch_rename should 200, got:\n{resp}"
+    );
 
     // The selection is renamed node_1 / node_2 / node_3 in scene order.
     let g = handle.state().lock().unwrap();

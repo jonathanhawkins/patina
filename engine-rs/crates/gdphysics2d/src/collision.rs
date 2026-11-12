@@ -273,7 +273,7 @@ fn collide_concave(
         } else {
             collide(&seg_proxy, other)
         };
-        if res.colliding && best.as_ref().map_or(true, |b| res.depth > b.depth) {
+        if res.colliding && best.as_ref().is_none_or(|b| res.depth > b.depth) {
             best = Some(res);
         }
     }

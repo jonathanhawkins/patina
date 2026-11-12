@@ -131,7 +131,11 @@ fn patina_root_is_a_window_as_in_godot() {
     // Godot's root is the main Window (`SceneTree::get_root() -> Window`).
     // This test used to pin the GAP ("root is Node, not Window"); the root
     // is a Window now, so it pins the parity instead.
-    assert_eq!(root.class_name(), "Window", "the root is a Window, as in Godot");
+    assert_eq!(
+        root.class_name(),
+        "Window",
+        "the root is a Window, as in Godot"
+    );
     assert_eq!(root.name(), "root");
 }
 
@@ -169,8 +173,7 @@ fn gap_is_exactly_one_node_per_fixture() {
         let oracle_all = flatten_oracle_all(&oracle_json);
         let patina = extract_patina_tree(&tree);
 
-        let oracle_without_root: Vec<_> =
-            oracle_all.iter().filter(|e| e.path != "/root").collect();
+        let oracle_without_root: Vec<_> = oracle_all.iter().filter(|e| e.path != "/root").collect();
 
         // Oracle has exactly 1 more entry than Patina (the /root Window)
         assert_eq!(

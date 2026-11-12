@@ -2,8 +2,8 @@
 // tests/*.rs is a module here, so one engine link serves them all
 // (build-perf Tier 3). Run one module's tests with
 //   cargo nextest run --test editor_suite -E 'test(/^<mod>::/)'
-mod editor_animation_persistence_test;
 mod editor_461_revalidation_test;
+mod editor_animation_persistence_test;
 mod editor_architecture_plan_test;
 mod editor_atomic_save_test;
 mod editor_audit_log_test;

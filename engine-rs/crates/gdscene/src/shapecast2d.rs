@@ -181,9 +181,9 @@ pub fn force_shapecast_update(
     // entry point is reachable by name from any node, and `_hit_*` are the same
     // keys `raycast2d` publishes — clearing here would wipe a RayCast2D's own
     // results if a script called `force_shapecast_update()` on one.
-    if !tree
+    if tree
         .get_node(node_id)
-        .is_some_and(|n| n.class_name() == "ShapeCast2D")
+        .is_none_or(|n| n.class_name() != "ShapeCast2D")
     {
         return false;
     }

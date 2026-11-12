@@ -242,7 +242,8 @@ fn rotation_round_trips_byte_identically_against_godots_output() {
 /// `Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)`.
 #[test]
 fn saver_writes_an_in_memory_rotation_row_major_like_godot() {
-    let (mut tree, root) = instance_text("[gd_scene format=3]\n\n[node name=\"R\" type=\"Node3D\"]\n");
+    let (mut tree, root) =
+        instance_text("[gd_scene format=3]\n\n[node name=\"R\" type=\"Node3D\"]\n");
     let t = Transform3D {
         basis: gdcore::math3d::Basis {
             x: Vector3::new(1.0, 4.0, 7.0),
@@ -279,7 +280,8 @@ fn saver_writes_an_in_memory_rotation_row_major_like_godot() {
         "expected Godot's row-major literal in the .tres:\n{tres}"
     );
     assert!(
-        tres.lines().any(|l| l == "b = Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)"),
+        tres.lines()
+            .any(|l| l == "b = Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)"),
         "expected Godot's row-major Basis in the .tres:\n{tres}"
     );
 }

@@ -47,8 +47,16 @@ fn the_platformer_players_rotation_faces_like_godot() {
     .unwrap() else {
         panic!("not a Transform3D");
     };
-    assert!((t.basis.z - Vector3::new(-1.0, 0.0, 0.0)).length() < 1e-6, "{:?}", t.basis);
-    assert!((t.basis.x - Vector3::new(0.0, 0.0, 1.0)).length() < 1e-6, "{:?}", t.basis);
+    assert!(
+        (t.basis.z - Vector3::new(-1.0, 0.0, 0.0)).length() < 1e-6,
+        "{:?}",
+        t.basis
+    );
+    assert!(
+        (t.basis.x - Vector3::new(0.0, 0.0, 1.0)).length() < 1e-6,
+        "{:?}",
+        t.basis
+    );
 }
 
 /// Saving writes rows too, so a load → save → load round trip is lossless and
@@ -60,13 +68,19 @@ fn saved_transform3d_is_row_major_and_round_trips() {
         "t",
         parse_variant_value("Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)").unwrap(),
     );
-    res.set_property("b", parse_variant_value("Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)").unwrap());
+    res.set_property(
+        "b",
+        parse_variant_value("Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)").unwrap(),
+    );
     let text = TresSaver::new().save_to_string(&res).unwrap();
     assert!(
         text.contains("t = Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)"),
         "{text}"
     );
-    assert!(text.contains("b = Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)"), "{text}");
+    assert!(
+        text.contains("b = Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)"),
+        "{text}"
+    );
     let back = TresLoader::new().parse_str(&text, "res://t.tres").unwrap();
     assert_eq!(back.get_property("t"), res.get_property("t"));
     assert_eq!(back.get_property("b"), res.get_property("b"));

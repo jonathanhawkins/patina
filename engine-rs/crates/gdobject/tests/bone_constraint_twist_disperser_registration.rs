@@ -67,7 +67,10 @@ fn constraint_classes_are_registered_with_godot_parents() {
         );
         // Must reach the root: an unregistered intermediate severs the chain
         // silently, and `class_exists` alone would not notice (pat-nzgdu.98).
-        assert!(is_parent_class(class, "Node3D"), "{class} must reach Node3D");
+        assert!(
+            is_parent_class(class, "Node3D"),
+            "{class} must reach Node3D"
+        );
         assert!(is_parent_class(class, "Node"));
         assert!(is_parent_class(class, "Object"));
 
@@ -103,13 +106,19 @@ fn skeleton_modifier_base_is_instantiable_not_abstract() {
     // and this assertion is not vacuously true.
     assert!(is_abstract("PhysicsBody3D"));
 
-    assert_eq!(default_of("SkeletonModifier3D", "active"), Variant::Bool(true));
+    assert_eq!(
+        default_of("SkeletonModifier3D", "active"),
+        Variant::Bool(true)
+    );
     assert_eq!(
         default_of("SkeletonModifier3D", "influence"),
         Variant::Float(1.0),
         "a modifier applies fully until dialled down"
     );
-    assert!(class_has_signal("SkeletonModifier3D", "modification_processed"));
+    assert!(class_has_signal(
+        "SkeletonModifier3D",
+        "modification_processed"
+    ));
 }
 
 /// The virtuals a modifier subclass overrides. `_process_modification` is the
@@ -141,7 +150,12 @@ fn base_declares_the_modification_virtuals() {
 #[test]
 fn base_axis_enums_are_shared_with_derived_modifiers() {
     register_3d_classes();
-    for e in ["BoneAxis", "BoneDirection", "SecondaryDirection", "RotationAxis"] {
+    for e in [
+        "BoneAxis",
+        "BoneDirection",
+        "SecondaryDirection",
+        "RotationAxis",
+    ] {
         assert!(class_has_enum("SkeletonModifier3D", e), "base declares {e}");
         assert!(
             class_has_enum("BoneConstraint3D", e),
@@ -329,7 +343,11 @@ fn disperse_mode_enum_matches_godot() {
 fn twist_joint_accessors_take_setting_and_joint_indices() {
     register_3d_classes();
     assert_eq!(arity("BoneTwistDisperser3D", "get_joint_count"), 1);
-    for m in ["get_joint_bone_name", "get_joint_bone", "get_joint_twist_amount"] {
+    for m in [
+        "get_joint_bone_name",
+        "get_joint_bone",
+        "get_joint_twist_amount",
+    ] {
         assert_eq!(arity("BoneTwistDisperser3D", m), 2, "{m}(setting, joint)");
     }
     assert_eq!(
@@ -338,11 +356,23 @@ fn twist_joint_accessors_take_setting_and_joint_indices() {
         "set_joint_twist_amount(setting, joint, amount)"
     );
     // The reference bone is derived from the chain, so it is read-only.
-    assert!(class_has_method("BoneTwistDisperser3D", "get_reference_bone"));
-    assert!(!class_has_method("BoneTwistDisperser3D", "set_reference_bone"));
+    assert!(class_has_method(
+        "BoneTwistDisperser3D",
+        "get_reference_bone"
+    ));
+    assert!(!class_has_method(
+        "BoneTwistDisperser3D",
+        "set_reference_bone"
+    ));
     // Bool getters read as questions in Godot, not as `get_`.
-    assert!(class_has_method("BoneTwistDisperser3D", "are_bone_axes_mutable"));
-    assert!(class_has_method("BoneTwistDisperser3D", "is_end_bone_extended"));
+    assert!(class_has_method(
+        "BoneTwistDisperser3D",
+        "are_bone_axes_mutable"
+    ));
+    assert!(class_has_method(
+        "BoneTwistDisperser3D",
+        "is_end_bone_extended"
+    ));
 }
 
 #[test]

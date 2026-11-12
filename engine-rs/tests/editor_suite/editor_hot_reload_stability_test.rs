@@ -175,7 +175,11 @@ fn editor_survives_1000_hot_reload_cycles_without_leaks() {
 
         if i % SAMPLE_EVERY == 0 {
             let scene = http_get(port, "/api/scene");
-            assert_eq!(status_code(&scene), 200, "iter {i}: /api/scene must succeed");
+            assert_eq!(
+                status_code(&scene),
+                200,
+                "iter {i}: /api/scene must succeed"
+            );
             let v: serde_json::Value =
                 serde_json::from_str(extract_body(&scene)).expect("scene JSON parses");
             sampled_counts.push((i, count_nodes_in_scene_json(&v)));
@@ -258,7 +262,10 @@ fn single_hot_reload_increases_node_count() {
     let pre_body = extract_body(&pre);
     let pre_json: serde_json::Value = serde_json::from_str(pre_body).expect("scene JSON parses");
     let pre_count = count_nodes_in_scene_json(&pre_json);
-    assert!(pre_count >= 1, "expected at least the root node; got {pre_count}: {pre_body}");
+    assert!(
+        pre_count >= 1,
+        "expected at least the root node; got {pre_count}: {pre_body}"
+    );
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let scene_path = tmp.path().join("single_reload.tscn");

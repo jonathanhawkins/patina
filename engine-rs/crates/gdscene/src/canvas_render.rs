@@ -368,8 +368,16 @@ impl TileQuad {
     /// own inverse) gives the drawing transform `F · T`: `T` swaps x/y when
     /// transposed, `F` mirrors the flipped axes.
     pub fn orientation(&self) -> Transform2D {
-        let fx = if self.flags & crate::tilemap::TILE_FLIP_H != 0 { -1.0 } else { 1.0 };
-        let fy = if self.flags & crate::tilemap::TILE_FLIP_V != 0 { -1.0 } else { 1.0 };
+        let fx = if self.flags & crate::tilemap::TILE_FLIP_H != 0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let fy = if self.flags & crate::tilemap::TILE_FLIP_V != 0 {
+            -1.0
+        } else {
+            1.0
+        };
         let (x, y) = if self.flags & crate::tilemap::TILE_TRANSPOSE != 0 {
             (Vector2::new(0.0, fy), Vector2::new(fx, 0.0))
         } else {
@@ -380,7 +388,11 @@ impl TileQuad {
             self.dest.position.y + self.dest.size.y / 2.0,
         );
         // translate(c) · M · translate(-c)
-        let m = Transform2D { x, y, origin: Vector2::ZERO };
+        let m = Transform2D {
+            x,
+            y,
+            origin: Vector2::ZERO,
+        };
         let to_origin = Transform2D::translated(Vector2::new(-c.x, -c.y));
         Transform2D::translated(c) * m * to_origin
     }
@@ -2591,44 +2603,47 @@ fn build_control_draw_items(
             ),
             None => (CONTROL_Z_BASE + z as i64, 0, CanvasFollow::DefaultCanvas),
         };
-        out.push((Render2DItem {
-            // Control primitives are not one-per-node, so there is no single node
-            // id to attribute them to; 0 marks "not pickable as a node".
-            node_id: 0,
-            global_transform: transform,
-            // Shapes carry their own themed colour; text and textures take it
-            // from here (see `tint` above).
-            // ...times the node's inherited `modulate`/`self_modulate`, as for
-            // every other canvas item: spark_keeper's hint Label
-            // (`modulate = Color(1, 1, 1, 0.6)`) drew at full opacity.
-            modulate: match source {
-                Some(node) => {
-                    let m = canvas_order::effective_modulate(tree, node);
-                    Color::new(tint.r * m.r, tint.g * m.g, tint.b * m.b, tint.a * m.a)
-                }
-                None => tint,
+        out.push((
+            Render2DItem {
+                // Control primitives are not one-per-node, so there is no single node
+                // id to attribute them to; 0 marks "not pickable as a node".
+                node_id: 0,
+                global_transform: transform,
+                // Shapes carry their own themed colour; text and textures take it
+                // from here (see `tint` above).
+                // ...times the node's inherited `modulate`/`self_modulate`, as for
+                // every other canvas item: spark_keeper's hint Label
+                // (`modulate = Color(1, 1, 1, 0.6)`) drew at full opacity.
+                modulate: match source {
+                    Some(node) => {
+                        let m = canvas_order::effective_modulate(tree, node);
+                        Color::new(tint.r * m.r, tint.g * m.g, tint.b * m.b, tint.a * m.a)
+                    }
+                    None => tint,
+                },
+                z_index,
+                canvas_layer,
+                canvas_follow,
+                // Control primitives are drawn by their own layout pass, which has
+                // already resolved them inside their container.
+                clip_rect: None,
+                // Control primitives inherit the default lighting layer.
+                light_mask: 1,
+                // ...and the default visibility layer, so a viewport using the
+                // default cull mask still draws the editor's own chrome.
+                visibility_layer: 1,
+                // Editor/UI chrome is not scene-authored, so it carries no material
+                // and samples with the project defaults. Concrete modes rather than
+                // `ParentNode`: these items never go through the ancestor walk, so
+                // an inheritance marker here would reach the blit unresolved.
+                canvas_material: None,
+                shader_material: None,
+                texture_filter: TextureFilter::Nearest,
+                texture_repeat: TextureRepeat::Disabled,
+                kind,
             },
-            z_index,
-            canvas_layer,
-            canvas_follow,
-            // Control primitives are drawn by their own layout pass, which has
-            // already resolved them inside their container.
-            clip_rect: None,
-            // Control primitives inherit the default lighting layer.
-            light_mask: 1,
-            // ...and the default visibility layer, so a viewport using the
-            // default cull mask still draws the editor's own chrome.
-            visibility_layer: 1,
-            // Editor/UI chrome is not scene-authored, so it carries no material
-            // and samples with the project defaults. Concrete modes rather than
-            // `ParentNode`: these items never go through the ancestor walk, so
-            // an inheritance marker here would reach the blit unresolved.
-            canvas_material: None,
-            shader_material: None,
-            texture_filter: TextureFilter::Nearest,
-            texture_repeat: TextureRepeat::Disabled,
-            kind,
-        }, source));
+            source,
+        ));
     }
     out
 }
@@ -2657,9 +2672,11 @@ pub fn merge_control_items(
         .map(|(i, id)| (id.raw(), i))
         .collect();
     let class_of = |raw: u64| {
-        tree.get_node(crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw)))
-            .map(|n| n.class_name().to_string())
-            .unwrap_or_default()
+        tree.get_node(crate::NodeId::from_object_id(
+            gdcore::id::ObjectId::from_raw(raw),
+        ))
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default()
     };
     let drawn_by_controls: std::collections::HashSet<u64> = controls
         .iter()
@@ -2691,7 +2708,8 @@ pub fn merge_control_items(
         (
             item.canvas_layer,
             item.z_index,
-            node.and_then(|n| order.get(&n).copied()).unwrap_or(usize::MAX),
+            node.and_then(|n| order.get(&n).copied())
+                .unwrap_or(usize::MAX),
         )
     };
     let mut controls: Vec<((i64, i64, usize), Render2DItem)> = controls
@@ -3421,7 +3439,7 @@ pub fn rasterize_render_list_with_quality(
         // rather than per pixel. `uniforms` merges the shader's declared
         // defaults with the material's runtime parameter overrides, so editing
         // a `shader_parameter/*` changes the pixels.
-        let shader_program: Option<(
+        type ShaderProgram = (
             Vec<FragmentInstruction>,
             std::collections::HashMap<String, Variant>,
             // Uniform names carrying `: hint_screen_texture` (pat-s3rrv.202).
@@ -3429,7 +3447,8 @@ pub fn rasterize_render_list_with_quality(
             // hints — re-parsing the source at draw time would be a second
             // source of truth for the same fact.
             Vec<String>,
-        )> = item
+        );
+        let shader_program: Option<ShaderProgram> = item
             .shader_material
             .as_ref()
             .and_then(|m| m.shader.as_ref().map(|sh| (m, sh)))
@@ -4141,10 +4160,10 @@ pub fn canvas_surface_buffer(
     items: &[Render2DItem],
     width: u32,
     height: u32,
-    mut texture_cache: Option<&mut TextureCache>,
+    texture_cache: Option<&mut TextureCache>,
 ) -> Vec<Option<gdrender2d::light2d::SurfaceSample>> {
     let mut surfaces = vec![None; (width as usize) * (height as usize)];
-    let Some(cache) = texture_cache.as_deref_mut() else {
+    let Some(cache) = texture_cache else {
         return surfaces;
     };
 
@@ -4417,6 +4436,7 @@ fn sprite_screen_bounds(item: &Render2DItem, cache: &mut TextureCache) -> Option
 /// 2. the surface sample must happen before the cache moves into the rasterizer
 ///    (it is an `Option<&mut _>`, so the reborrow has to be taken here);
 /// 3. shading runs last, over the composited frame.
+///
 /// `pub` because a caller in another crate can need it: `gdeditor`'s
 /// `scene_renderer::render_runtime_frame` composites its canvas over a 3D frame
 /// and so needs its own transparent clear, and it builds its own list. Without
@@ -4536,7 +4556,10 @@ pub const WORLD_2D_OWNER_PROP: &str = "__world_2d_owner__";
 /// The viewport whose `World2D` `vp` renders (`None` = the root window's).
 fn world_2d_owner(tree: &SceneTree, vp: Option<crate::NodeId>) -> Option<crate::NodeId> {
     let vp = vp?;
-    match tree.get_node(vp).map(|n| n.get_property(WORLD_2D_OWNER_PROP)) {
+    match tree
+        .get_node(vp)
+        .map(|n| n.get_property(WORLD_2D_OWNER_PROP))
+    {
         Some(Variant::Int(raw)) if raw > 0 => {
             let owner = crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw as u64));
             if crate::behavioral_2d::is_sub_viewport(tree, owner) {
@@ -4585,13 +4608,10 @@ fn compose_sub_viewports(
     stretch: Transform2D,
 ) -> Vec<Render2DItem> {
     use crate::behavioral_2d::{current_camera2d_in, enclosing_sub_viewport, sub_viewport_size};
-    let node_of =
-        |raw: u64| crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw));
+    let node_of = |raw: u64| crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw));
     let item_viewport = |item: &Render2DItem| {
         let id = node_of(item.node_id);
-        if tree.get_node(id).is_none() {
-            return None;
-        }
+        tree.get_node(id)?;
         if crate::behavioral_2d::is_sub_viewport(tree, id) {
             return Some(id);
         }
@@ -4655,11 +4675,15 @@ fn compose_sub_viewports(
             tree.get_node(container).map(|n| n.get_property("stretch")),
             Some(Variant::Bool(true))
         );
-        let shrink = match tree.get_node(container).map(|n| n.get_property("stretch_shrink")) {
+        let shrink = match tree
+            .get_node(container)
+            .map(|n| n.get_property("stretch_shrink"))
+        {
             Some(Variant::Int(s)) if stretch_on && s > 1 => s as f32,
             _ => 1.0,
         };
-        let place = Transform2D::translated(rect.position) * Transform2D::scaled(Vector2::new(shrink, shrink));
+        let place = Transform2D::translated(rect.position)
+            * Transform2D::scaled(Vector2::new(shrink, shrink));
         // The clip is in final pixels, past the stretch transform the caller
         // applies to the positions.
         let clip = transformed_bounds(stretch, rect);
@@ -4719,7 +4743,10 @@ fn intersect_rects(a: Rect2, b: Rect2) -> Rect2 {
     let y0 = a.position.y.max(b.position.y);
     let x1 = (a.position.x + a.size.x).min(b.position.x + b.size.x);
     let y1 = (a.position.y + a.size.y).min(b.position.y + b.size.y);
-    Rect2::new(Vector2::new(x0, y0), Vector2::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)))
+    Rect2::new(
+        Vector2::new(x0, y0),
+        Vector2::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)),
+    )
 }
 
 pub fn render_play_frame(
@@ -5327,26 +5354,27 @@ fn with_override_font<
                 .and_then(|p| std::fs::read(p).ok())
                 .or_else(|| std::fs::read(disk).ok())
                 .and_then(|bytes| {
-                // pat-s3rrv.214: a WOFF is an SFNT with zlib-compressed tables,
-                // and `TtfFont::from_bytes` only understands SFNT — so a `.woff`
-                // face parsed as nothing and the Label silently drew the
-                // built-in fallback.
-                //
-                // 🔑 This is the ONLY file-backed font load in the engine
-                // (everything else builds a `TtfFont` from embedded bytes), so
-                // decoding here covers every path that can name a font on disk.
-                // It is also why the decoder stays in `gdresource` rather than
-                // being duplicated into `gdrender2d`: those two crates cannot
-                // see each other, but `gdeditor` — where this call lives — sees
-                // both.
-                let sfnt =
-                    if gdresource::woff::is_woff1(&bytes) || gdresource::woff::is_woff2(&bytes) {
+                    // pat-s3rrv.214: a WOFF is an SFNT with zlib-compressed tables,
+                    // and `TtfFont::from_bytes` only understands SFNT — so a `.woff`
+                    // face parsed as nothing and the Label silently drew the
+                    // built-in fallback.
+                    //
+                    // 🔑 This is the ONLY file-backed font load in the engine
+                    // (everything else builds a `TtfFont` from embedded bytes), so
+                    // decoding here covers every path that can name a font on disk.
+                    // It is also why the decoder stays in `gdresource` rather than
+                    // being duplicated into `gdrender2d`: those two crates cannot
+                    // see each other, but `gdeditor` — where this call lives — sees
+                    // both.
+                    let sfnt = if gdresource::woff::is_woff1(&bytes)
+                        || gdresource::woff::is_woff2(&bytes)
+                    {
                         gdresource::woff::woff_to_sfnt(&bytes).ok()?
                     } else {
                         bytes
                     };
-                gdrender2d::ttf_font::TtfFont::from_bytes(sfnt).ok()
-            })
+                    gdrender2d::ttf_font::TtfFont::from_bytes(sfnt).ok()
+                })
         });
         match entry {
             Some(ttf) => {
@@ -5364,7 +5392,9 @@ fn with_override_font<
 /// so layout measures exactly the face the rasterizer draws.
 pub(crate) fn measure_with_override_font(path: &str, text: &str, px_size: f32) -> Option<f32> {
     let mut width = None;
-    with_override_font(path, |ttf, _atlas| width = Some(ttf.measure_line(text, px_size)));
+    with_override_font(path, |ttf, _atlas| {
+        width = Some(ttf.measure_line(text, px_size))
+    });
     width
 }
 

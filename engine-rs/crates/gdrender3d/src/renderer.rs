@@ -92,18 +92,13 @@ impl FrameBuffer3D {
 }
 
 /// Controls how the software renderer draws geometry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Draw mesh edges as colored lines (original behavior).
     Wireframe,
     /// Fill triangles using the vertex/fragment shader pipeline.
+    #[default]
     Solid,
-}
-
-impl Default for RenderMode {
-    fn default() -> Self {
-        Self::Solid
-    }
 }
 
 /// A software 3D renderer with wireframe and solid shaded modes.
@@ -520,6 +515,7 @@ impl SoftwareRenderer3D {
     }
 
     /// Draws a line between two screen-space points with depth testing.
+    #[allow(clippy::too_many_arguments)]
     fn draw_line(
         pixels: &mut [Color],
         depth_buf: &mut DepthBuffer,
@@ -797,7 +793,12 @@ impl SoftwareRenderer3D {
     /// reflected value (linear 0.05 reads back as 0.25), so the platformer's
     /// metal robot, which Godot shows near-black reflecting dark walls, drew
     /// light grey.
-    fn render_frame_solid_with(&self, viewport: &Viewport3D, camera_post: bool, shadows: bool) -> FrameData3D {
+    fn render_frame_solid_with(
+        &self,
+        viewport: &Viewport3D,
+        camera_post: bool,
+        shadows: bool,
+    ) -> FrameData3D {
         let w = viewport.width;
         let h = viewport.height;
         let pixel_count = (w * h) as usize;
@@ -841,7 +842,11 @@ impl SoftwareRenderer3D {
         let probe_set = gdserver3d::reflection_probe::ProbeSet::new(
             &self.reflection_probes,
             viewport.environment.as_ref().and_then(|env| {
-                sky_radiance_for(env, &sky_suns_from_lights(&self.lights), SKY_RADIANCE_RESOLUTION)
+                sky_radiance_for(
+                    env,
+                    &sky_suns_from_lights(&self.lights),
+                    SKY_RADIANCE_RESOLUTION,
+                )
             }),
         );
 
@@ -1418,6 +1423,7 @@ impl SoftwareRenderer3D {
     /// post-process, in linear space.
     /// `pub(crate)` so the GPU trait path applies the identical fog to its
     /// read-back HDR buffer (pat-kr04d) — same reconstruction, same math.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_fog_pass(
         pixels: &mut [Color],
         depth: &[f32],
@@ -1538,16 +1544,7 @@ impl SoftwareRenderer3D {
         inv_proj: &[[f32; 4]; 4],
         camera_transform: &Transform3D,
     ) {
-        Self::apply_decal_pass_masked(
-            pixels,
-            depth,
-            w,
-            h,
-            decals,
-            inv_proj,
-            camera_transform,
-            &[],
-        );
+        Self::apply_decal_pass_masked(pixels, depth, w, h, decals, inv_proj, camera_transform, &[]);
     }
 
     /// [`Self::apply_decal_pass`], honouring each decal's `cull_mask` against
@@ -1643,8 +1640,10 @@ impl DecalPlan {
                 (o - ext - pad, o + ext + pad)
             })
             .collect();
-        let inverses: Vec<Transform3D> =
-            decals.iter().map(|d| d.global_transform.inverse()).collect();
+        let inverses: Vec<Transform3D> = decals
+            .iter()
+            .map(|d| d.global_transform.inverse())
+            .collect();
         let proj = invert_projection(inv_proj);
         let view_of_world = camera_transform.inverse();
         // Inclusive pixel rectangle, or `None` when no part of the box can be
@@ -1698,8 +1697,12 @@ impl DecalPlan {
                     // Wholly behind the eye.
                     return None;
                 }
-                let (mut x0, mut y0, mut x1, mut y1) =
-                    (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+                let (mut x0, mut y0, mut x1, mut y1) = (
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                );
                 for c in pts {
                     let sx = (c[0] / c[2] + 1.0) * 0.5 * w as f32 - 0.5;
                     let sy = (1.0 - c[1] / c[2]) * 0.5 * h as f32 - 0.5;
@@ -1724,21 +1727,19 @@ impl DecalPlan {
                 ))
             })
             .collect();
-        let Some((ux0, uy0, ux1, uy1)) = rects.iter().flatten().copied().reduce(|a, b| {
-            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
-        }) else {
-            return None;
-        };
+        let (ux0, uy0, ux1, uy1) = rects
+            .iter()
+            .flatten()
+            .copied()
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
         // 4. a depth window per decal, tested BEFORE a pixel's position is
         //    reconstructed. With a projection whose z and w ignore x and y (any
         //    perspective or orthographic one), NDC depth is a monotonic function
         //    of view-space z alone, so a padded box spans one depth interval and
         //    a pixel outside it cannot lie in the box. `None` (an unusual
         //    projection, or a box reaching behind the eye) keeps every pixel.
-        let depth_only = proj[0][2] == 0.0
-            && proj[1][2] == 0.0
-            && proj[0][3] == 0.0
-            && proj[1][3] == 0.0;
+        let depth_only =
+            proj[0][2] == 0.0 && proj[1][2] == 0.0 && proj[0][3] == 0.0 && proj[1][3] == 0.0;
         let windows: Vec<Option<(f32, f32)>> = boxes
             .iter()
             .map(|(lo, hi)| {
@@ -1780,7 +1781,7 @@ impl DecalPlan {
                 // Slack for the depth buffer's and the reconstruction's
                 // rounding, on top of the box padding.
                 let slack = 1e-4 * (1.0 + far.abs());
-                (!d0.is_nan() && !d1.is_nan()).then(|| (d0 - slack, d1 + slack))
+                (!d0.is_nan() && !d1.is_nan()).then_some((d0 - slack, d1 + slack))
             })
             .collect();
 
@@ -1861,7 +1862,7 @@ impl DecalPlan {
                 }
                 let reachable = rects.iter().zip(windows.iter()).any(|(r, win)| match r {
                     Some((x0, y0, x1, y1)) if x >= *x0 && x <= *x1 && y >= *y0 && y <= *y1 => {
-                        win.map_or(true, |(d0, d1)| d >= d0 && d <= d1)
+                        win.is_none_or(|(d0, d1)| d >= d0 && d <= d1)
                     }
                     _ => false,
                 });
@@ -1979,7 +1980,6 @@ impl DecalPlan {
 }
 
 impl SoftwareRenderer3D {
-
     /// Adds `VoxelGI` indirect ambient to a linear HDR frame in place
     /// (pat-s3rrv.114).
     ///
@@ -2174,14 +2174,10 @@ fn pixel_view_direction(
     camera_transform: &Transform3D,
 ) -> Vector3 {
     // Unproject from NDC to view space.
-    let vx =
-        inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * (-1.0) + inv_proj[3][0];
-    let vy =
-        inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * (-1.0) + inv_proj[3][1];
-    let vz =
-        inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * (-1.0) + inv_proj[3][2];
-    let vw =
-        inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * (-1.0) + inv_proj[3][3];
+    let vx = inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + -inv_proj[2][0] + inv_proj[3][0];
+    let vy = inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + -inv_proj[2][1] + inv_proj[3][1];
+    let vz = inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + -inv_proj[2][2] + inv_proj[3][2];
+    let vw = inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + -inv_proj[2][3] + inv_proj[3][3];
 
     let view_dir = if vw.abs() > 1e-6 {
         Vector3::new(vx / vw, vy / vw, vz / vw)
@@ -2827,6 +2823,7 @@ fn rasterize_screen_depth(
 ) -> Vec<f32> {
     let mut out = vec![f32::INFINITY; (w * h) as usize];
     let (wf, hf) = (w as f32, h as f32);
+    #[allow(clippy::type_complexity)]
     let screens: Vec<(&Mesh3D, Vec<Option<(f32, f32, f32)>>)> = instances
         .iter()
         .filter_map(|inst| {
@@ -2866,8 +2863,12 @@ fn rasterize_screen_depth(
                     continue;
                 }
                 let x0 = (a.0.min(b.0).min(c.0).floor().max(0.0) as u32).max(clip.0);
-                let y0 = (a.1.min(b.1).min(c.1).floor().max(0.0) as u32).max(clip.1).max(band.0);
-                let x1 = (a.0.max(b.0).max(c.0).ceil().min(wf) as u32).min(w).min(clip.2 + 1);
+                let y0 = (a.1.min(b.1).min(c.1).floor().max(0.0) as u32)
+                    .max(clip.1)
+                    .max(band.0);
+                let x1 = (a.0.max(b.0).max(c.0).ceil().min(wf) as u32)
+                    .min(w)
+                    .min(clip.2 + 1);
                 let y1 = (a.1.max(b.1).max(c.1).ceil().min(hf) as u32)
                     .min(h)
                     .min(clip.3 + 1)
@@ -2894,7 +2895,10 @@ fn rasterize_screen_depth(
     };
     let rows_in_clip = (clip.3 + 1).saturating_sub(clip.1).min(h);
     let threads = if rows_in_clip >= 64 {
-        std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).clamp(1, 8) as u32
+        std::thread::available_parallelism()
+            .map(|t| t.get())
+            .unwrap_or(1)
+            .clamp(1, 8) as u32
     } else {
         1
     };
@@ -2946,6 +2950,10 @@ fn pixel_view_position(ndc_x: f32, ndc_y: f32, ndc_z: f32, inv_proj: &[[f32; 4];
 /// * `suns` — sky-visible directional lights (for sun scatter).
 /// * `sky_in_view` — the linear sky color along `view_dir_world`, or `None`
 ///   (for aerial perspective).
+///
+/// Test-only: the render path calls `fog_process_with` with per-frame
+/// constants; this wrapper pins the per-pixel math in the unit tests.
+#[cfg(test)]
 fn fog_process(
     env: &Environment3D,
     view_distance: f32,
@@ -2965,7 +2973,7 @@ fn fog_process(
     )
 }
 
-/// The parts of [`fog_process`] that depend on the environment and the suns
+/// The parts of `fog_process` that depend on the environment and the suns
 /// only: the base fog colour and each sun's linear colour. Each one is an sRGB
 /// decode (three `powf`s), and computing them once per FRAME rather than once
 /// per PIXEL is the same arithmetic on the same inputs — the same bits.
@@ -2998,7 +3006,7 @@ impl FogConstants {
     }
 }
 
-/// [`fog_process`] with its per-frame constants already computed.
+/// `fog_process` with its per-frame constants already computed.
 fn fog_process_with(
     k: &FogConstants,
     env: &Environment3D,
@@ -3076,6 +3084,7 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// Uses a simplified inversion that works for typical perspective matrices.
 /// `pub(crate)` so the GPU sky pass unprojects pixels with the exact same
 /// matrix as the software background fill.
+#[allow(clippy::needless_range_loop)] // Gauss-Jordan reads clearest as index loops
 pub(crate) fn invert_projection(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     // For a standard perspective matrix the structure is simple enough
     // that we can invert element-wise with the known layout.
@@ -4832,7 +4841,11 @@ mod tests {
             SKY_SAMPLES.with(|c| c.get()) - before
         };
         assert_eq!(run(0.0), 0, "no aerial perspective: the sky is unused");
-        assert_eq!(run(1.0), u64::from(w * h), "aerial perspective samples it per pixel");
+        assert_eq!(
+            run(1.0),
+            u64::from(w * h),
+            "aerial perspective samples it per pixel"
+        );
     }
 
     /// `fog_process` (the pure Godot fog math) — exponential falloff, height

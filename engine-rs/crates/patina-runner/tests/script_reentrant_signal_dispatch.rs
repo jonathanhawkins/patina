@@ -1,4 +1,3 @@
-
 //! pat-mgixk.9 part 2: script dispatch is **re-entrant** — a signal or call
 //! that comes back to a script which is already running is delivered, in the
 //! same frame.

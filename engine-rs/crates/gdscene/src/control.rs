@@ -1715,8 +1715,7 @@ pub fn resolve_stylebox_in(
     class: &str,
     name: &str,
 ) -> Option<crate::stylebox::StyleBox> {
-    node_stylebox_override(tree, node_id, name)
-        .or_else(|| theme.get_stylebox(class, name).cloned())
+    node_stylebox_override(tree, node_id, name).or_else(|| theme.get_stylebox(class, name).cloned())
 }
 
 /// `StyleBox::get_minimum_size()`: the content margins, summed per axis.
@@ -1734,7 +1733,13 @@ fn layout_stylebox_min(tree: &SceneTree, node_id: NodeId, class: &str, name: &st
 
 /// An integer theme constant as `get_theme_constant` resolves it: the node's
 /// `theme_override_constants/<name>`, else the default theme's, else `fallback`.
-fn layout_constant(tree: &SceneTree, node_id: NodeId, class: &str, name: &str, fallback: i64) -> f32 {
+fn layout_constant(
+    tree: &SceneTree,
+    node_id: NodeId,
+    class: &str,
+    name: &str,
+    fallback: i64,
+) -> f32 {
     let own = tree.get_node(node_id).and_then(|n| {
         match n.get_property(&format!("theme_override_constants/{name}")) {
             Variant::Int(i) => Some(i),
@@ -1791,7 +1796,9 @@ fn own_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         sortable_children(tree, node_id)
             .into_iter()
             .map(|c| combined_minimum_size(tree, c))
-            .fold(Vector2::ZERO, |a, m| Vector2::new(a.x.max(m.x), a.y.max(m.y)))
+            .fold(Vector2::ZERO, |a, m| {
+                Vector2::new(a.x.max(m.x), a.y.max(m.y))
+            })
     };
     let texture_size = |props: &[&str]| {
         props
@@ -1836,8 +1843,14 @@ fn own_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         "CenterContainer" => max_of_children(tree),
         // `Separator::get_minimum_size`: 3px along the line, `separation` (4)
         // across it.
-        "HSeparator" => Vector2::new(3.0, layout_constant(tree, node_id, "HSeparator", "separation", 4)),
-        "VSeparator" => Vector2::new(layout_constant(tree, node_id, "VSeparator", "separation", 4), 3.0),
+        "HSeparator" => Vector2::new(
+            3.0,
+            layout_constant(tree, node_id, "HSeparator", "separation", 4),
+        ),
+        "VSeparator" => Vector2::new(
+            layout_constant(tree, node_id, "VSeparator", "separation", 4),
+            3.0,
+        ),
         "LinkButton" => {
             let font_size = resolved_font_size(tree, node_id);
             let font_path = crate::control_render::font_override_path(tree, node_id);
@@ -1863,7 +1876,10 @@ fn own_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         // `TextureButton::get_minimum_size`: nothing with
         // `ignore_texture_size`, else the normal (or pressed) texture.
         "TextureButton" => {
-            if matches!(node.get_property("ignore_texture_size"), Variant::Bool(true)) {
+            if matches!(
+                node.get_property("ignore_texture_size"),
+                Variant::Bool(true)
+            ) {
                 return Vector2::ZERO;
             }
             texture_size(&["texture_normal", "texture_pressed"])
@@ -1948,8 +1964,10 @@ pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
             );
         let width = if unbounded { 0.0 } else { text_w(&text) };
         let style = layout_stylebox_min(tree, node_id, "Label", "normal");
-        return Vector2::new(width, lines * line_h + (lines - 1.0) * label_line_spacing(tree, node_id))
-            + style;
+        return Vector2::new(
+            width,
+            lines * line_h + (lines - 1.0) * label_line_spacing(tree, node_id),
+        ) + style;
     }
     if gdobject::class_db::is_parent_class(&class, "BaseButton")
         || matches!(
@@ -1974,7 +1992,12 @@ pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         let th = if text.is_empty() { 0.0 } else { line_h };
         let mut content = match icon {
             Some(sz) => Vector2::new(
-                tw + sz.x + if text.is_empty() { 0.0 } else { BUTTON_H_SEPARATION },
+                tw + sz.x
+                    + if text.is_empty() {
+                        0.0
+                    } else {
+                        BUTTON_H_SEPARATION
+                    },
                 th.max(sz.y),
             ),
             None => Vector2::new(tw, th),
@@ -2555,8 +2578,8 @@ fn arrange_grid(
         }
     }
     // Godot treats trailing columns with no child at all as expanded.
-    for c in children.len()..cols {
-        col_expanded[c] = true;
+    if children.len() < cols {
+        col_expanded[children.len()..cols].fill(true);
     }
 
     let max_col = children.len().min(cols);
@@ -4847,6 +4870,7 @@ pub fn theme_override_prefix(kind: crate::theme::ThemePropertyType) -> &'static 
 ///
 /// `node_themes` maps a node to the theme resource assigned to it. Callers with
 /// no per-node themes pass an empty map and get the override → default chain.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_theme_item(
     tree: &SceneTree,
     node_id: NodeId,

@@ -85,7 +85,9 @@ fn audio_runner_boot_feeds_output() {
     // audio bridge.
     boot.run_all().expect("boot flow should complete");
 
-    let main_loop = boot.main_loop_mut().expect("Running phase creates a MainLoop");
+    let main_loop = boot
+        .main_loop_mut()
+        .expect("Running phase creates a MainLoop");
 
     // Add an autoplaying AudioStreamPlayer to the booted scene and give it a
     // non-silent stream, mirroring a project that plays audio on start.
@@ -116,7 +118,10 @@ fn audio_runner_boot_feeds_output() {
         "the autoplayed sine should arrive at the sink as non-silent PCM",
     );
     // Format (sample rate / channels) is reported through the mixed buffer.
-    assert_eq!(data.sample_rate, 44_100, "sink should see the mix sample rate");
+    assert_eq!(
+        data.sample_rate, 44_100,
+        "sink should see the mix sample rate"
+    );
     assert_eq!(data.channels, 2, "sink should see the mix channel count");
 }
 
@@ -125,8 +130,11 @@ fn audio_runner_boot_feeds_output() {
 #[test]
 fn audio_runner_headless_boot_without_sink_is_ok() {
     let mut boot = EngineBootstrap::new(BootConfig::headless());
-    boot.run_all().expect("headless boot without a sink should complete");
-    let main_loop = boot.main_loop_mut().expect("Running phase creates a MainLoop");
+    boot.run_all()
+        .expect("headless boot without a sink should complete");
+    let main_loop = boot
+        .main_loop_mut()
+        .expect("Running phase creates a MainLoop");
     // Stepping with no attached output must not panic (mix falls back to the
     // bridge's last_mix buffer).
     main_loop.step(1.0 / 60.0);

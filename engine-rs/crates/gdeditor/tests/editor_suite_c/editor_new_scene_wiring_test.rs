@@ -96,7 +96,13 @@ fn empty_scene_shows_the_create_root_node_panel() {
         HTML.contains("Create Root Node:"),
         "the panel shows Godot's 'Create Root Node:' header"
     );
-    for label in ["2D Scene", "3D Scene", "User Interface", "Other Node", "Paste From Clipboard"] {
+    for label in [
+        "2D Scene",
+        "3D Scene",
+        "User Interface",
+        "Other Node",
+        "Paste From Clipboard",
+    ] {
         assert!(
             HTML.contains(label),
             "the Create Root Node panel offers the '{label}' button (Godot parity)"
@@ -119,10 +125,7 @@ fn create_root_buttons_create_the_matching_root_node() {
     // TOOL_CREATE_2D_SCENE -> Node2D, _3D_SCENE -> Node3D, _USER_INTERFACE ->
     // Control).
     for cls in ["Node2D", "Node3D", "Control"] {
-        assert!(
-            HTML.contains(cls),
-            "createRootNode can create a {cls} root"
-        );
+        assert!(HTML.contains(cls), "createRootNode can create a {cls} root");
     }
     let start = HTML.find("function createRootNode").unwrap();
     let func = &HTML[start..start + 1600.min(HTML.len() - start)];

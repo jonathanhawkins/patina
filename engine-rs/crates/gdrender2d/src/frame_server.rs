@@ -505,7 +505,10 @@ mod tests {
             let port = handle.port().expect("start(0) binds a port");
             let connected = TcpStream::connect(format!("127.0.0.1:{port}"));
             handle.stop();
-            assert!(connected.is_ok(), "connect right after start: {connected:?}");
+            assert!(
+                connected.is_ok(),
+                "connect right after start: {connected:?}"
+            );
         }
     }
 

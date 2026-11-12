@@ -107,20 +107,15 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 }
 
 /// Shading mode for a 3D material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShadingMode {
     /// Unlit — no lighting calculations.
     Unlit,
     /// Lambert diffuse shading.
+    #[default]
     Lambert,
     /// Phong specular shading.
     Phong,
-}
-
-impl Default for ShadingMode {
-    fn default() -> Self {
-        Self::Lambert
-    }
 }
 
 /// Godot `BaseMaterial3D.TextureFilter` (pat-3u1wu).
@@ -1235,7 +1230,10 @@ mod texture_channel_tests {
         assert_eq!(TextureChannel::from_godot_int(4), TextureChannel::Grayscale);
         // Edge: an out-of-range ordinal falls back to Godot's default.
         assert_eq!(TextureChannel::from_godot_int(99), TextureChannel::Red);
-        assert_eq!(StandardMaterial3D::default().roughness_texture_channel, TextureChannel::Red);
+        assert_eq!(
+            StandardMaterial3D::default().roughness_texture_channel,
+            TextureChannel::Red
+        );
     }
 
     #[test]
@@ -1245,6 +1243,9 @@ mod texture_channel_tests {
         assert_eq!(TextureChannel::Alpha.pick(c), 0.5);
         let t = TextureImage::new(1, 1, vec![c]);
         let b = TextureChannel::Blue.broadcast(&t);
-        assert_eq!((b.pixels[0].r, b.pixels[0].g, b.pixels[0].b), (0.9, 0.9, 0.9));
+        assert_eq!(
+            (b.pixels[0].r, b.pixels[0].g, b.pixels[0].b),
+            (0.9, 0.9, 0.9)
+        );
     }
 }

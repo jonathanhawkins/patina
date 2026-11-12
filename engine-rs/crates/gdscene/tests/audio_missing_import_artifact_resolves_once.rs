@@ -102,9 +102,7 @@ fn a_missing_import_artifact_is_resolved_and_reported_once_not_every_frame() {
     assert!(playing > 0, "the loose source is the stream that plays");
     assert!(!mix_is_silent, "and it is audible");
 
-    let warnings = logs
-        .matches("could not be resolved to an artifact")
-        .count();
+    let warnings = logs.matches("could not be resolved to an artifact").count();
     assert_eq!(
         warnings, 1,
         "resolved once, when the stream loaded — not on every one of 12 frames:\n{logs}"

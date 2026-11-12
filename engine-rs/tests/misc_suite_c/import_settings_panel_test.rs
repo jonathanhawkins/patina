@@ -39,7 +39,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -67,8 +70,18 @@ fn server() -> (EditorServerHandle, u16, PathBuf) {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("project.godot"), "[application]\nconfig/name=\"ImportPanel\"\n").unwrap();
-    for f in ["icon.png", "effect.wav", "music.ogg", "font.ttf", "model.glb"] {
+    std::fs::write(
+        dir.join("project.godot"),
+        "[application]\nconfig/name=\"ImportPanel\"\n",
+    )
+    .unwrap();
+    for f in [
+        "icon.png",
+        "effect.wav",
+        "music.ogg",
+        "font.ttf",
+        "model.glb",
+    ] {
         std::fs::write(dir.join(f), b"stub").unwrap();
     }
     let port = free_port();
@@ -96,7 +109,10 @@ fn option<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
 }
 
 fn defaults(port: u16, file: &str) -> serde_json::Value {
-    json(&http_get(port, &format!("/api/import_settings?path=res://{file}")))
+    json(&http_get(
+        port,
+        &format!("/api/import_settings?path=res://{file}"),
+    ))
 }
 
 // ===========================================================================
@@ -107,7 +123,10 @@ fn defaults(port: u16, file: &str) -> serde_json::Value {
 fn import_settings_missing_path_returns_the_empty_state() {
     let (h, port, _) = server();
     let v = json(&http_get(port, "/api/import_settings"));
-    assert_eq!(v["importable"], false, "no path = the dock's empty state: {v}");
+    assert_eq!(
+        v["importable"], false,
+        "no path = the dock's empty state: {v}"
+    );
     h.stop();
 }
 
@@ -118,7 +137,10 @@ fn import_settings_png_returns_texture_defaults() {
     assert_eq!(v["importer"], "texture");
     let mode = option(&v, "compress/mode");
     assert_eq!(mode["type"], "enum");
-    assert_eq!(mode["value"], "Lossless", "auto-detect preset defaults to Lossless");
+    assert_eq!(
+        mode["value"], "Lossless",
+        "auto-detect preset defaults to Lossless"
+    );
     assert_eq!(option(&v, "mipmaps/generate")["value"], false);
     assert_eq!(option(&v, "process/fix_alpha_border")["value"], true);
     h.stop();
@@ -140,7 +162,10 @@ fn import_settings_wav_returns_audio_defaults() {
 fn import_settings_ogg_returns_vorbis_defaults() {
     let (h, port, _) = server();
     let v = defaults(port, "music.ogg");
-    assert_eq!(v["importer"], "oggvorbisstr", "Godot's id, not `ogg_vorbis`");
+    assert_eq!(
+        v["importer"], "oggvorbisstr",
+        "Godot's id, not `ogg_vorbis`"
+    );
     assert_eq!(option(&v, "loop")["value"], false);
     assert!(option(&v, "loop_offset")["value"].is_number());
     assert_eq!(option(&v, "bar_beats")["value"], 4);
@@ -183,7 +208,11 @@ fn import_settings_unknown_ext_is_not_importable() {
 #[test]
 fn set_import_settings_missing_path_returns_400() {
     let (h, port, _) = server();
-    let resp = http_post(port, "/api/import_settings", r#"{"option":"loop","value":true}"#);
+    let resp = http_post(
+        port,
+        "/api/import_settings",
+        r#"{"option":"loop","value":true}"#,
+    );
     assert!(resp.contains("400"), "{resp}");
     h.stop();
 }
@@ -206,7 +235,10 @@ fn set_import_settings_writes_sidecar() {
     ));
     assert_eq!(v["ok"], true, "{v}");
     let text = std::fs::read_to_string(dir.join("icon.png.import")).expect(".import written");
-    assert!(text.contains("[remap]") && text.contains("[deps]") && text.contains("[params]"), "{text}");
+    assert!(
+        text.contains("[remap]") && text.contains("[deps]") && text.contains("[params]"),
+        "{text}"
+    );
     assert!(text.contains("importer=\"texture\""), "{text}");
     // Godot stores an enum as its index: Lossless=0, Lossy=1.
     assert!(text.contains("compress/mode=1"), "{text}");
@@ -222,7 +254,10 @@ fn import_settings_roundtrip() {
     let (h, port, _) = server();
     for k in ["force/mono", "edit/normalize"] {
         let body = format!(r#"{{"path":"res://effect.wav","option":"{k}","value":true}}"#);
-        assert_eq!(json(&http_post(port, "/api/import_settings", &body))["ok"], true);
+        assert_eq!(
+            json(&http_post(port, "/api/import_settings", &body))["ok"],
+            true
+        );
     }
     let v = defaults(port, "effect.wav");
     assert_eq!(v["importer"], "wav");

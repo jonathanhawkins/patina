@@ -15,14 +15,24 @@ fn setting_current_true_from_a_script_clears_the_previous_camera() {
     let root = tree.root_id();
     let a = tree.add_child(root, Node::new("CamA", "Camera3D")).unwrap();
     let b = tree.add_child(root, Node::new("CamB", "Camera3D")).unwrap();
-    assert_eq!(tree.get_node(a).unwrap().get_property("current"), Variant::Bool(true), "first camera auto-current");
+    assert_eq!(
+        tree.get_node(a).unwrap().get_property("current"),
+        Variant::Bool(true),
+        "first camera auto-current"
+    );
 
     let s = tree.add_child(root, Node::new("Switcher", "Node")).unwrap();
     let src = "extends Node\nfunc _ready():\n\tget_node(\"../CamB\").current = true\n";
-    tree.attach_script(s, Box::new(GDScriptNodeInstance::from_source(src, s).unwrap()));
+    tree.attach_script(
+        s,
+        Box::new(GDScriptNodeInstance::from_source(src, s).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, s);
 
-    assert_eq!(tree.get_node(b).unwrap().get_property("current"), Variant::Bool(true));
+    assert_eq!(
+        tree.get_node(b).unwrap().get_property("current"),
+        Variant::Bool(true)
+    );
     assert_eq!(
         tree.get_node(a).unwrap().get_property("current"),
         Variant::Bool(false),

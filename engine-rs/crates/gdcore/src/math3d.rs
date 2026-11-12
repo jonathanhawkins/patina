@@ -1032,6 +1032,8 @@ impl Projection {
     ///
     /// Computed by the same Gauss elimination the inverse uses, so the two can
     /// never disagree about whether a matrix is singular.
+    // Index loops read clearer than iterators for row elimination.
+    #[allow(clippy::needless_range_loop)]
     pub fn determinant(self) -> f32 {
         let mut a = self.m;
         let mut det = 1.0f32;
@@ -1076,6 +1078,8 @@ impl Projection {
     /// matrix full of infinities, matching what `gdscene::camera3d` does — a
     /// degenerate camera should render wrongly, not poison every later
     /// computation with NaN.
+    // Index loops read clearer than iterators for row elimination.
+    #[allow(clippy::needless_range_loop)]
     pub fn inverse(self) -> Self {
         // Row-major working copy: `a[row]` is a row of the matrix followed by a
         // row of the identity. `self.m` is COLUMN-major, so this transposes on
@@ -2023,8 +2027,16 @@ mod tests {
     #[test]
     fn transform3d_looking_at_points_minus_z_at_the_target_like_godot() {
         let t = Transform3D::IDENTITY.looking_at(Vector3::new(1.0, 0.0, 0.0), Vector3::UP);
-        assert!(v3_approx_eq(t.basis.z, Vector3::new(-1.0, 0.0, 0.0)), "{:?}", t.basis);
-        assert!(v3_approx_eq(t.basis.x, Vector3::new(0.0, 0.0, 1.0)), "{:?}", t.basis);
+        assert!(
+            v3_approx_eq(t.basis.z, Vector3::new(-1.0, 0.0, 0.0)),
+            "{:?}",
+            t.basis
+        );
+        assert!(
+            v3_approx_eq(t.basis.x, Vector3::new(0.0, 0.0, 1.0)),
+            "{:?}",
+            t.basis
+        );
         assert!(v3_approx_eq(t.basis.y, Vector3::UP), "{:?}", t.basis);
         // The target is taken relative to the transform's own origin, which
         // is kept.

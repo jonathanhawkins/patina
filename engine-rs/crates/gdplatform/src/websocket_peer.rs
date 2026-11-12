@@ -1230,7 +1230,10 @@ impl WebSocketPeer {
         // A message longer than `inbound_buffer_size` fails the connection
         // with 1009 MESSAGE_TOO_BIG — wslay's `max_recv_msg_length`
         // (`wsl_peer.cpp:299`). Counted across fragments.
-        if matches!(frame.opcode, Opcode::Text | Opcode::Binary | Opcode::Continuation) {
+        if matches!(
+            frame.opcode,
+            Opcode::Text | Opcode::Binary | Opcode::Continuation
+        ) {
             let so_far = if frame.opcode == Opcode::Continuation {
                 self.frag_payload.len()
             } else {
@@ -1709,7 +1712,11 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_ne!(peer.get_ready_state(), WebSocketState::Connecting, "handshake resolved");
+        assert_ne!(
+            peer.get_ready_state(),
+            WebSocketState::Connecting,
+            "handshake resolved"
+        );
         (peer, server)
     }
 
@@ -1745,7 +1752,10 @@ mod tests {
             peer.send(&[0u8; 9], WriteMode::Binary),
             Err(WebSocketError::BufferFull { size: 9, limit: 8 })
         ));
-        assert!(peer.send(&[0u8; 8], WriteMode::Binary).is_ok(), "exactly the limit fits");
+        assert!(
+            peer.send(&[0u8; 8], WriteMode::Binary).is_ok(),
+            "exactly the limit fits"
+        );
         peer.set_outbound_buffer_size(0);
         assert!(
             peer.send(&[0u8; 100], WriteMode::Binary).is_ok(),
@@ -1767,8 +1777,15 @@ mod tests {
             p.set_inbound_buffer_size(10);
         });
         settle(&mut peer);
-        assert!(peer.close_frame_sent, "the handshake completed and the peer failed it");
-        assert_eq!(peer.get_available_packet_count(), 1, "the 10-byte message fits");
+        assert!(
+            peer.close_frame_sent,
+            "the handshake completed and the peer failed it"
+        );
+        assert_eq!(
+            peer.get_available_packet_count(),
+            1,
+            "the 10-byte message fits"
+        );
         assert_eq!(peer.get_packet(), b"0123456789".to_vec());
         assert_ne!(
             peer.get_ready_state(),
@@ -1796,7 +1813,11 @@ mod tests {
         assert_eq!(peer.get_available_packet_count(), 2, "the budget holds two");
         assert_eq!(peer.get_packet(), vec![0u8; 12]);
         settle(&mut peer);
-        assert_eq!(peer.get_available_packet_count(), 2, "the third arrives once there is room");
+        assert_eq!(
+            peer.get_available_packet_count(),
+            2,
+            "the third arrives once there is room"
+        );
         assert_eq!(peer.get_packet(), vec![1u8; 12]);
         assert_eq!(peer.get_packet(), vec![2u8; 12], "nothing was dropped");
         assert_eq!(peer.get_ready_state(), WebSocketState::Open);

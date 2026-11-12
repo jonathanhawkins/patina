@@ -92,9 +92,17 @@ fn inspector_back_returns_to_previous_object() {
     thread::sleep(Duration::from_millis(100));
 
     // Inspect A, then B — each POST /api/node/select pushes to the history.
-    let sa = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{}}}"#, a.raw()));
+    let sa = http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{}}}"#, a.raw()),
+    );
     assert!(sa.contains("200 OK"), "select A should 200, got:\n{sa}");
-    let sb = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{}}}"#, b.raw()));
+    let sb = http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{}}}"#, b.raw()),
+    );
     assert!(sb.contains("200 OK"), "select B should 200, got:\n{sb}");
 
     // Back -> the current inspected object returns to A.

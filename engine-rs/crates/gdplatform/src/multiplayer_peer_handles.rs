@@ -204,9 +204,7 @@ pub fn new_offline_multiplayer_peer_handle() -> ObjectId {
 
 /// Convenience constructor for `WebSocketMultiplayerPeer.new()`.
 pub fn new_ws_multiplayer_peer_handle() -> ObjectId {
-    new_multiplayer_peer_handle(MultiplayerPeerHandle::WebSocket(Box::new(
-        WebSocketMultiplayerPeer::new(),
-    )))
+    new_multiplayer_peer_handle(MultiplayerPeerHandle::WebSocket(Box::default()))
 }
 
 /// Runs `f` against the live peer behind `id`, or returns `None` when the handle

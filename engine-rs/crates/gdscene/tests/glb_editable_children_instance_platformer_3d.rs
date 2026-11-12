@@ -85,7 +85,10 @@ fn player_tscn_instances_the_glb_hierarchy_with_its_editable_children() {
     // The glb instance: Godot's imported-scene shape, Skeleton3D generated
     // under the node that parents the skin's root joint.
     assert_eq!(node(&tree, player, "Player").class_name(), "Node3D");
-    assert_eq!(node(&tree, player, "Player/Skeleton").class_name(), "Node3D");
+    assert_eq!(
+        node(&tree, player, "Player/Skeleton").class_name(),
+        "Node3D"
+    );
     let skeleton = id_of(&tree, player, "Player/Skeleton/Skeleton3D");
     assert_eq!(tree.get_node(skeleton).unwrap().class_name(), "Skeleton3D");
     assert_eq!(
@@ -100,9 +103,13 @@ fn player_tscn_instances_the_glb_hierarchy_with_its_editable_children() {
     assert_eq!(master, 0, "the skin's root joint is bone 0");
     assert_eq!(skeleton3d::get_bone_parent(&tree, skeleton, master), -1);
     let hip = skeleton3d::find_bone(&tree, skeleton, "hip").expect("hip bone");
-    assert_eq!(skeleton3d::get_bone_parent(&tree, skeleton, hip), master as i64);
+    assert_eq!(
+        skeleton3d::get_bone_parent(&tree, skeleton, hip),
+        master as i64
+    );
     assert!(
-        tree.get_node_relative(player, "Player/Skeleton/MASTER").is_none(),
+        tree.get_node_relative(player, "Player/Skeleton/MASTER")
+            .is_none(),
         "a joint must not ALSO exist as a Node3D"
     );
 
@@ -124,14 +131,20 @@ fn player_tscn_instances_the_glb_hierarchy_with_its_editable_children() {
         child_names(&tree, id_of(&tree, player, "Player/Skeleton")),
         ["Skeleton3D", "Bullet", "CoinCount"]
     );
-    assert_eq!(node(&tree, player, "Player/Skeleton/Bullet").class_name(), "Marker3D");
+    assert_eq!(
+        node(&tree, player, "Player/Skeleton/Bullet").class_name(),
+        "Marker3D"
+    );
     assert_eq!(
         child_names(&tree, id_of(&tree, player, "Player/Skeleton/CoinCount")),
         ["Parallax", "Parallax2", "Parallax3", "Parallax4"]
     );
 
     // The camera lives in player.tscn; it must exist once the scene instances.
-    assert_eq!(node(&tree, player, "Target/Camera3D").class_name(), "Camera3D");
+    assert_eq!(
+        node(&tree, player, "Target/Camera3D").class_name(),
+        "Camera3D"
+    );
 }
 
 #[test]
@@ -143,7 +156,14 @@ fn player_glb_clips_key_bones_and_reach_the_animation_tree() {
     let ap = tree
         .get_animation_player(ap_id)
         .expect("the glb's AnimationPlayer carries its clips");
-    for clip in ["idle", "walk", "run", "jump", "falling", "shooting_standing"] {
+    for clip in [
+        "idle",
+        "walk",
+        "run",
+        "jump",
+        "falling",
+        "shooting_standing",
+    ] {
         assert!(ap.animations.contains_key(clip), "missing clip '{clip}'");
     }
     // A joint channel keys `<skeleton path>:<bone>` relative to the glb root,
@@ -161,7 +181,10 @@ fn player_glb_clips_key_bones_and_reach_the_animation_tree() {
             .map(|t| (t.node_path.clone(), t.property_path.clone()))
             .collect::<Vec<_>>()
     );
-    assert_eq!(ap.root_node, "..", "Godot's AnimationMixer.root_node default");
+    assert_eq!(
+        ap.root_node, "..",
+        "Godot's AnimationMixer.root_node default"
+    );
 
     // The AnimationTree (`anim_player = NodePath("../Player/AnimationPlayer")`)
     // resolves its clips from that player.
@@ -192,10 +215,22 @@ fn enemy_tscn_edits_the_glb_skeleton_and_its_animation_player() {
     // Bone ORDER matches Godot's: enemy.tscn addresses `bones/1` (body) and
     // `bones/2` (eyes, body's child) by index, so a breadth-first order would
     // apply eyes' override to a leg.
-    assert_eq!(skeleton3d::get_bone_name(&tree, skeleton, 0).as_deref(), Some("MASTER"));
-    assert_eq!(skeleton3d::get_bone_name(&tree, skeleton, 1).as_deref(), Some("body"));
-    assert_eq!(skeleton3d::get_bone_name(&tree, skeleton, 2).as_deref(), Some("eyes"));
-    assert_eq!(skeleton3d::get_bone_name(&tree, skeleton, 3).as_deref(), Some("r-frontleg"));
+    assert_eq!(
+        skeleton3d::get_bone_name(&tree, skeleton, 0).as_deref(),
+        Some("MASTER")
+    );
+    assert_eq!(
+        skeleton3d::get_bone_name(&tree, skeleton, 1).as_deref(),
+        Some("body")
+    );
+    assert_eq!(
+        skeleton3d::get_bone_name(&tree, skeleton, 2).as_deref(),
+        Some("eyes")
+    );
+    assert_eq!(
+        skeleton3d::get_bone_name(&tree, skeleton, 3).as_deref(),
+        Some("r-frontleg")
+    );
     // ...and the editable override's pose reached bone 2 (eyes).
     let eyes = skeleton3d::get_bone_pose_position(&tree, skeleton, 2);
     assert!(
@@ -207,7 +242,9 @@ fn enemy_tscn_edits_the_glb_skeleton_and_its_animation_player() {
     // enemy.tscn's OWN sub-resources (including the `extra` library) and
     // autoplays `walk`.
     let ap_id = id_of(&tree, enemy, "Enemy/AnimationPlayer");
-    let ap = tree.get_animation_player(ap_id).expect("enemy player attached");
+    let ap = tree
+        .get_animation_player(ap_id)
+        .expect("enemy player attached");
     assert!(
         ap.animations.keys().any(|k| k.ends_with("explode")),
         "the `extra` library from enemy.tscn must be present, saw {:?}",
@@ -249,14 +286,19 @@ fn parent_id_path_finds_a_parent_whose_path_went_stale() {
 [editable path="Bot"]
 "#;
     let outer = PackedScene::from_tscn(OUTER).unwrap();
-    let resolve = |path: &str| (path == "res://robot.tscn").then(|| PackedScene::from_tscn(ROBOT).unwrap());
+    let resolve =
+        |path: &str| (path == "res://robot.tscn").then(|| PackedScene::from_tscn(ROBOT).unwrap());
     let nodes = outer
         .instance_with_subscenes(&resolve)
         .expect("the id path resolves even though `Bot/OldArm` no longer exists");
     let arm = nodes.iter().find(|n| n.name() == "Arm").expect("Arm");
     let hand = nodes.iter().find(|n| n.name() == "Hand").expect("Hand");
     assert_eq!(hand.class_name(), "Marker3D");
-    assert_eq!(hand.parent(), Some(arm.id()), "Hand must land under the renamed Arm");
+    assert_eq!(
+        hand.parent(),
+        Some(arm.id()),
+        "Hand must land under the renamed Arm"
+    );
 }
 
 /// Godot quotes a property name with spaces: player.tscn's blend tree writes
@@ -266,7 +308,9 @@ fn parent_id_path_finds_a_parent_whose_path_went_stale() {
 fn a_quoted_property_key_is_decoded() {
     let src = std::fs::read_to_string(platformer_root().join("player/player.tscn")).unwrap();
     let scene = gdscene::packed_scene::PackedScene::from_tscn(&src).unwrap();
-    let blend_tree = scene.sub_resource_props("23").expect("blend tree sub-resource");
+    let blend_tree = scene
+        .sub_resource_props("23")
+        .expect("blend tree sub-resource");
     assert_eq!(
         blend_tree.get("nodes/Animation 2/node"),
         Some(&Variant::String("SubResource:13".into()))
@@ -274,7 +318,10 @@ fn a_quoted_property_key_is_decoded() {
     assert!(
         !blend_tree.keys().any(|k| k.starts_with('"')),
         "no key may keep its quotes: {:?}",
-        blend_tree.keys().filter(|k| k.starts_with('"')).collect::<Vec<_>>()
+        blend_tree
+            .keys()
+            .filter(|k| k.starts_with('"'))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -284,7 +331,10 @@ fn game_tscn_has_a_real_player_with_its_camera_and_real_enemies() {
     let (tree, game) = boot("game.tscn");
 
     assert_eq!(node(&tree, game, "Player").class_name(), "CharacterBody3D");
-    assert_eq!(node(&tree, game, "Player/Target/Camera3D").class_name(), "Camera3D");
+    assert_eq!(
+        node(&tree, game, "Player/Target/Camera3D").class_name(),
+        "Camera3D"
+    );
     assert_eq!(
         node(&tree, game, "Player/Player/Skeleton/Skeleton3D").class_name(),
         "Skeleton3D"
@@ -294,7 +344,11 @@ fn game_tscn_has_a_real_player_with_its_camera_and_real_enemies() {
     assert!(!names.is_empty(), "game.tscn places enemies");
     for name in names {
         let path = format!("Enemies/{name}");
-        assert_eq!(node(&tree, game, &path).class_name(), "RigidBody3D", "{path}");
+        assert_eq!(
+            node(&tree, game, &path).class_name(),
+            "RigidBody3D",
+            "{path}"
+        );
         assert_eq!(
             node(&tree, game, &format!("{path}/Enemy/Skeleton/Skeleton3D")).class_name(),
             "Skeleton3D",

@@ -972,6 +972,7 @@ pub fn project_ray_normal(
 /// Multiplies a Projection (4×4) by a Transform3D (treated as a 4×4 affine matrix).
 ///
 /// Result = P × T (where T is the view matrix, i.e., camera inverse transform).
+#[allow(clippy::needless_range_loop)] // textbook row/col/k matrix product
 fn multiply_projection_transform(proj: &Projection, t: &Transform3D) -> Projection {
     // Expand Transform3D to 4×4 column-major.
     let t_m: [[f32; 4]; 4] = [
@@ -1251,7 +1252,9 @@ pub fn call_camera3d_method(
             // (`pub m: [[f32; 4]; 4]`, same column-major convention), so this
             // is a re-wrap and not a conversion — but nothing in the NAME warns
             // you, and passing `proj` straight in does not compile.
-            Some(Variant::Projection(gdcore::math3d::Projection { m: proj.m }))
+            Some(Variant::Projection(gdcore::math3d::Projection {
+                m: proj.m,
+            }))
         }
 
         // -- Godot's one-call mode constructors ------------------------------

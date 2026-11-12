@@ -299,8 +299,11 @@ pub fn run_integrate_forces_3d_where(
         let Some(state) = build_state_3d(tree, id, gravity, dt) else {
             continue;
         };
-        let (lin_in, ang_in, sleeping_in) =
-            (state.linear_velocity, state.angular_velocity, state.sleeping);
+        let (lin_in, ang_in, sleeping_in) = (
+            state.linear_velocity,
+            state.angular_velocity,
+            state.sleeping,
+        );
         let handle = new_direct_body_state_3d_handle(state);
         tree.call_script_with_access(id, "_integrate_forces", &[Variant::ObjectId(handle)]);
         if let Some(mut out) = take_direct_body_state_3d(handle) {
@@ -314,8 +317,7 @@ pub fn run_integrate_forces_3d_where(
             // `_integrate_forces` kept adding gravity to the velocity it read
             // back, so a resting enemy's `linear_velocity.y` grew downward
             // without bound (-36 after 4 s) and the body never walked.
-            let velocity_written =
-                out.linear_velocity != lin_in || out.angular_velocity != ang_in;
+            let velocity_written = out.linear_velocity != lin_in || out.angular_velocity != ang_in;
             if velocity_written && out.sleeping == sleeping_in {
                 out.sleeping = false;
             }

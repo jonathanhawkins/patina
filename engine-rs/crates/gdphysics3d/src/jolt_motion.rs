@@ -432,8 +432,7 @@ fn build_hull(input: &[Vector3]) -> Hull {
     };
 
     if r > 0.0 {
-        for p in 0..n {
-            let pf = &point_faces[p];
+        for pf in &point_faces {
             if pf.len() < 2 {
                 continue;
             }
@@ -871,6 +870,7 @@ fn affine_closest(w: &[D3]) -> Option<(D3, [f64; 4])> {
 /// (as indices) and its barycentrics.
 fn simplex_closest(w: &[D3]) -> (D3, Vec<(usize, f64)>, bool) {
     let n = w.len();
+    #[allow(clippy::type_complexity)]
     let mut best: Option<(f64, D3, Vec<(usize, f64)>)> = None;
     for mask in 1u32..(1u32 << n) {
         let idx: Vec<usize> = (0..n).filter(|i| mask & (1 << i) != 0).collect();

@@ -536,7 +536,7 @@ const MAX_BASE_LOAD_DEPTH: usize = 16;
 
 thread_local! {
     /// Current depth inside [`Interpreter::load_base_class`]'s recursion.
-    static BASE_LOAD_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static BASE_LOAD_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Reads a resource's text, consulting mounted `.pck` packs before disk
@@ -620,7 +620,7 @@ pub fn load_resource_value(path: &str) -> Variant {
     // was never read at all.
     let mut properties = HashMap::new();
     if class_name == "Shader" {
-        if let Some(code) = read_resource_text(&path) {
+        if let Some(code) = read_resource_text(path) {
             properties.insert("code".to_string(), Variant::String(code));
         }
     }
@@ -1488,7 +1488,9 @@ impl Interpreter {
     /// shared, so it is already current). See `call_user_func_impl`.
     fn refresh_members_after_function(&mut self, entry: Option<&HashMap<String, Variant>>) {
         let Some(entry) = entry else { return };
-        let Some(now) = self.self_instance.as_ref() else { return };
+        let Some(now) = self.self_instance.as_ref() else {
+            return;
+        };
         let changed: Vec<(String, Variant)> = now
             .properties
             .iter()
@@ -2616,7 +2618,11 @@ impl Interpreter {
                 if let Some(target) = self.debug_break_before(stmt_line) {
                     let rest = co.remaining[i..].to_vec();
                     let rest_lines = debug_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
-                    self.park_lines = co.remaining_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_lines = co
+                        .remaining_lines
+                        .get(i..)
+                        .map(|s| s.to_vec())
+                        .unwrap_or_default();
                     self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
                     let paused_in = co.function_name.clone();
                     self.publish_debug_pause(&paused_in, stmt_line, rest_lines);
@@ -2631,8 +2637,11 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let rest = co.remaining[i + 1..].to_vec();
-                    self.park_lines =
-                        co.remaining_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_lines = co
+                        .remaining_lines
+                        .get(i + 1..)
+                        .map(|s| s.to_vec())
+                        .unwrap_or_default();
                     self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
                     self.environment.pop_scope();
                     return Ok(Variant::Nil);
@@ -6391,7 +6400,11 @@ impl Interpreter {
                     // (`(body as Player).coin_collected.emit()`) and gun
                     // (`instantiate() as Bullet`) both failed on it.
                     if let Some(access) = self.scene_access.as_ref() {
-                        if access.script_class_chain(oid.raw()).iter().any(|n| n == other) {
+                        if access
+                            .script_class_chain(oid.raw())
+                            .iter()
+                            .any(|n| n == other)
+                        {
                             return true;
                         }
                     }
@@ -8641,7 +8654,10 @@ impl Interpreter {
                     other => to_float(other)? as i64 as u64,
                 };
                 let value = gdcore::rng::rand_from_seed(&mut seed);
-                Ok(Some(Variant::PackedInt64Array(vec![value as i64, seed as i64])))
+                Ok(Some(Variant::PackedInt64Array(vec![
+                    value as i64,
+                    seed as i64,
+                ])))
             }
             "randfn" => {
                 // Godot: `randfn(mean = 0.0, deviation = 1.0)`.
@@ -9473,7 +9489,7 @@ impl Interpreter {
                 use gdcore::string_name::StringName as SN;
                 match args.first() {
                     None => Ok(Some(Variant::StringName(SN::new("")))),
-                    Some(Variant::StringName(s)) => Ok(Some(Variant::StringName(s.clone()))),
+                    Some(Variant::StringName(s)) => Ok(Some(Variant::StringName(*s))),
                     Some(Variant::String(s)) => Ok(Some(Variant::StringName(SN::new(s)))),
                     Some(other) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "StringName() expects a String or StringName, got {other:?}"
@@ -9520,46 +9536,6 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                     "Color() takes 0, 1, 3 or 4 arguments".into(),
-                ))),
-            },
-            // `Rect2(x, y, w, h)` / `Rect2(position, size)` / `Rect2()`, Godot's
-            // three constructors. The type existed as a Variant and as a `.tscn`
-            // literal, but scripts had no way to build one — which is what a
-            // `_draw` override needs for `draw_rect` (pat-0q2kx.82).
-            "Rect2" => match args.len() {
-                0 => Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
-                    gdcore::math::Vector2::ZERO,
-                    gdcore::math::Vector2::ZERO,
-                )))),
-                2 => {
-                    let as_vec2 = |v: &Variant| match v {
-                        Variant::Vector2(v) => Ok(*v),
-                        Variant::Vector2i(v) => {
-                            Ok(gdcore::math::Vector2::new(v.x as f32, v.y as f32))
-                        }
-                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                            "Rect2(position, size) expects Vector2 arguments, got {}",
-                            other.variant_type()
-                        )))),
-                    };
-                    let position = as_vec2(&args[0])?;
-                    let size = as_vec2(&args[1])?;
-                    Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
-                        position, size,
-                    ))))
-                }
-                4 => {
-                    let x = to_float(&args[0])? as f32;
-                    let y = to_float(&args[1])? as f32;
-                    let w = to_float(&args[2])? as f32;
-                    let h = to_float(&args[3])? as f32;
-                    Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
-                        gdcore::math::Vector2::new(x, y),
-                        gdcore::math::Vector2::new(w, h),
-                    ))))
-                }
-                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "Rect2() takes 0, 2 or 4 arguments".into(),
                 ))),
             },
             "PackedByteArray" => Ok(Some(build_packed_array(
@@ -10165,35 +10141,10 @@ impl Interpreter {
             }
             // -- @GlobalScope utilities that raised UndefinedFunction
             //    (pat-0q2kx.228) --
-            "error_string" => {
-                Self::require_args("error_string", args, 1)?;
-                let code = to_int(&args[0])?;
-                Ok(Some(Variant::String(
-                    error_code_to_string(code).to_string(),
-                )))
-            }
             "type_convert" => {
                 Self::require_args("type_convert", args, 2)?;
                 let target = to_int(&args[1])?;
                 Ok(Some(convert_variant_to_type(&args[0], target)))
-            }
-            "is_instance_id_valid" => {
-                Self::require_args("is_instance_id_valid", args, 1)?;
-                let id = to_int(&args[0])?;
-                // Godot: id 0 is never a live object. Otherwise consult the
-                // same alive registry `is_instance_valid` uses, so a freed
-                // object reports false rather than "the id looks non-zero".
-                let valid = if id <= 0 {
-                    false
-                } else {
-                    match &self.scene_access {
-                        Some(access) => access.is_object_alive(id as u64),
-                        // No scene to consult — mirrors is_instance_valid's
-                        // legacy behaviour rather than inventing an answer.
-                        None => true,
-                    }
-                };
-                Ok(Some(Variant::Bool(valid)))
             }
             "rid_from_int64" => {
                 Self::require_args("rid_from_int64", args, 1)?;
@@ -10496,7 +10447,11 @@ impl Interpreter {
                     if let (Some(ref mut access), Some(node_id)) =
                         (&mut self.scene_access, self.current_node_id)
                     {
-                        access.call_deferred(node_id, "set", &[Variant::String(prop), value.clone()]);
+                        access.call_deferred(
+                            node_id,
+                            "set",
+                            &[Variant::String(prop), value.clone()],
+                        );
                         return Ok(Some(Variant::Nil));
                     }
                 }
@@ -10556,7 +10511,7 @@ impl Interpreter {
     /// waiting for a red-zone estimate that does not fire — see
     /// `STACK_GROW_INTERVAL`.
     fn with_script_call_stack<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        if self.call_depth > 0 && self.call_depth % STACK_GROW_INTERVAL == 0 {
+        if self.call_depth > 0 && self.call_depth.is_multiple_of(STACK_GROW_INTERVAL) {
             stacker::grow(STACK_GROWTH, || f(self))
         } else {
             stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || f(self))
@@ -10636,8 +10591,10 @@ impl Interpreter {
         // every scope outward, so a caller's `var n` was what a callee's `n`
         // read — and wrote. The body gets its own scope above the seed, as an
         // instance method's does, so the callee's own `var n` still shadows.
-        let member_entry: Option<HashMap<String, Variant>> =
-            self.self_instance.as_ref().map(|inst| inst.properties.clone());
+        let member_entry: Option<HashMap<String, Variant>> = self
+            .self_instance
+            .as_ref()
+            .map(|inst| inst.properties.clone());
         if let Some(members) = &member_entry {
             for (name, value) in members {
                 if !func.params.iter().any(|p| p == name) {
@@ -10709,8 +10666,10 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let remaining = body[i + 1..].to_vec();
-                    self.park_lines =
-                        body_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_lines = body_lines
+                        .get(i + 1..)
+                        .map(|s| s.to_vec())
+                        .unwrap_or_default();
                     self.park_coroutine(remaining, target, name, false);
                     self.environment.pop_scope();
                     self.environment.pop_scope();
@@ -13498,7 +13457,12 @@ impl Interpreter {
         let state_arg = Variant::Array(state.clone());
 
         if !self
-            .call_method_on(obj, "_iter_init", &[state_arg.clone()], object_expr)?
+            .call_method_on(
+                obj,
+                "_iter_init",
+                std::slice::from_ref(&state_arg),
+                object_expr,
+            )?
             .is_truthy()
         {
             return Ok(Vec::new());
@@ -13515,7 +13479,12 @@ impl Interpreter {
                 ))));
             }
             if !self
-                .call_method_on(obj, "_iter_next", &[state_arg.clone()], object_expr)?
+                .call_method_on(
+                    obj,
+                    "_iter_next",
+                    std::slice::from_ref(&state_arg),
+                    object_expr,
+                )?
                 .is_truthy()
             {
                 break;
@@ -15165,7 +15134,7 @@ impl Interpreter {
                     let callable = extract_callable(&args[0])?;
                     let mut out = Vec::with_capacity(arr.len());
                     for elem in arr.to_vec().iter() {
-                        out.push(self.invoke_callable(&callable, &[elem.clone()])?);
+                        out.push(self.invoke_callable(&callable, std::slice::from_ref(elem))?);
                     }
                     Ok(Variant::Array(out.into()))
                 }
@@ -15175,7 +15144,7 @@ impl Interpreter {
                     let mut out = Vec::new();
                     for elem in arr.to_vec().iter() {
                         if self
-                            .invoke_callable(&callable, &[elem.clone()])?
+                            .invoke_callable(&callable, std::slice::from_ref(elem))?
                             .is_truthy()
                         {
                             out.push(elem.clone());
@@ -15188,7 +15157,7 @@ impl Interpreter {
                     let callable = extract_callable(&args[0])?;
                     for elem in arr.to_vec().iter() {
                         if self
-                            .invoke_callable(&callable, &[elem.clone()])?
+                            .invoke_callable(&callable, std::slice::from_ref(elem))?
                             .is_truthy()
                         {
                             return Ok(Variant::Bool(true));
@@ -15201,7 +15170,7 @@ impl Interpreter {
                     let callable = extract_callable(&args[0])?;
                     for elem in arr.to_vec().iter() {
                         if !self
-                            .invoke_callable(&callable, &[elem.clone()])?
+                            .invoke_callable(&callable, std::slice::from_ref(elem))?
                             .is_truthy()
                         {
                             return Ok(Variant::Bool(false));
@@ -15252,7 +15221,7 @@ impl Interpreter {
                     }
                     for (i, elem) in arr.to_vec().iter().enumerate().skip(from as usize) {
                         if self
-                            .invoke_callable(&callable, &[elem.clone()])?
+                            .invoke_callable(&callable, std::slice::from_ref(elem))?
                             .is_truthy()
                         {
                             return Ok(Variant::Int(i as i64));
@@ -18233,7 +18202,7 @@ impl Interpreter {
                             Some(access) => access.node_has_method(id, &name),
                             // No scene access: the only script we can see is the
                             // running one, so answer for it.
-                            None => self.function_registry.get(&name).is_some(),
+                            None => self.function_registry.contains_key(&name),
                         };
                         Ok(Variant::Bool(has))
                     }
@@ -19439,7 +19408,7 @@ impl Interpreter {
             // uncompressed bytes.
             "compress" => match obj {
                 Variant::PackedByteArray(b) => {
-                    let mode = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let mode = args.first().map(to_int).transpose()?.unwrap_or(0);
                     Ok(Variant::PackedByteArray(pba_compress(b, mode)))
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
@@ -19449,8 +19418,8 @@ impl Interpreter {
             },
             "decompress" => match obj {
                 Variant::PackedByteArray(b) => {
-                    let size = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(0);
-                    let mode = args.get(1).map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let size = args.first().map(to_int).transpose()?.unwrap_or(0);
+                    let mode = args.get(1).map(to_int).transpose()?.unwrap_or(0);
                     let out = pba_decompress(b, mode);
                     // ⚠️ Godot fails when the result does not fit the buffer the
                     // caller sized. Returning the oversized data instead would
@@ -19469,8 +19438,8 @@ impl Interpreter {
             // size; `max_output_size < 0` means unbounded, as in Godot.
             "decompress_dynamic" => match obj {
                 Variant::PackedByteArray(b) => {
-                    let max = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(-1);
-                    let mode = args.get(1).map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let max = args.first().map(to_int).transpose()?.unwrap_or(-1);
+                    let mode = args.get(1).map(to_int).transpose()?.unwrap_or(0);
                     let out = pba_decompress(b, mode);
                     if max >= 0 && out.len() as i64 > max {
                         return Ok(Variant::PackedByteArray(Vec::new()));
@@ -19525,7 +19494,7 @@ impl Interpreter {
             }
             "find" => {
                 Self::require_args_range("find", args, 1, 2)?;
-                let from = args.get(1).map(|v| to_int(v)).transpose()?.unwrap_or(0);
+                let from = args.get(1).map(to_int).transpose()?.unwrap_or(0);
                 let from = from.max(0) as usize;
                 Ok(Variant::Int(obj.packed_find(&args[0], from).unwrap_or(-1)))
             }
@@ -19870,7 +19839,7 @@ impl Interpreter {
                 // `&mut **inst` spelled out rather than relying on deref
                 // coercion through the `&mut &mut _` that `as_mut` yields.
                 Some(inst) => {
-                    let inst: &mut ClassInstance = &mut **inst;
+                    let inst: &mut ClassInstance = inst;
                     self.with_script_call_stack(|interp| {
                         interp.resume_with_instance_self(inst, |i| {
                             i.invoke_callable(&callable, &args)
@@ -19936,7 +19905,7 @@ impl Interpreter {
             // Godot's `emit_signal` does not propagate a callee error.
             match instance.as_mut() {
                 Some(inst) => {
-                    let inst: &mut ClassInstance = &mut ***inst;
+                    let inst: &mut ClassInstance = inst;
                     let _ = self.with_script_call_stack(|interp| {
                         interp.resume_with_instance_self(inst, |i| i.invoke_callable(&cb, args))
                     });
@@ -20116,7 +20085,11 @@ impl Interpreter {
             self.self_instance
                 .as_ref()
                 .and_then(|inst| inst.class_def.name.clone())
-                .or_else(|| self.script_path.clone().or_else(|| access.get_script_path(id)))
+                .or_else(|| {
+                    self.script_path
+                        .clone()
+                        .or_else(|| access.get_script_path(id))
+                })
         } else {
             access
                 .script_class_chain(id)
@@ -20451,7 +20424,10 @@ impl Interpreter {
                 self.call_depth -= 1;
                 Ok(return_val)
             }
-            CallableRef::Bound { inner, bound_args } => {
+            CallableRef::Bound {
+                inner,
+                bound_args: _,
+            } => {
                 let resolved = callable.resolve_args(args);
                 self.invoke_callable(inner, &resolved)
             }
@@ -20650,10 +20626,10 @@ impl Interpreter {
                     }
                     class_def.instance_vars.push(var_decl);
                 }
-                Stmt::AnnotationStmt { annotations } => {
-                    if annotations.iter().any(|a| a.name == "tool") {
-                        class_def.is_tool = true;
-                    }
+                Stmt::AnnotationStmt { annotations }
+                    if annotations.iter().any(|a| a.name == "tool") =>
+                {
+                    class_def.is_tool = true;
                 }
                 Stmt::InnerClass { name, parent, body } => {
                     let mut inner = ClassDef {
@@ -20796,7 +20772,7 @@ impl Interpreter {
     /// Root-first is what makes a derived declaration shadow the base's: the
     /// caller walks this in order and overwrites as it goes, which is Godot's
     /// member-shadowing direction.
-    fn class_chain_root_first<'a>(leaf: &'a ClassDef) -> Vec<&'a ClassDef> {
+    fn class_chain_root_first(leaf: &ClassDef) -> Vec<&ClassDef> {
         let mut chain = Vec::new();
         let mut cursor = Some(leaf);
         while let Some(def) = cursor {
@@ -21159,11 +21135,9 @@ impl Interpreter {
                     // against by `camera_feed.rs::camera_feeds_updated_is_never_emitted`.
                 }
             }
-            "remove_feed" => {
-                if was_registered {
-                    if let Some(id) = feed_id {
-                        self.emit_camera_server_signal("camera_feed_removed", &[Variant::Int(id)]);
-                    }
+            "remove_feed" if was_registered => {
+                if let Some(id) = feed_id {
+                    self.emit_camera_server_signal("camera_feed_removed", &[Variant::Int(id)]);
                 }
             }
             _ => {}
@@ -21492,8 +21466,10 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let remaining = body[i + 1..].to_vec();
-                    self.park_lines =
-                        body_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_lines = body_lines
+                        .get(i + 1..)
+                        .map(|s| s.to_vec())
+                        .unwrap_or_default();
                     self.park_coroutine(remaining, target, method_name, true);
                     // Write back any property mutations before parking.
                     merge_frame_property_writes(
@@ -22288,7 +22264,7 @@ fn str_left(s: &str, mut n: i64) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
     if n < 0 {
-        n = len + n;
+        n += len;
     }
     if n <= 0 {
         return String::new();
@@ -22303,7 +22279,7 @@ fn str_right(s: &str, mut n: i64) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
     if n < 0 {
-        n = len + n;
+        n += len;
     }
     if n <= 0 {
         return String::new();
@@ -23117,7 +23093,7 @@ fn gd_char_arg(v: &Variant) -> Option<char> {
 /// EMPTY buffer — Godot fails the whole call rather than decoding a prefix.
 fn gd_hex_decode(s: &str) -> Vec<u8> {
     let chars: Vec<char> = s.chars().collect();
-    if chars.is_empty() || chars.len() % 2 != 0 {
+    if chars.is_empty() || !chars.len().is_multiple_of(2) {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(chars.len() / 2);
@@ -23686,12 +23662,8 @@ fn step_decimals(step: f64) -> i64 {
     0
 }
 /// Godot `ease` curve function.
-fn ease(mut x: f64, curve: f64) -> f64 {
-    if x < 0.0 {
-        x = 0.0;
-    } else if x > 1.0 {
-        x = 1.0;
-    }
+fn ease(x: f64, curve: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
     if curve > 0.0 {
         if curve < 1.0 {
             1.0 - (1.0 - x).powf(1.0 / curve)
@@ -24379,69 +24351,6 @@ fn convert_variant_to_type(value: &Variant, target: i64) -> Variant {
         // TYPE_STRING
         4 => Variant::String(value.to_string_lossy()),
         _ => Variant::Nil,
-    }
-}
-
-/// Godot's `error_string(Error)` — `core/error/error_list.cpp`'s `error_names`
-/// table, verbatim (pat-0q2kx.228).
-///
-/// ⚠️ These are HUMAN-READABLE strings, not enum names. Only entry 0 coincides:
-/// `FAILED` is `"Failed"`, `ERR_UNAVAILABLE` is `"Unavailable"`. Returning the
-/// enum spelling would agree with Godot on `OK` and disagree on the other 48 —
-/// which is exactly what a test that only checks `error_string(OK)` would miss.
-fn error_code_to_string(code: i64) -> &'static str {
-    // Godot: `if (error < 0 || error >= ERR_MAX) return "(invalid error code)"`.
-    match code {
-        0 => "OK",
-        1 => "Failed",
-        2 => "Unavailable",
-        3 => "Unconfigured",
-        4 => "Unauthorized",
-        5 => "Parameter out of range",
-        6 => "Out of memory",
-        7 => "File not found",
-        8 => "File: Bad drive",
-        9 => "File: Bad path",
-        10 => "File: Permission denied",
-        11 => "File already in use",
-        12 => "Can't open file",
-        13 => "Can't write file",
-        14 => "Can't read file",
-        15 => "File unrecognized",
-        16 => "File corrupt",
-        17 => "Missing dependencies for file",
-        18 => "End of file",
-        19 => "Can't open",
-        20 => "Can't create",
-        21 => "Query failed",
-        22 => "Already in use",
-        23 => "Locked",
-        24 => "Timeout",
-        25 => "Can't connect",
-        26 => "Can't resolve",
-        27 => "Connection error",
-        28 => "Can't acquire resource",
-        29 => "Can't fork",
-        30 => "Invalid data",
-        31 => "Invalid parameter",
-        32 => "Already exists",
-        33 => "Does not exist",
-        34 => "Can't read database",
-        35 => "Can't write database",
-        36 => "Compilation failed",
-        37 => "Method not found",
-        38 => "Link failed",
-        39 => "Script failed",
-        40 => "Cyclic link detected",
-        41 => "Invalid declaration",
-        42 => "Duplicate symbol",
-        43 => "Parse error",
-        44 => "Busy",
-        45 => "Skip",
-        46 => "Help",
-        47 => "Bug",
-        48 => "Printer on fire",
-        _ => "(invalid error code)",
     }
 }
 
@@ -26712,9 +26621,7 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
             let class = class_name_arg(args, 0, "ClassDB.class_has_integer_constant()")?;
             let name = class_name_arg(args, 1, "ClassDB.class_has_integer_constant()")?;
             Ok(Variant::Bool(
-                gdobject::class_db::get_integer_constant_list(&class)
-                    .iter()
-                    .any(|c| *c == name),
+                gdobject::class_db::get_integer_constant_list(&class).contains(&name),
             ))
         }
         // Godot walks the whole registry for descendants; so does this. The
@@ -26942,9 +26849,7 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
             let owner = gdobject::class_db::get_enum_list_ex(&class, no_inh)
                 .into_iter()
                 .find(|e| {
-                    gdobject::class_db::get_enum_constants_ex(&class, e, no_inh)
-                        .iter()
-                        .any(|c| *c == constant)
+                    gdobject::class_db::get_enum_constants_ex(&class, e, no_inh).contains(&constant)
                 })
                 .unwrap_or_default();
             Ok(Variant::String(owner))
@@ -27000,7 +26905,7 @@ thread_local! {
     /// (pat-0q2kx.135). Godot resolves `setting.web` ahead of `setting` when the
     /// `web` tag is active; with no tags the override is just the base value.
     static PROJECT_FEATURE_TAGS: std::cell::RefCell<Vec<String>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Absolute path of the `project.godot` the settings were seeded from, so
     /// `ProjectSettings.save()` can write back where it read from.
     /// The keys the PROJECT declared (plus anything a script `set_setting`s),
@@ -27015,7 +26920,7 @@ thread_local! {
     static PROJECT_SETTINGS_DECLARED: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
     static PROJECT_SETTINGS_PATH: std::cell::RefCell<Option<String>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Runtime hook: publish the booted project's settings to the script-visible
@@ -27372,10 +27277,10 @@ thread_local! {
     /// Process-local clipboard for the headless `DisplayServer` (pat-nzgdu.67).
     /// The wasm build routes clipboard through `navigator.clipboard`; this store
     /// gives a working round-trip in headless / tests.
-    static DISPLAY_CLIPBOARD: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    static DISPLAY_CLIPBOARD: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// Records `tts_speak` utterances so headless tests can observe them
     /// (SpeechSynthesis on web).
-    static DISPLAY_TTS_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    static DISPLAY_TTS_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// `DisplayServer` singleton (pat-nzgdu.67). Headless dispatch so `DisplayServer.*`
@@ -27742,13 +27647,13 @@ type BridgeValue = gdplatform::js_bridge::JsValue;
 /// Written by `gdscene::local_to_scene` before it runs `_setup_local_to_scene`.
 pub const SELF_OBJECT_ID_KEY: &str = "__object_id__";
 
-const JS_OBJECT_HANDLE_TAG: u64 = 0x1B_00_0000_0000_0000;
+const JS_OBJECT_HANDLE_TAG: u64 = 0x1B00_0000_0000_0000;
 
 thread_local! {
     /// Records `JavaScriptBridge` calls (eval code, download names) so headless
     /// tests / the runner dump can observe them. Kept on every target: it is the
     /// only observation point for a call whose effect lives in the browser.
-    static JS_BRIDGE_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    static JS_BRIDGE_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 
     /// Script-visible `JavaScriptObject` handles, keyed by raw `ObjectId`. The
     /// value is the backend's own handle, so the interpreter never has to know
@@ -27776,7 +27681,7 @@ thread_local! {
     /// SOURCE — hence a registry of its own, as `CAMERA_SERVER_CONNECTIONS`
     /// does for CameraServer.
     static JS_BRIDGE_CONNECTIONS: std::cell::RefCell<Vec<JsBridgeConnection>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A `Callable` parked by `JavaScriptBridge.create_callback`, with the node
@@ -28171,7 +28076,7 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
     /// The CameraServer feed list in add order — `get_feed(idx)` indexes this.
     static CAMERA_SERVER_FEEDS: std::cell::RefCell<Vec<u64>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// `CameraServer` signal connections as (signal name, callable)
     /// (pat-0q2kx.262).
     ///
@@ -28179,14 +28084,14 @@ thread_local! {
     /// node-keyed `connect_signal` cannot represent it as a signal SOURCE —
     /// hence a registry of its own rather than a reuse of that path.
     static CAMERA_SERVER_CONNECTIONS: std::cell::RefCell<Vec<(String, CallableRef)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Per-FEED signal connections: `(feed handle raw, signal, callable)`
     /// (pat-s3rrv.261).
     ///
     /// Keyed by handle rather than by the Godot-visible `feed.id` so two feeds
     /// can carry independent `frame_changed` connections.
     static CAMERA_FEED_CONNECTIONS: std::cell::RefCell<Vec<(u64, String, CallableRef)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Signals raised by a feed method but not yet delivered.
     ///
     /// ⚠️ `call_camera_feed_instance` is a FREE function with no interpreter, so
@@ -28195,11 +28100,11 @@ thread_local! {
     /// afterwards. Draining anywhere later would let a second feed call
     /// interleave its own signals ahead of these.
     static PENDING_CAMERA_FEED_SIGNALS: std::cell::RefCell<Vec<(u64, String, Vec<Variant>)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Sequence backing both the handle id and the Godot-visible feed id.
-    static NEXT_CAMERA_FEED: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_CAMERA_FEED: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
     /// `CameraServer.set_monitoring_feeds` flag.
-    static CAMERA_MONITORING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static CAMERA_MONITORING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Returns `true` when `id` was issued by [`new_camera_feed_handle`].
@@ -28254,20 +28159,20 @@ thread_local! {
     /// Messages passed to `send_message`, in order — what the transport drains
     /// to the editor. See [`drain_engine_debugger_messages`].
     static DEBUG_MESSAGES: std::cell::RefCell<Vec<(String, Vec<Variant>)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
     /// `set_depth` / `get_depth` — Godot's stepping depth counter. Distinct from
     /// the *call stack* depth `Debugger::stack_depth()` reports.
-    static DEBUG_DEPTH: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    static DEBUG_DEPTH: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
     /// `set_lines_left` / `get_lines_left` — lines remaining before the debugger
     /// breaks again while stepping.
-    static DEBUG_LINES_LEFT: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    static DEBUG_LINES_LEFT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
     /// `is_skipping_breakpoints` — set when the user asks the editor to ignore
     /// breakpoints without removing them.
-    static DEBUG_SKIP_BREAKPOINTS: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static DEBUG_SKIP_BREAKPOINTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The break `EngineDebugger.debug()` / `script_debug()` asked for, waiting
     /// for the transport to turn into a `DebugEvent::Paused` (pat-0q2kx.122).
     static DEBUG_PENDING_BREAK: std::cell::RefCell<Option<EngineDebuggerBreak>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Runtime hook: attach the debugger, making `EngineDebugger.is_active()` report
@@ -28330,7 +28235,7 @@ thread_local! {
     /// panicked in the browser the moment the profiler was switched on
     /// (pat-mgixk.40).
     static SCRIPT_PROFILE_STACK: std::cell::RefCell<Vec<(u64, f64)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Turns per-function script timing on or off — the editor's Profiler
@@ -28883,7 +28788,7 @@ thread_local! {
         HashMap<u64, gdplatform::stream_peer_buffer::StreamPeerBuffer>,
     > = std::cell::RefCell::new(HashMap::new());
     /// Sequence backing the handle id.
-    static NEXT_STREAM_PEER: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_STREAM_PEER: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Mints a fresh `StreamPeerBuffer` handle.
@@ -29156,8 +29061,8 @@ thread_local! {
     static GLTF_STATES: std::cell::RefCell<
         HashMap<u64, Option<std::sync::Arc<gdresource::resource::Resource>>>,
     > = std::cell::RefCell::new(HashMap::new());
-    static NEXT_GLTF_STATE: std::cell::Cell<u64> = std::cell::Cell::new(1);
-    static NEXT_GLTF_DOCUMENT: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_GLTF_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static NEXT_GLTF_DOCUMENT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Mints a fresh `GLTFDocument` handle.
@@ -29352,7 +29257,7 @@ thread_local! {
     static RNG_INSTANCES: std::cell::RefCell<HashMap<u64, gdcore::rng::Rng>> =
         std::cell::RefCell::new(HashMap::new());
     /// Sequence backing the handle id.
-    static NEXT_RNG: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_RNG: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Mints a fresh `RandomNumberGenerator` handle.
@@ -29365,7 +29270,8 @@ fn new_rng_handle() -> gdcore::id::ObjectId {
     RNG_INSTANCES.with(|m| {
         // Godot's constructor randomizes (`randbase.randomize()`); a pinned
         // run gets the next pinned instance seed instead (pat-y2ylj).
-        m.borrow_mut().insert(seq, gdcore::rng::Rng::new_for_script());
+        m.borrow_mut()
+            .insert(seq, gdcore::rng::Rng::new_for_script());
     });
     gdcore::id::ObjectId::from_raw(RNG_HANDLE_TAG | seq)
 }
@@ -30082,7 +29988,7 @@ thread_local! {
     static UNDO_REDOS: std::cell::RefCell<HashMap<u64, UndoRedoState>> =
         std::cell::RefCell::new(HashMap::new());
     /// Sequence backing the handle id.
-    static NEXT_UNDO_REDO: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_UNDO_REDO: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Returns `true` when `id` was issued by [`new_undo_redo_handle`].
@@ -30097,7 +30003,7 @@ fn is_undo_redo_handle(id: gdcore::id::ObjectId) -> bool {
 /// Tags an `ObjectId` standing for an `EncodedObjectAsID`; mirrors the
 /// ConfigFile / FileAccess / DirAccess / CameraFeed / UndoRedo tags
 /// (0xCF / 0xFA / 0xDA / 0xCA / 0xED).
-const ENCODED_OBJECT_AS_ID_HANDLE_TAG: u64 = 0xE1_00_0000_0000_0000;
+const ENCODED_OBJECT_AS_ID_HANDLE_TAG: u64 = 0xE100_0000_0000_0000;
 
 thread_local! {
     /// Maps an EncodedObjectAsID handle to the raw id it *reports*.
@@ -30107,7 +30013,7 @@ thread_local! {
     /// [`wrap_decoded_object_ids`].
     static ENCODED_OBJECT_IDS: std::cell::RefCell<HashMap<u64, u64>> =
         std::cell::RefCell::new(HashMap::new());
-    static NEXT_ENCODED_OBJECT_ID: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_ENCODED_OBJECT_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Returns `true` when `id` was issued by [`new_encoded_object_as_id_handle`].
@@ -30212,15 +30118,15 @@ fn call_encoded_object_as_id_instance(
 // three are RefCounted in Godot, so they follow the handle-table idiom.
 
 /// Tag bits marking an `ObjectId` as a `HashingContext` handle.
-const HASHING_CONTEXT_HANDLE_TAG: u64 = 0xC1_00_0000_0000_0000;
+const HASHING_CONTEXT_HANDLE_TAG: u64 = 0xC100_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as an `AESContext` handle.
-const AES_CONTEXT_HANDLE_TAG: u64 = 0xC2_00_0000_0000_0000;
+const AES_CONTEXT_HANDLE_TAG: u64 = 0xC200_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `Crypto` handle.
-const CRYPTO_HANDLE_TAG: u64 = 0xC3_00_0000_0000_0000;
+const CRYPTO_HANDLE_TAG: u64 = 0xC300_0000_0000_0000;
 /// `HMACContext` handles (pat-s3rrv.195). `0xC4` continues the crypto family —
 /// `0xC1` hashing, `0xC2` AES, `0xC3` Crypto — and was confirmed unused by a
 /// full sweep of the workspace's tag bytes.
-const HMAC_CONTEXT_HANDLE_TAG: u64 = 0xC4_00_0000_0000_0000;
+const HMAC_CONTEXT_HANDLE_TAG: u64 = 0xC400_0000_0000_0000;
 
 thread_local! {
     static HASHING_CONTEXTS: std::cell::RefCell<HashMap<u64, gdcore::crypto::MultiHashContext>> =
@@ -30323,9 +30229,9 @@ fn new_crypto_handle() -> gdcore::id::ObjectId {
 /// confirmed unused by a sweep of every `_TAG: u64 = 0x..` in the workspace.
 /// Two families sharing a tag byte makes both `is_*_handle` predicates claim
 /// the same ids, which misroutes every method call with no error anywhere.
-const CRYPTO_KEY_HANDLE_TAG: u64 = 0xC5_00_0000_0000_0000;
+const CRYPTO_KEY_HANDLE_TAG: u64 = 0xC500_0000_0000_0000;
 /// `X509Certificate` handles (pat-s3rrv.195).
-const X509_CERTIFICATE_HANDLE_TAG: u64 = 0xC6_00_0000_0000_0000;
+const X509_CERTIFICATE_HANDLE_TAG: u64 = 0xC600_0000_0000_0000;
 
 /// Godot `Error` codes, transcribed from `core/error/error_list.h`.
 ///
@@ -30981,7 +30887,6 @@ fn call_crypto_instance(
 // Both are RefCounted in Godot, so they follow the handle-table idiom used by
 // ConfigFile/CameraFeed/UndoRedo rather than being scene nodes.
 
-/// Tag bits marking an `ObjectId` as a `RegEx` handle.
 // ---------------------------------------------------------------------------
 // XR: XRServer singleton + WebXRInterface handle (pat-0q2kx.236)
 // ---------------------------------------------------------------------------
@@ -30991,7 +30896,7 @@ fn call_crypto_instance(
 /// `SEMAPHORE_HANDLE_TAG`, and two families sharing a tag makes both
 /// `is_*_handle` predicates claim the same handles, misrouting every method call
 /// with no error anywhere.
-const SCRIPT_BACKTRACE_HANDLE_TAG: u64 = 0xE9_00_0000_0000_0000;
+const SCRIPT_BACKTRACE_HANDLE_TAG: u64 = 0xE900_0000_0000_0000;
 
 thread_local! {
     /// Handle ids for captured backtraces. The captures themselves live in the
@@ -31060,7 +30965,7 @@ fn call_script_backtrace_instance(
 /// 0xEA because bytes CA 5B B9 ED E1 C1 C2 C3 E8 E5 E6 E7 E4 E2 E3 E9 are all
 /// already taken. Two families sharing a tag would make both `is_*_handle`
 /// predicates claim the same handles and misroute every method call, silently.
-const XR_TRACKER_HANDLE_TAG: u64 = 0xEA_00_0000_0000_0000;
+const XR_TRACKER_HANDLE_TAG: u64 = 0xEA00_0000_0000_0000;
 
 /// One script-created XR tracker.
 ///
@@ -31156,9 +31061,9 @@ thread_local! {
 /// method call, silently.
 ///
 /// ⚠️ Tag constants in this file are written in TWO spellings —
-/// `0xE5_00_0000_0000_0000` and `0xE500_0000_0000_0000` — so a single-spelling
+/// `0xE500_0000_0000_0000` and `0xE500_0000_0000_0000` — so a single-spelling
 /// grep under-reports what is taken. The sweep behind this choice matched both.
-const XR_POSE_HANDLE_TAG: u64 = 0xE0_00_0000_0000_0000;
+const XR_POSE_HANDLE_TAG: u64 = 0xE000_0000_0000_0000;
 
 thread_local! {
     /// Live `XRPose` handles.
@@ -31178,7 +31083,7 @@ thread_local! {
     static XR_WORLD_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
     /// `XRServer.reference_frame` — identity until `clear_reference_frame`.
     static XR_REFERENCE_FRAME: std::cell::RefCell<gdcore::math3d::Transform3D> =
-        std::cell::RefCell::new(gdcore::math3d::Transform3D::IDENTITY);
+        const { std::cell::RefCell::new(gdcore::math3d::Transform3D::IDENTITY) };
 }
 
 fn is_xr_pose_handle(id: gdcore::id::ObjectId) -> bool {
@@ -31653,7 +31558,7 @@ fn call_xr_tracker_instance(
     Ok((result, emitted))
 }
 
-const XR_INTERFACE_HANDLE_TAG: u64 = 0xE8_00_0000_0000_0000;
+const XR_INTERFACE_HANDLE_TAG: u64 = 0xE800_0000_0000_0000;
 
 thread_local! {
     /// Live XR interface handles. Godot's XRServer owns its interfaces, so a
@@ -31767,11 +31672,11 @@ fn xr_string_list(v: Option<&Variant>) -> Vec<String> {
 // `wait_to_finish` yields the Callable's value.
 
 /// Tag bits marking an `ObjectId` as a `Thread` handle.
-const THREAD_HANDLE_TAG: u64 = 0xE5_00_0000_0000_0000;
+const THREAD_HANDLE_TAG: u64 = 0xE500_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `Mutex` handle.
-const MUTEX_HANDLE_TAG: u64 = 0xE6_00_0000_0000_0000;
+const MUTEX_HANDLE_TAG: u64 = 0xE600_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `Semaphore` handle.
-const SEMAPHORE_HANDLE_TAG: u64 = 0xE7_00_0000_0000_0000;
+const SEMAPHORE_HANDLE_TAG: u64 = 0xE700_0000_0000_0000;
 
 /// A started `Thread` and the value its Callable returned.
 #[derive(Debug, Default)]
@@ -31948,7 +31853,7 @@ fn call_semaphore_instance(
 }
 
 /// Tag bits marking an `ObjectId` as an `Expression` handle (pat-0q2kx.207).
-const EXPRESSION_HANDLE_TAG: u64 = 0xE4_00_0000_0000_0000;
+const EXPRESSION_HANDLE_TAG: u64 = 0xE400_0000_0000_0000;
 
 /// Godot's `Error` codes used by `Expression.parse`.
 const EXPRESSION_OK: i64 = 0;
@@ -32026,9 +31931,10 @@ fn compile_expression(code: &str) -> Result<Expr, String> {
     }
 }
 
-const REGEX_HANDLE_TAG: u64 = 0xE2_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as a `RegEx` handle.
+const REGEX_HANDLE_TAG: u64 = 0xE200_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `RegExMatch` handle.
-const REGEX_MATCH_HANDLE_TAG: u64 = 0xE3_00_0000_0000_0000;
+const REGEX_MATCH_HANDLE_TAG: u64 = 0xE300_0000_0000_0000;
 
 thread_local! {
     /// Live `RegEx` handles, keyed by raw ObjectId.
@@ -32043,7 +31949,6 @@ thread_local! {
     static NEXT_REGEX_MATCH: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
-/// Returns `true` when `id` was issued by [`new_regex_handle`].
 // ===========================================================================
 // TLSOptions / StreamPeerTLS (pat-s3rrv.237)
 // ===========================================================================
@@ -32250,6 +32155,7 @@ fn call_stream_peer_tls_instance(
     }
 }
 
+/// Returns `true` when `id` was issued by [`new_regex_handle`].
 fn is_regex_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == REGEX_HANDLE_TAG
 }
@@ -33128,7 +33034,7 @@ thread_local! {
     /// so reading them here rather than caching a per-frame value is also the
     /// faithful behaviour.
     static PERFORMANCE_CUSTOM_MONITORS: std::cell::RefCell<Vec<(String, CallableRef, Vec<Variant>)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Godot `WebRTCDataChannel` — the PacketPeer surface plus its SCTP
@@ -35573,7 +35479,7 @@ fn call_framebuffercacherd_static(method: &str, args: &[Variant]) -> Result<Vari
 /// Standard (RFC 4648) base64 encode with `=` padding.
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;
@@ -37230,7 +37136,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// 0xEB: bytes 5B B9 C1 C2 C3 CA E1 E2 E3 E4 E5 E6 E7 E8 E9 EA ED are taken. A
 /// shared tag makes two `is_*_handle` predicates both claim the same handles and
 /// misroutes every method call with no error anywhere.
-const JSON_HANDLE_TAG: u64 = 0xEB_00_0000_0000_0000;
+const JSON_HANDLE_TAG: u64 = 0xEB00_0000_0000_0000;
 
 /// Godot `Error.ERR_PARSE_ERROR` (`global_constants.rs`: 43).
 const JSON_ERR_PARSE_ERROR: i64 = 43;
@@ -38010,14 +37916,14 @@ fn call_zip_reader_instance(
             let path = arg_as_string(args, 0, "file_exists")?;
             let cs = args
                 .get(1)
-                .map_or(true, |v| !matches!(v, Variant::Bool(false)));
+                .is_none_or(|v| !matches!(v, Variant::Bool(false)));
             ZipReader::with_handle_mut(id, |z| Variant::Bool(z.file_exists(&path, cs)))
         }
         "read_file" => {
             let path = arg_as_string(args, 0, "read_file")?;
             let cs = args
                 .get(1)
-                .map_or(true, |v| !matches!(v, Variant::Bool(false)));
+                .is_none_or(|v| !matches!(v, Variant::Bool(false)));
             ZipReader::with_handle_mut(id, |z| match z.read_file(&path, cs) {
                 Ok(bytes) => Variant::PackedByteArray(bytes),
                 // Godot returns an empty PackedByteArray on failure.
@@ -38242,7 +38148,7 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
     /// Id sequence for [`LAMBDA_CONNECTIONS`]. Separate from the map's `len()`
     /// so that ids stay unique even if a future change does start removing.
-    static LAMBDA_CONNECTION_SEQ: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static LAMBDA_CONNECTION_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The synthetic method name `callable` is connected under, registering it on
@@ -38319,7 +38225,7 @@ fn lambda_connection(method_name: &str) -> Option<CallableRef> {
 /// object-level `connect` arm.
 fn callable_target(v: &Variant, self_node: Option<u64>) -> Option<(u64, String)> {
     match v {
-        Variant::Callable(c) => callable_ref_target(&**c, self_node),
+        Variant::Callable(c) => callable_ref_target(c, self_node),
         Variant::String(s) => Some((self_node?, s.clone())),
         Variant::StringName(s) => Some((self_node?, s.as_str().to_string())),
         _ => None,

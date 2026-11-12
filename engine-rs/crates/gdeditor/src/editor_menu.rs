@@ -4,8 +4,6 @@
 //! with their actions, keyboard shortcuts, enabled/disabled states, and
 //! global undo/redo integration.
 
-use std::collections::HashMap;
-
 // ---------------------------------------------------------------------------
 // Menu action IDs (matching Godot 4 editor menu items)
 // ---------------------------------------------------------------------------
@@ -306,8 +304,6 @@ pub struct EditorMenuBar {
     menus: Vec<TopMenu>,
     /// Currently open menu index (None if all closed).
     open_menu: Option<usize>,
-    /// Custom action handlers registered by name.
-    custom_actions: HashMap<String, MenuAction>,
 }
 
 impl Default for EditorMenuBar {
@@ -331,7 +327,6 @@ impl EditorMenuBar {
                 Self::build_help_menu(),
             ],
             open_menu: None,
-            custom_actions: HashMap::new(),
         }
     }
 
@@ -385,13 +380,8 @@ impl EditorMenuBar {
     /// Sets the enabled state of a menu action across all menus.
     pub fn set_action_enabled(&mut self, action: MenuAction, enabled: bool) {
         for menu in &mut self.menus {
-            if let Some(item) = menu.find_action_mut(action) {
-                if let MenuItem::Action {
-                    enabled: ref mut e, ..
-                } = item
-                {
-                    *e = enabled;
-                }
+            if let Some(MenuItem::Action { enabled: e, .. }) = menu.find_action_mut(action) {
+                *e = enabled;
             }
         }
     }
@@ -399,13 +389,8 @@ impl EditorMenuBar {
     /// Sets the checked state of a checkable menu action.
     pub fn set_action_checked(&mut self, action: MenuAction, checked: bool) {
         for menu in &mut self.menus {
-            if let Some(item) = menu.find_action_mut(action) {
-                if let MenuItem::Action {
-                    checked: ref mut c, ..
-                } = item
-                {
-                    *c = Some(checked);
-                }
+            if let Some(MenuItem::Action { checked: c, .. }) = menu.find_action_mut(action) {
+                *c = Some(checked);
             }
         }
     }

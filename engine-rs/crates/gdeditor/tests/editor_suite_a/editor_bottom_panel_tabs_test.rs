@@ -15,7 +15,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,7 +54,10 @@ fn bottom_panel_has_audio_and_shader_tabs() {
         html.contains(r#"data-tab="audio">Audio<"#),
         "bottom panel should have an Audio tab"
     );
-    assert!(html.contains(r#"id="audio-panel""#), "Audio tab should be backed by the bus-layout panel");
+    assert!(
+        html.contains(r#"id="audio-panel""#),
+        "Audio tab should be backed by the bus-layout panel"
+    );
 
     // Shader Editor tab + its panel.
     assert!(

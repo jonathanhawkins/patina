@@ -23,7 +23,8 @@ fn epoch() -> &'static Instant {
     // already running. Engine boot calls `start_clock` to anchor it properly.
     EPOCH.get_or_init(|| {
         let now = Instant::now();
-        now.checked_sub(std::time::Duration::from_micros(1)).unwrap_or(now)
+        now.checked_sub(std::time::Duration::from_micros(1))
+            .unwrap_or(now)
     })
 }
 

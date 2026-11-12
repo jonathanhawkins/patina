@@ -30,26 +30,6 @@ mod serde_color {
     }
 }
 
-mod serde_color_opt {
-    use gdcore::math::Color;
-    use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    struct ColorRepr(f32, f32, f32, f32);
-
-    pub fn serialize<S: Serializer>(color: &Option<Color>, s: S) -> Result<S::Ok, S::Error> {
-        match color {
-            Some(c) => s.serialize_some(&ColorRepr(c.r, c.g, c.b, c.a)),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Color>, D::Error> {
-        let opt: Option<ColorRepr> = Option::deserialize(d)?;
-        Ok(opt.map(|ColorRepr(r, g, b, a)| Color::new(r, g, b, a)))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Theme data model
 // ---------------------------------------------------------------------------
@@ -208,7 +188,7 @@ impl ThemeResource {
     pub fn has_item(&self, control_type: &str, item_name: &str) -> bool {
         self.overrides
             .get(control_type)
-            .map_or(false, |c| c.contains_key(item_name))
+            .is_some_and(|c| c.contains_key(item_name))
     }
 
     /// Lists all control types that have overrides.
@@ -424,8 +404,15 @@ pub struct PreviewControl {
     pub font_size: Option<u32>,
 }
 
+/// One preview control: (control class, display label, its theme items).
+type PreviewControlSpec = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, PreviewItemKind)],
+);
+
 /// Built-in preview controls and their standard theme items.
-const PREVIEW_CONTROLS: &[(&str, &str, &[(&str, PreviewItemKind)])] = &[
+const PREVIEW_CONTROLS: &[PreviewControlSpec] = &[
     (
         "Button",
         "Button",

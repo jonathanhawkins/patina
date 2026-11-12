@@ -537,17 +537,13 @@ impl StyleBox {
     /// Content margins `[l, t, r, b]` (padding) this stylebox reserves.
     pub fn content_margins(&self) -> [f32; 4] {
         match self {
-            StyleBox::Flat(f) => {
-                let mut m = [0.0; 4];
-                for i in 0..4 {
-                    m[i] = if f.content_margin[i] >= 0.0 {
-                        f.content_margin[i]
-                    } else {
-                        f.border_width[i]
-                    };
+            StyleBox::Flat(f) => std::array::from_fn(|i| {
+                if f.content_margin[i] >= 0.0 {
+                    f.content_margin[i]
+                } else {
+                    f.border_width[i]
                 }
-                m
-            }
+            }),
             StyleBox::Texture(t) => t.texture_margin,
             // Unset (`< 0`) resolves to 0 here: unlike Flat there is no border
             // width to derive a default from.
@@ -697,7 +693,7 @@ pub fn parse_styleboxes_from_tscn(text: &str) -> HashMap<String, StyleBox> {
             cur_id = extract_attr(line, "id");
             if cur_class
                 .as_deref()
-                .map_or(true, |c| !c.starts_with("StyleBox"))
+                .is_none_or(|c| !c.starts_with("StyleBox"))
             {
                 cur_id = None;
                 cur_class = None;
@@ -1315,7 +1311,10 @@ mod flat_field_tests {
             !outline.iter().any(covers_centre),
             "draw_center = false must leave the middle unpainted: {outline:?}"
         );
-        assert!(filled.iter().any(covers_centre), "draw_center = true fills the middle");
+        assert!(
+            filled.iter().any(covers_centre),
+            "draw_center = true fills the middle"
+        );
         // The border colour is still painted; the bg colour is not.
         let has_bg = |cmds: &[DrawCommand]| {
             cmds.iter().any(|c| {

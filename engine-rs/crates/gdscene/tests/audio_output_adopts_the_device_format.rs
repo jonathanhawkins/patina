@@ -54,14 +54,21 @@ fn the_bridge_tops_a_real_device_queue_up_to_its_target() {
     let queued = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let fed = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let mut bridge = AudioServerBridge::new();
-    bridge.attach_output(Box::new(QueueDevice { queued: queued.clone(), fed: fed.clone() }));
+    bridge.attach_output(Box::new(QueueDevice {
+        queued: queued.clone(),
+        fed: fed.clone(),
+    }));
     let mut tree = gdscene::scene_tree::SceneTree::new();
     let target = (DEVICE_QUEUE_TARGET_SECS * 48_000.0) as usize;
 
     // An empty device queue is filled to the target in one frame, whatever
     // the frame's own delta (here a 1 ms frame).
     bridge.process(&mut tree, 0.001);
-    assert_eq!(fed.get(), target, "an empty queue is topped up to the target");
+    assert_eq!(
+        fed.get(),
+        target,
+        "an empty queue is topped up to the target"
+    );
 
     // A full queue gets nothing more, however long the frame was.
     bridge.process(&mut tree, 0.1);

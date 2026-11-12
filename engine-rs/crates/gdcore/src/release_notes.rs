@@ -112,8 +112,8 @@ pub fn parse_conventional_commit(subject: &str) -> Option<ConventionalCommit> {
     }
 
     // Parse prefix: type[(scope)][!]
-    let (type_and_scope, breaking) = if prefix.ends_with('!') {
-        (&prefix[..prefix.len() - 1], true)
+    let (type_and_scope, breaking) = if let Some(stripped) = prefix.strip_suffix('!') {
+        (stripped, true)
     } else {
         (prefix, false)
     };

@@ -135,7 +135,10 @@ fn editor_stop_restores_editable() {
     assert!(stop.contains("200 OK"), "stop ok: {stop}");
     let stop_body: serde_json::Value =
         serde_json::from_str(extract_body(&stop)).unwrap_or_else(|e| panic!("stop json: {e}"));
-    assert_eq!(stop_body["running"], false, "stop reports not running: {stop_body}");
+    assert_eq!(
+        stop_body["running"], false,
+        "stop reports not running: {stop_body}"
+    );
     assert_eq!(
         stop_body["editor_mode"], "3d",
         "stop restores the prior editing mode: {stop_body}"
@@ -143,13 +146,22 @@ fn editor_stop_restores_editable() {
 
     // The runtime is fully torn down and editing is unlocked again.
     let after = status(port);
-    assert_eq!(after["running"], false, "runtime not running after stop: {after}");
-    assert_eq!(after["paused"], false, "runtime not paused after stop: {after}");
+    assert_eq!(
+        after["running"], false,
+        "runtime not running after stop: {after}"
+    );
+    assert_eq!(
+        after["paused"], false,
+        "runtime not paused after stop: {after}"
+    );
 
     // The served central view is back on the 3D editor — not stranded on the
     // game view.
     let restored = main_view(port);
-    assert_eq!(restored["mode"], "3d", "editor restored to 3d mode: {restored}");
+    assert_eq!(
+        restored["mode"], "3d",
+        "editor restored to 3d mode: {restored}"
+    );
     assert_eq!(
         restored["component_id"], "spatial_editor",
         "central view restored to the spatial editor: {restored}"

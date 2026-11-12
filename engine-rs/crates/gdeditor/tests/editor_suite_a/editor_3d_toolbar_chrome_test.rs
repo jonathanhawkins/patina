@@ -59,7 +59,10 @@ fn editor_html(port: u16) -> String {
 fn renders_spatial_toolbar_container() {
     let (handle, port) = make_server();
     let html = editor_html(port);
-    assert!(html.contains(r#"id="vp3d-toolbar""#), "3D spatial toolbar container missing");
+    assert!(
+        html.contains(r#"id="vp3d-toolbar""#),
+        "3D spatial toolbar container missing"
+    );
     handle.stop();
 }
 
@@ -76,7 +79,10 @@ fn renders_transform_tools() {
         ("vp3d-tool-scale", "Scale Mode (R)"),
         ("vp3d-tool-select", "Select Mode (V)"),
     ] {
-        assert!(html.contains(&format!(r#"id="{id}""#)), "missing tool button {id}");
+        assert!(
+            html.contains(&format!(r#"id="{id}""#)),
+            "missing tool button {id}"
+        );
         assert!(html.contains(tip), "missing tooltip for {id}: {tip}");
     }
     handle.stop();
@@ -89,14 +95,29 @@ fn renders_select_lock_group_ruler() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for (id, tip) in [
-        ("vp3d-list-select", "Show list of selectable nodes at position clicked."),
-        ("vp3d-lock", "Lock selected node, preventing selection and movement."),
-        ("vp3d-unlock", "Unlock selected node, allowing selection and movement."),
+        (
+            "vp3d-list-select",
+            "Show list of selectable nodes at position clicked.",
+        ),
+        (
+            "vp3d-lock",
+            "Lock selected node, preventing selection and movement.",
+        ),
+        (
+            "vp3d-unlock",
+            "Unlock selected node, allowing selection and movement.",
+        ),
         ("vp3d-group", "Groups the selected node with its children."),
-        ("vp3d-ungroup", "Ungroups the selected node from its children."),
+        (
+            "vp3d-ungroup",
+            "Ungroups the selected node from its children.",
+        ),
         ("vp3d-ruler", "Ruler Mode (M)"),
     ] {
-        assert!(html.contains(&format!(r#"id="{id}""#)), "missing button {id}");
+        assert!(
+            html.contains(&format!(r#"id="{id}""#)),
+            "missing button {id}"
+        );
         assert!(html.contains(tip), "missing tooltip for {id}: {tip}");
     }
     handle.stop();

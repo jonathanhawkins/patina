@@ -42,12 +42,29 @@ fn roughness_and_metallic_maps_load_from_godots_channels() {
     let to_lin = |v: f32| v; // maps are linear data; the decoder must not sRGB them
 
     // Default channels: RED for both.
-    let m = material_for(&dir, "roughness_texture = \"res://orm.png\"\nmetallic_texture = \"res://orm.png\"\n");
-    let r = m.roughness_texture.as_ref().expect("roughness map must be LOADED, not dropped");
-    let mt = m.metallic_texture.as_ref().expect("metallic map must be LOADED");
+    let m = material_for(
+        &dir,
+        "roughness_texture = \"res://orm.png\"\nmetallic_texture = \"res://orm.png\"\n",
+    );
+    let r = m
+        .roughness_texture
+        .as_ref()
+        .expect("roughness map must be LOADED, not dropped");
+    let mt = m
+        .metallic_texture
+        .as_ref()
+        .expect("metallic map must be LOADED");
     // Renderers read roughness from G and metallic from B.
-    assert!((r.pixels[0].g - to_lin(0.2)).abs() < 0.01, "default roughness channel is RED, got {:?}", r.pixels[0]);
-    assert!((mt.pixels[0].b - to_lin(0.2)).abs() < 0.01, "default metallic channel is RED, got {:?}", mt.pixels[0]);
+    assert!(
+        (r.pixels[0].g - to_lin(0.2)).abs() < 0.01,
+        "default roughness channel is RED, got {:?}",
+        r.pixels[0]
+    );
+    assert!(
+        (mt.pixels[0].b - to_lin(0.2)).abs() < 0.01,
+        "default metallic channel is RED, got {:?}",
+        mt.pixels[0]
+    );
 
     // Explicit channels: roughness GREEN (1), metallic BLUE (2) — glTF/ORM packing.
     let m = material_for(

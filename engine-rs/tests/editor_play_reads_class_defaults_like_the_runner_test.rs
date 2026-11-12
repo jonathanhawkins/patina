@@ -29,7 +29,10 @@ use gdvariant::Variant;
 use std::path::{Path, PathBuf};
 
 fn games() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../games").canonicalize().unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../games")
+        .canonicalize()
+        .unwrap();
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -47,7 +50,9 @@ fn main_scene_file(game: &Path) -> PathBuf {
         .find(|l| l.starts_with("run/main_scene="))
         .unwrap_or_else(|| panic!("{}: no run/main_scene", game.display()));
     let res = line.trim_start_matches("run/main_scene=").trim_matches('"');
-    let rel = res.strip_prefix("res://").unwrap_or_else(|| panic!("main_scene not res://: {res}"));
+    let rel = res
+        .strip_prefix("res://")
+        .unwrap_or_else(|| panic!("main_scene not res://: {res}"));
     game.join(rel)
 }
 
@@ -57,7 +62,11 @@ fn nodes(tree: &SceneTree, root: NodeId) -> Vec<(String, String, NodeId)> {
     tree.collect_subtree_top_down(root, &mut ids);
     ids.into_iter()
         .filter_map(|id| {
-            let rel = if id == root { ".".to_string() } else { tree.get_path_to(root, id)? };
+            let rel = if id == root {
+                ".".to_string()
+            } else {
+                tree.get_path_to(root, id)?
+            };
             Some((rel, tree.get_node(id)?.class_name().to_string(), id))
         })
         .collect()
@@ -66,7 +75,10 @@ fn nodes(tree: &SceneTree, root: NodeId) -> Vec<(String, String, NodeId)> {
 #[test]
 fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
     let games = games();
-    assert!(games.len() >= 6, "expected the six real games, found {games:?}");
+    assert!(
+        games.len() >= 6,
+        "expected the six real games, found {games:?}"
+    );
 
     // (1) The editor binary's path, for every game, BEFORE any runner boot.
     let mut editor_trees = Vec::new();
@@ -82,15 +94,26 @@ fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
 
     // The bead's concrete symptom, asserted on its own so the differential
     // below can never pass vacuously on truck_town.
-    let tt = games.iter().position(|g| g.ends_with("truck_town")).expect("truck_town");
+    let tt = games
+        .iter()
+        .position(|g| g.ends_with("truck_town"))
+        .expect("truck_town");
     {
         let play = &editor_trees[tt];
         let root = play.get_node(play.root_id()).unwrap().children()[0];
         for (path, want) in [
-            ("OptionsPanel/MarginContainer/HBoxContainer/SDFGI", "button_pressed"),
-            ("MoodPanel/MarginContainer/HBoxContainer/Sunrise", "button_pressed"),
+            (
+                "OptionsPanel/MarginContainer/HBoxContainer/SDFGI",
+                "button_pressed",
+            ),
+            (
+                "MoodPanel/MarginContainer/HBoxContainer/Sunrise",
+                "button_pressed",
+            ),
         ] {
-            let id = play.get_node_relative(root, path).unwrap_or_else(|| panic!("no {path}"));
+            let id = play
+                .get_node_relative(root, path)
+                .unwrap_or_else(|| panic!("no {path}"));
             assert_eq!(
                 play.get_node(id).unwrap().get_property(want),
                 Variant::Bool(false),
@@ -100,7 +123,10 @@ fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
         let sdfgi = play
             .get_node_relative(root, "OptionsPanel/MarginContainer/HBoxContainer/SDFGI")
             .unwrap();
-        assert_eq!(play.get_node(sdfgi).unwrap().get_property("visible"), Variant::Bool(true));
+        assert_eq!(
+            play.get_node(sdfgi).unwrap().get_property("visible"),
+            Variant::Bool(true)
+        );
     }
 
     // (2) The runner's path, and the node-by-node differential.
@@ -117,7 +143,9 @@ fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
         let mut game_mismatches = 0usize;
         for (path, class, rid) in nodes(runner, runner_root) {
             let Some((_, pclass, pid)) = play_nodes.iter().find(|(p, _, _)| *p == path) else {
-                failures.push(format!("{name}: {path} ({class}) is in the runner's tree but not editor Play's"));
+                failures.push(format!(
+                    "{name}: {path} ({class}) is in the runner's tree but not editor Play's"
+                ));
                 continue;
             };
             assert_eq!(&class, pclass, "{name}: {path} class differs");
@@ -125,11 +153,17 @@ fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
             let pnode = play.get_node(*pid).unwrap();
             for prop in gdobject::class_db::get_property_list(&class) {
                 compared += 1;
-                let (r, p) = (rnode.get_property(&prop.name), pnode.get_property(&prop.name));
+                let (r, p) = (
+                    rnode.get_property(&prop.name),
+                    pnode.get_property(&prop.name),
+                );
                 if r != p {
                     game_mismatches += 1;
                     if game_mismatches <= 8 {
-                        failures.push(format!("{name}: {path} ({class}).{}: runner {r:?} vs editor Play {p:?}", prop.name));
+                        failures.push(format!(
+                            "{name}: {path} ({class}).{}: runner {r:?} vs editor Play {p:?}",
+                            prop.name
+                        ));
                     }
                 }
             }
@@ -138,6 +172,13 @@ fn editor_play_reads_every_unset_property_as_the_runner_does_on_every_game() {
             failures.push(format!("{name}: … {} more mismatches", game_mismatches - 8));
         }
     }
-    assert!(compared > 10_000, "compared only {compared} property reads — the walk is broken");
-    assert!(failures.is_empty(), "editor Play ≠ runner on unset/authored properties:\n{}", failures.join("\n"));
+    assert!(
+        compared > 10_000,
+        "compared only {compared} property reads — the walk is broken"
+    );
+    assert!(
+        failures.is_empty(),
+        "editor Play ≠ runner on unset/authored properties:\n{}",
+        failures.join("\n")
+    );
 }

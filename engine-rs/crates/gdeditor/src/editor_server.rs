@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode, TrackType};
 use gdscene::main_loop::MainLoop;
 use gdscene::node::{Node, NodeId};
-use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+use gdscene::packed_scene::PackedScene;
 use gdscene::scene_saver::TscnSaver;
 use gdscene::tilemap;
 use gdscene::SceneTree;
@@ -113,9 +113,6 @@ pub struct LogEntry {
 /// Maximum number of log entries to keep.
 const MAX_LOG_ENTRIES: usize = 100;
 
-/// Maximum number of frame time entries to keep.
-const MAX_FRAME_TIMES: usize = 120;
-
 /// Editor display settings that can be persisted.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditorDisplaySettings {
@@ -187,7 +184,7 @@ pub fn compute_smart_snap(
 
     let dragged_size = tree
         .get_node(dragged_id)
-        .map(|n| extract_size(n))
+        .map(extract_size)
         .unwrap_or(Vector2::ZERO);
     let parent_id = tree
         .get_node(dragged_id)
@@ -329,7 +326,11 @@ impl SceneSaveBaseline {
     /// The baseline for `tree`'s edited scene, just opened from `original`.
     pub fn capture(tree: &SceneTree, original: String) -> Option<Self> {
         let root = edited_scene_root(tree)?;
-        Some(Self { root: root.raw(), generated: TscnSaver::save_tree(tree, root), original })
+        Some(Self {
+            root: root.raw(),
+            generated: TscnSaver::save_tree(tree, root),
+            original,
+        })
     }
 
     /// The text to write for `root`'s scene, whose saver output is now
@@ -351,7 +352,8 @@ impl SceneSaveBaseline {
 
 /// The edited scene's root: the first child of the tree root.
 fn edited_scene_root(tree: &SceneTree) -> Option<NodeId> {
-    tree.get_node(tree.root_id()).and_then(|r| r.children().first().copied())
+    tree.get_node(tree.root_id())
+        .and_then(|r| r.children().first().copied())
 }
 
 /// Shared editor state protected by a mutex.
@@ -528,6 +530,7 @@ pub struct EditorState {
     /// Stored as `(source_id, atlas_x, atlas_y)`: an entry is honoured only
     /// while the cell still holds that source, so a later plain paint / fill
     /// over a terrain cell can never inherit its stale atlas coords.
+    #[allow(clippy::type_complexity)]
     pub tile_atlas_coords: HashMap<NodeId, HashMap<(i32, i32), (i32, i32, i32)>>,
     /// The TileSet's terrain sets (Godot `TileSet.terrain_set_*`), each with
     /// its terrains and peering-bit → tile mapping.
@@ -537,12 +540,14 @@ pub struct EditorState {
     pub terrain_maps: HashMap<NodeId, gdscene::tilemap::TerrainMap>,
     /// Captured `TileMapPattern`s: (width, height, cells as
     /// (dx, dy, source_id, atlas_x, atlas_y)).
+    #[allow(clippy::type_complexity)]
     pub tile_patterns: Vec<(i32, i32, Vec<(i32, i32, i32, i32, i32)>)>,
     /// What each grid cell held when the editor last synced with the node's
     /// `tile_map_data` — `(source, alternative, atlas)` per cell. The
     /// write-back MERGES: only cells whose state differs from this baseline
     /// are rewritten, so cells the dense grid cannot represent (negative
     /// coords, TileSet source 0 — which the grid uses for "empty") survive.
+    #[allow(clippy::type_complexity)]
     pub tile_grid_baseline: HashMap<NodeId, HashMap<(i32, i32), (i32, i32, (i32, i32))>>,
     /// Currently active editor mode: "2d", "3d", or "script".
     pub editor_mode: String,
@@ -1327,7 +1332,7 @@ impl EditorState {
                 merged.set_deadzone(&name, deadzone);
             }
             if let Some(events) = runtime.events(&name) {
-                for event in events.to_vec() {
+                for event in events.iter().cloned() {
                     merged.bind(&name, event);
                 }
             }
@@ -1435,7 +1440,7 @@ impl EditorState {
         // it when its node is gone, falling back to the first surviving id.
         let single_alive = self
             .selected_node
-            .map_or(false, |id| self.scene_tree.get_node(id).is_some());
+            .is_some_and(|id| self.scene_tree.get_node(id).is_some());
         if !single_alive {
             self.selected_node = self.selected_nodes.first().copied();
         }
@@ -2257,7 +2262,11 @@ impl EditorServerHandle {
         let ms = took.as_secs_f64() * 1000.0;
         let mut state = self.state.lock().unwrap();
         let prev = state.frame_stats.render_ms;
-        state.frame_stats.render_ms = if prev == 0.0 { ms } else { prev * 0.8 + ms * 0.2 };
+        state.frame_stats.render_ms = if prev == 0.0 {
+            ms
+        } else {
+            prev * 0.8 + ms * 0.2
+        };
     }
 
     /// Byte-native frame update for the GPU editor path (pat-ism62): stores a
@@ -2306,6 +2315,7 @@ impl EditorServerHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_server(
     state: Arc<Mutex<EditorState>>,
     viewport_cache: Arc<ViewportCache>,
@@ -3345,11 +3355,15 @@ fn handle_connection(
         ("POST", "/api/tilemap/line") => api_tilemap_line(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("GET", "/api/tileset/terrain_sets") => api_terrain_sets(state, &mut stream),
-        ("POST", "/api/tileset/terrain_set/add") => api_terrain_set_add(state, &req.body, &mut stream),
+        ("POST", "/api/tileset/terrain_set/add") => {
+            api_terrain_set_add(state, &req.body, &mut stream)
+        }
         ("POST", "/api/tileset/terrain/add") => api_terrain_add(state, &req.body, &mut stream),
         ("POST", "/api/tileset/tile/peering") => api_tile_peering(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/terrain_paint") => api_terrain_paint(state, &req.body, &mut stream),
-        ("POST", "/api/tilemap/pattern/create") => api_pattern_create(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/pattern/create") => {
+            api_pattern_create(state, &req.body, &mut stream)
+        }
         ("POST", "/api/tilemap/pattern/paint") => api_pattern_paint(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
@@ -3601,7 +3615,7 @@ fn handle_connection(
 // each connection is handled on its own thread (`thread::spawn` in
 // `run_server`); the status is reset at the start of each request.
 thread_local! {
-    static LAST_RESPONSE_STATUS: std::cell::Cell<u16> = std::cell::Cell::new(0);
+    static LAST_RESPONSE_STATUS: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
 fn audit_set_status(status: u16) {
@@ -3656,9 +3670,23 @@ pub fn gdscript_diagnostics(source: &str) -> Vec<(usize, usize, String, bool)> {
     use gdscript_interop::tokenizer::LexError;
     use gdscript_interop::type_checker::{type_check, TypeCheckError};
     match type_check(source) {
-        Ok(findings) => findings.into_iter().map(|e| (0, 0, e.message, false)).collect(),
-        Err(TypeCheckError::Parse(ParseError::UnexpectedToken { token, expected, line, col, .. })) => {
-            vec![(line, col, format!("unexpected {token}, expected {expected}"), true)]
+        Ok(findings) => findings
+            .into_iter()
+            .map(|e| (0, 0, e.message, false))
+            .collect(),
+        Err(TypeCheckError::Parse(ParseError::UnexpectedToken {
+            token,
+            expected,
+            line,
+            col,
+            ..
+        })) => {
+            vec![(
+                line,
+                col,
+                format!("unexpected {token}, expected {expected}"),
+                true,
+            )]
         }
         // No position on EOF: Godot reports it at the end of the file.
         Err(TypeCheckError::Parse(ParseError::UnexpectedEof)) => {
@@ -3703,7 +3731,10 @@ fn api_script_validate(body: &str, stream: &mut TcpStream) {
             })
         })
         .collect();
-    send_json(stream, &serde_json::json!({"ok": ok, "diagnostics": list}).to_string());
+    send_json(
+        stream,
+        &serde_json::json!({"ok": ok, "diagnostics": list}).to_string(),
+    );
 }
 
 fn send_json(stream: &mut TcpStream, json: &str) {
@@ -3997,7 +4028,7 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 /// `A-Z a-z 0-9 + /` alphabet expected by the WebSocket handshake.
 pub(crate) fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -4301,8 +4332,8 @@ fn node_to_json_tree_with_warnings(
         })
         .map(|&cid| node_to_json_tree_with_warnings(tree, cid, node_warnings, edited_root))
         .collect();
-    let foreign = edited_root
-        .is_some_and(|root| gdscene::packed_scene::is_foreign_node(tree, root, node_id));
+    let foreign =
+        edited_root.is_some_and(|root| gdscene::packed_scene::is_foreign_node(tree, root, node_id));
 
     // Godot's row triangle: present when the node reports at least one
     // configuration warning, and its tooltip lists them.
@@ -4358,7 +4389,7 @@ fn node_to_json_tree_with_warnings(
             .into_iter()
             .filter(|&other| other != node_id)
             .any(|other| {
-                tree.get_node(other).map_or(false, |o| {
+                tree.get_node(other).is_some_and(|o| {
                     matches!(o.get_property("_unique_name_in_owner"), Variant::Bool(true))
                         && o.name() == my_name
                 })
@@ -4444,6 +4475,7 @@ fn is_internal_resource_marker(v: &Variant) -> bool {
 ///   * parent is another `Control` → `0` (Position mode),
 ///   * otherwise (scene-root Control under the viewport `Window`) → `3`
 ///     (Uncontrolled).
+///
 /// An explicitly-stored `layout_mode` (a deliberate Anchors choice in the
 /// `.tscn`) takes precedence.
 fn compute_control_layout_mode(tree: &SceneTree, node_id: NodeId) -> i64 {
@@ -4756,7 +4788,6 @@ fn scene_res_path(state: &EditorState) -> Option<String> {
     ))
 }
 
-/// Finds a NodeId from a raw u64 by scanning the scene tree.
 // ---------------------------------------------------------------------------
 // SpriteFrames authoring (pat-0q2kx.74)
 //
@@ -4877,7 +4908,7 @@ fn api_spriteframes_get(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
 
 /// Shared preamble: parse the body, resolve the node, return both.
 fn sf_target(
-    state: &Arc<Mutex<EditorState>>,
+    _state: &Arc<Mutex<EditorState>>,
     body: &str,
     stream: &mut TcpStream,
 ) -> Option<(serde_json::Value, u64)> {
@@ -5129,6 +5160,7 @@ fn absolute_node_path(tree: &SceneTree, node_id: NodeId) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Finds a NodeId from a raw u64 by scanning the scene tree.
 fn find_node_by_raw_id(tree: &SceneTree, raw: u64) -> Option<NodeId> {
     // Walk from root to find the node with this raw id.
     let mut stack = vec![tree.root_id()];
@@ -5179,8 +5211,12 @@ fn api_get_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             }
         }
         let edited_root = edited_scene_root(&state.scene_tree).or(Some(root_id));
-        let tree_json =
-            node_to_json_tree_with_warnings(&state.scene_tree, root_id, &node_warnings, edited_root);
+        let tree_json = node_to_json_tree_with_warnings(
+            &state.scene_tree,
+            root_id,
+            &node_warnings,
+            edited_root,
+        );
         // Godot parity: tell the client which main-screen editor (2D/3D) fits this
         // scene so a freshly opened 3D scene lands in the spatial editor instead
         // of the 2D canvas (where the 3D camera controls don't apply).
@@ -10535,9 +10571,11 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     };
 
     // Text `.tscn` or binary `.scn` (pat-33wmr).
-    let source = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
-        gdscene::binary_scene::scene_source_from_bytes(&bytes, &path).map_err(|e| e.to_string())
-    }) {
+    let source = match std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            gdscene::binary_scene::scene_source_from_bytes(&bytes, &path).map_err(|e| e.to_string())
+        }) {
         Ok(s) => s,
         Err(e) => {
             send_error(stream, 400, &format!("failed to read: {e}"));
@@ -10564,7 +10602,11 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     let mut new_tree = SceneTree::new();
     let root_id = new_tree.root_id();
 
-    match gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut new_tree, root_id, &scene) {
+    match gdscene::packed_scene::add_packed_scene_to_tree_for_editing(
+        &mut new_tree,
+        root_id,
+        &scene,
+    ) {
         Ok(_) => {
             // If the scene has a WorldEnvironment, preview *its* environment
             // (background, tonemap, glow, fog, ambient) like Godot; otherwise
@@ -10705,7 +10747,7 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     // Edit-locked nodes are unpickable in the viewport: drop a locked hit so
     // clicking it selects nothing (matches Godot's lock behavior).
     let hit = hit.filter(|&id| {
-        state.scene_tree.get_node(id).map_or(true, |n| {
+        state.scene_tree.get_node(id).is_none_or(|n| {
             !(matches!(n.get_property("_edit_lock_"), Variant::Bool(true))
                 || matches!(n.get_property("_locked"), Variant::Bool(true)))
         })
@@ -11751,10 +11793,12 @@ fn api_viewport_3d_gizmo_begin(
     // Match the hit-test geometry to the rendered gizmo size (which is scaled by
     // camera distance) so rings/handles are clickable where they are drawn.
     let len = crate::viewport_3d_render::gizmo_arrow_length(&st.editor_viewport_3d);
-    let mut cfg = crate::viewport_3d::GizmoConfig3D::default();
-    cfg.arrow_length = len;
-    cfg.ring_radius = len;
-    cfg.scale_handle_length = len;
+    let cfg = crate::viewport_3d::GizmoConfig3D {
+        arrow_length: len,
+        ring_radius: len,
+        scale_handle_length: len,
+        ..Default::default()
+    };
     let axis = st
         .editor_viewport_3d
         .hit_test_gizmo_full(x, y, center, &cfg);
@@ -11827,7 +11871,6 @@ fn api_viewport_3d_gizmo_update(
     let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
     let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
-    use crate::viewport_3d::GizmoAxis;
     let mut state = state.lock().unwrap();
     let st = &mut *state;
     // Snap to the configured increments while snapping is active (Godot's
@@ -12867,8 +12910,8 @@ fn scan_directory(
     }
 
     // Sort: directories first, then files, both alphabetically.
-    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.sort_by_key(|a| a.name.to_lowercase());
+    files.sort_by_key(|a| a.name.to_lowercase());
     dirs.extend(files);
     dirs
 }
@@ -13801,7 +13844,6 @@ fn api_filesystem_file_info(state: &Arc<Mutex<EditorState>>, query: &str, stream
     );
 }
 
-/// `POST /api/filesystem/favorite` — add, remove, or toggle a favorite path
 // ---------------------------------------------------------------------------
 // Export presets (pat-0q2kx.11)
 //
@@ -14244,6 +14286,7 @@ fn api_export_run(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     }
 }
 
+/// `POST /api/filesystem/favorite` — add, remove, or toggle a favorite path
 /// in the FileSystem dock and persist the list to disk (pat-k6600).
 ///
 /// Body: `{"path":"res://scenes","action":"add"|"remove"|"toggle"}`.
@@ -14411,7 +14454,7 @@ fn api_get_file_preview(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
             // Fully URL-decoded: decoding only %20/%2F left the `%3A` that
             // `encodeURIComponent("res://…")` produces, so `res://` was never
             // stripped and every encoded preview URL 404'd.
-            url_decode(&p).replace("res://", "")
+            url_decode(p).replace("res://", "")
         }
         None => {
             send_error(stream, 400, "missing path parameter");
@@ -18170,7 +18213,11 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     // button the same way (a browser playtest compared against a reference).
     let pinned = parse_json_body(body)
         .and_then(|v| v.get("seed").and_then(|s| s.as_i64()))
-        .or_else(|| std::env::var("PATINA_RNG_SEED").ok().and_then(|s| s.trim().parse().ok()));
+        .or_else(|| {
+            std::env::var("PATINA_RNG_SEED")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+        });
     gdscript_interop::interpreter::pin_random_seed(pinned);
     if pinned.is_none() {
         gdscript_interop::interpreter::randomize_global_rng();
@@ -18189,20 +18236,18 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         .and_then(|v| v.get("scene").and_then(|s| s.as_str()).map(|s| s == "main"))
         .unwrap_or(false);
     let main_swap = if want_main {
-        project_settings
-            .as_ref()
-            .and_then(|ps| {
-                // Its constructor draws are made by `build_play_tree`, once.
-                let _no_ctor_draws = gdscene::construction_randomness::suppress();
-                main_scene_for_play(&state, ps.main_scene())
-            })
+        project_settings.as_ref().and_then(|ps| {
+            // Its constructor draws are made by `build_play_tree`, once.
+            let _no_ctor_draws = gdscene::construction_randomness::suppress();
+            main_scene_for_play(&state, ps.main_scene())
+        })
     } else {
         None
     };
     let saved_edit = main_swap.map(|(tree, file)| {
         (
             std::mem::replace(&mut state.scene_tree, tree),
-            std::mem::replace(&mut state.scene_file, Some(file)),
+            state.scene_file.replace(file),
         )
     });
     let cloned = build_play_tree(&mut state, project_settings.as_ref());
@@ -18410,9 +18455,9 @@ pub fn build_play_tree(
             .into_iter()
             .filter(|&id| {
                 id != scene_root
-                    && cloned
-                        .get_node(id)
-                        .is_some_and(|n| n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY))
+                    && cloned.get_node(id).is_some_and(|n| {
+                        n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY)
+                    })
                     && {
                         let mut cursor = cloned.get_node(id).and_then(|n| n.parent());
                         let mut nested = false;
@@ -19091,9 +19136,10 @@ fn api_runtime_audio(query: &str, stream: &mut TcpStream) {
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(5.0)
             .clamp(0.1, gdaudio::output::HISTORY_SECS);
-        let (Some(stats), Some((samples, rate, ch))) =
-            (gdaudio::live_device_stats(), gdaudio::live_device_capture(secs))
-        else {
+        let (Some(stats), Some((samples, rate, ch))) = (
+            gdaudio::live_device_stats(),
+            gdaudio::live_device_capture(secs),
+        ) else {
             // 200 with `device: null`, not 404: the ROUTE exists (the
             // capabilities lint treats a 404 as a phantom route); there is
             // simply no device to measure yet.
@@ -19538,17 +19584,30 @@ fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, strea
         send_error(stream, 400, "invalid JSON");
         return;
     };
-    let Some(path) = parsed.get("asset_path").and_then(|v| v.as_str()).map(str::to_string) else {
+    let Some(path) = parsed
+        .get("asset_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
         send_error(stream, 400, "missing asset_path");
         return;
     };
-    let asset_type = parsed.get("asset_type").and_then(|v| v.as_str()).unwrap_or("");
+    let asset_type = parsed
+        .get("asset_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let Some(parent_raw) = parsed.get("parent_id").and_then(|v| v.as_u64()) else {
         send_error(stream, 400, "missing parent_id");
         return;
     };
-    let px = parsed.get("viewport_x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-    let py = parsed.get("viewport_y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let px = parsed
+        .get("viewport_x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let py = parsed
+        .get("viewport_y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
 
     // (class, property that receives the resource path)
     let (class, path_prop): (&str, Option<&str>) = match asset_type {
@@ -19580,7 +19639,10 @@ fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, strea
         return;
     }
     let created = match &cmd {
-        EditorCommand::AddNode { created_id: Some(id), .. } => *id,
+        EditorCommand::AddNode {
+            created_id: Some(id),
+            ..
+        } => *id,
         _ => {
             send_error(stream, 500, "node was not created");
             return;
@@ -19599,10 +19661,14 @@ fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, strea
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
     state.scene_modified = true;
-    state.add_log("info", format!("Dropped {asset_type} '{path}' as {class} '{name}'"));
+    state.add_log(
+        "info",
+        format!("Dropped {asset_type} '{path}' as {class} '{name}'"),
+    );
     send_json(
         stream,
-        &serde_json::json!({"node_id": created.raw(), "node_class": class, "name": name}).to_string(),
+        &serde_json::json!({"node_id": created.raw(), "node_class": class, "name": name})
+            .to_string(),
     );
 }
 
@@ -19842,10 +19908,6 @@ fn pixel_to_world_pos(state: &EditorState, pixel_x: f32, pixel_y: f32) -> Vector
 // Collision shape resize endpoint
 // ---------------------------------------------------------------------------
 
-/// `POST /api/viewport/shape_resize` — resizes a collision shape.
-///
-/// Body: `{"node_id": 123, "handle": "radius", "value": 50.0}`
-///    or `{"node_id": 123, "handle": "extents", "value": [30, 20]}`
 // ---------------------------------------------------------------------------
 // Path2D / Polygon2D / Line2D point editing (pat-0q2kx.77)
 //
@@ -20108,6 +20170,10 @@ fn api_shape_handles(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut 
     );
 }
 
+/// `POST /api/viewport/shape_resize` — resizes a collision shape.
+///
+/// Body: `{"node_id": 123, "handle": "radius", "value": 50.0}`
+///    or `{"node_id": 123, "handle": "extents", "value": [30, 20]}`
 fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -21178,6 +21244,13 @@ fn layer_has_tile_source(state: &EditorState, nid: NodeId, source: i32) -> bool 
     })
 }
 
+/// One `write_layer_cells` entry: a cell and what to put there —
+/// `Some((source, atlas, alternative))`, or `None` to erase it.
+type LayerCellWrite = ((i32, i32), Option<(i32, (i32, i32), i32)>);
+
+/// A tile placement: `(cell, source, atlas)`.
+type TilePlacement = ((i32, i32), i32, (i32, i32));
+
 /// Writes cells STRAIGHT into the layer's `tile_map_data` — any coordinate,
 /// any source — as ONE undoable property change, then drops the grid cache.
 /// `None` erases the cell. 🔑 Terrain, pattern and the grid-unrepresentable
@@ -21185,11 +21258,7 @@ fn layer_has_tile_source(state: &EditorState, nid: NodeId, source: i32) -> bool 
 /// on TileSet source 0 (Godot's first source — the platformer demo's grass
 /// top) was silently dropped, and so was every negative coordinate (that level
 /// spans x = -12..22).
-fn write_layer_cells(
-    state: &mut EditorState,
-    nid: NodeId,
-    writes: &[((i32, i32), Option<(i32, (i32, i32), i32)>)],
-) -> bool {
+fn write_layer_cells(state: &mut EditorState, nid: NodeId, writes: &[LayerCellWrite]) -> bool {
     let Some(node) = state.scene_tree.get_node(nid) else {
         return false;
     };
@@ -21203,8 +21272,10 @@ fn write_layer_cells(
     // Fold any pending grid edits in first so none are lost with the cache.
     if state.tile_grid_store.get(nid).is_some() {
         writeback_tile_grid(state, nid);
-        if let Some(Variant::PackedByteArray(b)) =
-            state.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data"))
+        if let Some(Variant::PackedByteArray(b)) = state
+            .scene_tree
+            .get_node(nid)
+            .map(|n| n.get_property("tile_map_data"))
         {
             cells = gdscene::tilemap::decode_tile_map_data(&b);
         }
@@ -21215,7 +21286,11 @@ fn write_layer_cells(
             Some((src, (ax, ay), alt)) => {
                 cells.insert(
                     key,
-                    gdscene::tilemap::TileData::with_atlas(src, gdcore::math::Vector2i::new(ax, ay), alt),
+                    gdscene::tilemap::TileData::with_atlas(
+                        src,
+                        gdcore::math::Vector2i::new(ax, ay),
+                        alt,
+                    ),
                 );
             }
             None => {
@@ -21241,7 +21316,10 @@ fn write_layer_cells(
 
 /// After undo/redo of a direct `tile_map_data` write, the grid cache is stale.
 fn invalidate_grid_after_history(state: &mut EditorState, cmd: &EditorCommand) {
-    if let EditorCommand::SetProperty { node_id, property, .. } = cmd {
+    if let EditorCommand::SetProperty {
+        node_id, property, ..
+    } = cmd
+    {
         if property == "tile_map_data" {
             invalidate_tile_grid(state, *node_id);
         }
@@ -21293,7 +21371,11 @@ fn ensure_tile_grid(state: &mut EditorState, nid: NodeId, x: i32, y: i32) {
                     .or_default()
                     .insert((c.x, c.y), (d.source_id, atlas.0, atlas.1));
                 if d.alternative_id != 0 {
-                    state.tile_alternatives.entry(nid).or_default().insert((c.x, c.y), d.alternative_id);
+                    state
+                        .tile_alternatives
+                        .entry(nid)
+                        .or_default()
+                        .insert((c.x, c.y), d.alternative_id);
                 }
                 baseline.insert((c.x, c.y), (d.source_id, d.alternative_id, atlas));
             }
@@ -21344,8 +21426,15 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
         for x in 0..grid.width {
             let (cx, cy) = (x as i32, y as i32);
             let t = grid.cells[y * grid.width + x];
-            let now = if t == 0 { (0, 0, (0, 0)) } else { view(cx, cy, t) };
-            let before = baseline.and_then(|b| b.get(&(cx, cy))).copied().unwrap_or((0, 0, (0, 0)));
+            let now = if t == 0 {
+                (0, 0, (0, 0))
+            } else {
+                view(cx, cy, t)
+            };
+            let before = baseline
+                .and_then(|b| b.get(&(cx, cy)))
+                .copied()
+                .unwrap_or((0, 0, (0, 0)));
             if t != 0 {
                 new_baseline.insert((cx, cy), now);
             }
@@ -21359,7 +21448,11 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
                 let (_, alt, (ax, ay)) = now;
                 cells.insert(
                     key,
-                    gdscene::tilemap::TileData::with_atlas(t, gdcore::math::Vector2i::new(ax, ay), alt),
+                    gdscene::tilemap::TileData::with_atlas(
+                        t,
+                        gdcore::math::Vector2i::new(ax, ay),
+                        alt,
+                    ),
                 );
             }
         }
@@ -21571,12 +21664,15 @@ fn api_tilemap_erase(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     };
     // A cell the grid cannot hold (negative coords, or on source 0) is not in
     // the grid at all, so "paint 0" there would erase nothing.
-    let held_outside_grid = s.scene_tree.get_node(nid).is_some_and(|n| match n.get_property("tile_map_data") {
-        Variant::PackedByteArray(b) => gdscene::tilemap::decode_tile_map_data(&b)
-            .get(&gdcore::math::Vector2i::new(x, y))
-            .is_some_and(|d| grid_cannot_hold(x, y, d.source_id)),
-        _ => false,
-    });
+    let held_outside_grid =
+        s.scene_tree
+            .get_node(nid)
+            .is_some_and(|n| match n.get_property("tile_map_data") {
+                Variant::PackedByteArray(b) => gdscene::tilemap::decode_tile_map_data(&b)
+                    .get(&gdcore::math::Vector2i::new(x, y))
+                    .is_some_and(|d| grid_cannot_hold(x, y, d.source_id)),
+                _ => false,
+            });
     if held_outside_grid || x < 0 || y < 0 {
         write_layer_cells(&mut s, nid, &[((x, y), None)]);
         send_json(stream, r#"{"ok":true}"#);
@@ -21734,8 +21830,10 @@ fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
             // Per-cell atlas coords, decoded from the node's OWN
             // `tile_map_data` — the round trip, not an editor-side cache.
             let mut atlas = serde_json::Map::new();
-            if let Some(Variant::PackedByteArray(bytes)) =
-                s.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data"))
+            if let Some(Variant::PackedByteArray(bytes)) = s
+                .scene_tree
+                .get_node(nid)
+                .map(|n| n.get_property("tile_map_data"))
             {
                 for (cell, data) in gdscene::tilemap::decode_tile_map_data(&bytes) {
                     atlas.insert(
@@ -21814,7 +21912,10 @@ fn api_terrain_sets(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         .enumerate()
         .map(|(i, (w, h, cells))| serde_json::json!({"pattern": i, "size": [w, h], "cells": cells.len()}))
         .collect();
-    send_json(stream, &serde_json::json!({"terrain_sets": sets, "patterns": patterns}).to_string());
+    send_json(
+        stream,
+        &serde_json::json!({"terrain_sets": sets, "patterns": patterns}).to_string(),
+    );
 }
 
 /// `POST /api/tileset/terrain_set/add` — `{"mode"}` → `{"terrain_set": idx}`.
@@ -21842,14 +21943,21 @@ fn api_terrain_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         send_error(stream, 400, "missing terrain_set or id");
         return;
     };
-    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("Terrain").to_string();
+    let name = p
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Terrain")
+        .to_string();
     let mut s = state.lock().unwrap();
     let Some(ts) = s.terrain_sets.get_mut(set as usize) else {
         send_error(stream, 404, "no such terrain set");
         return;
     };
     ts.add_terrain(gdscene::tilemap::TerrainType::new(id, name));
-    send_json(stream, &serde_json::json!({"ok": true, "terrain_set": set, "id": id}).to_string());
+    send_json(
+        stream,
+        &serde_json::json!({"ok": true, "terrain_set": set, "id": id}).to_string(),
+    );
 }
 
 /// `POST /api/tileset/tile/peering` — paint a tile's peering bits:
@@ -21863,7 +21971,11 @@ fn api_tile_peering(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         json_i32(&p, "source_id"),
         p.get("atlas_coords").and_then(json_pair),
     ) else {
-        send_error(stream, 400, "missing terrain_set, terrain, bitmask, source_id or atlas_coords");
+        send_error(
+            stream,
+            400,
+            "missing terrain_set, terrain, bitmask, source_id or atlas_coords",
+        );
         return;
     };
     if !(0..=255).contains(&mask) {
@@ -21871,17 +21983,28 @@ fn api_tile_peering(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         return;
     }
     let mut s = state.lock().unwrap();
-    let Some(t) = s.terrain_sets.get_mut(set as usize).and_then(|ts| ts.terrains.get_mut(&terrain)) else {
+    let Some(t) = s
+        .terrain_sets
+        .get_mut(set as usize)
+        .and_then(|ts| ts.terrains.get_mut(&terrain))
+    else {
         send_error(stream, 404, "no such terrain");
         return;
     };
-    t.add_tile(mask as u8, src, gdcore::math::Vector2i::new(atlas.0, atlas.1));
+    t.add_tile(
+        mask as u8,
+        src,
+        gdcore::math::Vector2i::new(atlas.0, atlas.1),
+    );
     send_json(stream, &serde_json::json!({"ok": true}).to_string());
 }
 
 /// Writes `(cell, source, atlas)` placements into a layer's grid + atlas map.
-fn place_tiles(state: &mut EditorState, nid: NodeId, placed: &[((i32, i32), i32, (i32, i32))]) -> bool {
-    let writes: Vec<_> = placed.iter().map(|&(c, src, atlas)| (c, Some((src, atlas, 0)))).collect();
+fn place_tiles(state: &mut EditorState, nid: NodeId, placed: &[TilePlacement]) -> bool {
+    let writes: Vec<_> = placed
+        .iter()
+        .map(|&(c, src, atlas)| (c, Some((src, atlas, 0))))
+        .collect();
     write_layer_cells(state, nid, &writes)
 }
 
@@ -21901,7 +22024,12 @@ fn api_terrain_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     let cells: Vec<gdcore::math::Vector2i> = p
         .get("cells")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(json_pair).map(|(x, y)| gdcore::math::Vector2i::new(x, y)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(json_pair)
+                .map(|(x, y)| gdcore::math::Vector2i::new(x, y))
+                .collect()
+        })
         .unwrap_or_default();
     let mut s = state.lock().unwrap();
     let Some(nid) = find_node_by_raw_id(&s.scene_tree, nr) else {
@@ -21920,7 +22048,7 @@ fn api_terrain_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         let map = s.terrain_maps.entry(nid).or_default();
         gdscene::tilemap::paint_terrain(map, &ts, terrain, &cells)
     };
-    let placed: Vec<((i32, i32), i32, (i32, i32))> = resolved
+    let placed: Vec<TilePlacement> = resolved
         .iter()
         .map(|(c, src, a)| ((c.x, c.y), *src, (a.x, a.y)))
         .collect();
@@ -21942,9 +22070,15 @@ fn api_pattern_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let rect: Vec<i32> = p
         .get("rect")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_i64()).map(|v| v as i32).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_i64())
+                .map(|v| v as i32)
+                .collect()
+        })
         .unwrap_or_default();
-    let (Some(nr), [rx, ry, rw, rh]) = (p.get("node_id").and_then(|v| v.as_u64()), rect.as_slice()) else {
+    let (Some(nr), [rx, ry, rw, rh]) = (p.get("node_id").and_then(|v| v.as_u64()), rect.as_slice())
+    else {
         send_error(stream, 400, "missing node_id or rect [x,y,w,h]");
         return;
     };
@@ -21960,7 +22094,8 @@ fn api_pattern_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     // Seeded on demand (see `sync_tile_grids_from_scene`).
     if s.tile_grid_store.get(nid).is_none()
         && s.scene_tree.get_node(nid).is_some_and(|n| {
-            is_tilemap_class(n.class_name()) && matches!(n.get_property("tile_map_data"), Variant::PackedByteArray(_))
+            is_tilemap_class(n.class_name())
+                && matches!(n.get_property("tile_map_data"), Variant::PackedByteArray(_))
         })
     {
         ensure_tile_grid(&mut s, nid, 0, 0);
@@ -21986,7 +22121,10 @@ fn api_pattern_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     }
     s.tile_patterns.push((*rw, *rh, cells));
     let idx = s.tile_patterns.len() - 1;
-    send_json(stream, &serde_json::json!({"pattern": idx, "size": [rw, rh]}).to_string());
+    send_json(
+        stream,
+        &serde_json::json!({"pattern": idx, "size": [rw, rh]}).to_string(),
+    );
 }
 
 /// `POST /api/tilemap/pattern/paint` — stamp `{"node_id","pattern","at":[x,y]}`.
@@ -22009,13 +22147,18 @@ fn api_pattern_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         send_error(stream, 404, "no such pattern");
         return;
     };
-    let placed: Vec<((i32, i32), i32, (i32, i32))> =
-        cells.iter().map(|&(dx, dy, src, ax, ay)| ((ox + dx, oy + dy), src, (ax, ay))).collect();
+    let placed: Vec<TilePlacement> = cells
+        .iter()
+        .map(|&(dx, dy, src, ax, ay)| ((ox + dx, oy + dy), src, (ax, ay)))
+        .collect();
     if !place_tiles(&mut s, nid, &placed) {
         send_error(stream, 404, "no tilemap data");
         return;
     }
-    send_json(stream, &serde_json::json!({"ok": true, "cells": placed.len()}).to_string());
+    send_json(
+        stream,
+        &serde_json::json!({"ok": true, "cells": placed.len()}).to_string(),
+    );
 }
 
 fn api_tilemap_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -22087,12 +22230,14 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
     let layer_size = s
         .selected_node
         .and_then(|id| s.scene_tree.get_node(id))
-        .and_then(|n| match n.get_property(gdscene::tilemap::TILE_SET_TILE_SIZE) {
-            Variant::Vector2i(v) if v.x > 0 && v.y > 0 => Some((v.x as f32, v.y as f32)),
-            Variant::Vector2(v) if v.x > 0.0 && v.y > 0.0 => Some((v.x, v.y)),
-            _ => None,
-        });
-    let (cw, ch) = layer_size.unwrap_or((ts.cell_size.x as f32, ts.cell_size.y as f32));
+        .and_then(
+            |n| match n.get_property(gdscene::tilemap::TILE_SET_TILE_SIZE) {
+                Variant::Vector2i(v) if v.x > 0 && v.y > 0 => Some((v.x as f32, v.y as f32)),
+                Variant::Vector2(v) if v.x > 0.0 && v.y > 0.0 => Some((v.x, v.y)),
+                _ => None,
+            },
+        );
+    let (cw, ch) = layer_size.unwrap_or((ts.cell_size.x, ts.cell_size.y));
     // 🔑 The palette offers the selected layer's OWN TileSet when it has one:
     // one swatch per atlas source, showing the region a paint with that source
     // places (atlas (0,0)). It used to list the editor's built-in colour
@@ -22113,7 +22258,11 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
                 .filter_map(|&sid| {
                     let src = set.sources.get(&sid)?;
                     let r = src.tile_region(gdcore::math::Vector2i::new(0, 0));
-                    let file = src.texture_path.rsplit('/').next().unwrap_or(&src.texture_path);
+                    let file = src
+                        .texture_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&src.texture_path);
                     Some(serde_json::json!({
                         "id": sid,
                         "name": format!("{file} #{sid}"),
@@ -22124,7 +22273,11 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
                 .collect();
             (!out.is_empty()).then_some(out)
         });
-    let source = if layer_tiles.is_some() { "tile_set" } else { "palette" };
+    let source = if layer_tiles.is_some() {
+        "tile_set"
+    } else {
+        "palette"
+    };
     let tiles = layer_tiles.unwrap_or(tiles);
     send_json(
         stream,
@@ -25149,13 +25302,16 @@ pub fn apply_project_path_roots(root: &str) {
 pub fn load_launch_scene(path: &str) -> Result<(SceneTree, NodeId, String), String> {
     gdobject::class_db::register_all_classes();
     gdobject::editor_plugin_classes::register_editor_plugin_classes();
-    let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
-    let scene = PackedScene::from_tscn(&source).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let scene =
+        PackedScene::from_tscn(&source).map_err(|e| format!("failed to parse {path}: {e}"))?;
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
     // Instances expanded as the editor's own Open does (pat-hivyf).
-    let scene_root = gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut tree, root_id, &scene)
-        .map_err(|e| format!("failed to instance {path}: {e}"))?;
+    let scene_root =
+        gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut tree, root_id, &scene)
+            .map_err(|e| format!("failed to instance {path}: {e}"))?;
     Ok((tree, scene_root, source))
 }
 
@@ -25925,8 +26081,8 @@ fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         .map(|sig| {
             sig.connections()
                 .iter()
-                .filter(|conn| method.as_deref().map_or(true, |m| conn.method == m))
-                .filter(|conn| target_raw.map_or(true, |t| conn.target_id.raw() == t))
+                .filter(|conn| method.as_deref().is_none_or(|m| conn.method == m))
+                .filter(|conn| target_raw.is_none_or(|t| conn.target_id.raw() == t))
                 .map(|conn| (conn.target_id.raw(), conn.method.clone()))
                 .collect()
         })
@@ -26158,7 +26314,6 @@ fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 // pat-kj4: Project settings
 // ---------------------------------------------------------------------------
 
-/// `GET /api/project_settings` — returns project settings organized by category (pat-c4zlm).
 // -- Project Settings ▸ Autoload (pat-0q2kx.73) -----------------------------
 //
 // Godot's Autoload tab adds script/scene singletons and persists them to
@@ -26502,6 +26657,8 @@ fn sync_project_scalars_from_settings(s: &mut EditorState) {
         s.project_renderer = v;
     }
 }
+
+/// `GET /api/project_settings` — returns project settings organized by category (pat-c4zlm).
 fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let s = state.lock().unwrap();
@@ -27717,7 +27874,13 @@ const fn opt_def(
     default: &'static str,
     choices: &'static [&'static str],
 ) -> ImportOptionDef {
-    ImportOptionDef { name, label, ty, default, choices }
+    ImportOptionDef {
+        name,
+        label,
+        ty,
+        default,
+        choices,
+    }
 }
 
 /// Godot 4.6's import options for a resource — keys, types and defaults copied
@@ -27742,18 +27905,64 @@ pub fn godot_import_options(
         (R::Texture, _) => (
             vec!["2D/3D (Auto-Detect)", "2D", "3D"],
             vec![
-                opt_def("compress/mode", "Compress Mode", "enum", "\"Lossless\"",
-                    &["Lossless", "Lossy", "VRAM Compressed", "VRAM Uncompressed", "Basis Universal"]),
-                opt_def("compress/high_quality", "High Quality", "bool", "false", &[]),
-                opt_def("compress/lossy_quality", "Lossy Quality", "float", "0.7", &[]),
-                opt_def("compress/normal_map", "Normal Map", "enum", "\"Detect\"", &["Detect", "Enable", "Disabled"]),
+                opt_def(
+                    "compress/mode",
+                    "Compress Mode",
+                    "enum",
+                    "\"Lossless\"",
+                    &[
+                        "Lossless",
+                        "Lossy",
+                        "VRAM Compressed",
+                        "VRAM Uncompressed",
+                        "Basis Universal",
+                    ],
+                ),
+                opt_def(
+                    "compress/high_quality",
+                    "High Quality",
+                    "bool",
+                    "false",
+                    &[],
+                ),
+                opt_def(
+                    "compress/lossy_quality",
+                    "Lossy Quality",
+                    "float",
+                    "0.7",
+                    &[],
+                ),
+                opt_def(
+                    "compress/normal_map",
+                    "Normal Map",
+                    "enum",
+                    "\"Detect\"",
+                    &["Detect", "Enable", "Disabled"],
+                ),
                 opt_def("mipmaps/generate", "Generate Mipmaps", "bool", "false", &[]),
                 opt_def("mipmaps/limit", "Mipmap Limit", "int", "-1", &[]),
-                opt_def("process/fix_alpha_border", "Fix Alpha Border", "bool", "true", &[]),
-                opt_def("process/premult_alpha", "Premult Alpha", "bool", "false", &[]),
+                opt_def(
+                    "process/fix_alpha_border",
+                    "Fix Alpha Border",
+                    "bool",
+                    "true",
+                    &[],
+                ),
+                opt_def(
+                    "process/premult_alpha",
+                    "Premult Alpha",
+                    "bool",
+                    "false",
+                    &[],
+                ),
                 opt_def("process/size_limit", "Size Limit", "int", "0", &[]),
-                opt_def("detect_3d/compress_to", "Detect 3D: Compress To", "enum", "\"VRAM Compressed\"",
-                    &["Disabled", "VRAM Compressed", "Basis Universal"]),
+                opt_def(
+                    "detect_3d/compress_to",
+                    "Detect 3D: Compress To",
+                    "enum",
+                    "\"VRAM Compressed\"",
+                    &["Disabled", "VRAM Compressed", "Basis Universal"],
+                ),
             ],
         ),
         (R::Audio, "wav") => (
@@ -27765,22 +27974,62 @@ pub fn godot_import_options(
                 opt_def("force/max_rate_hz", "Max Rate Hz", "float", "44100", &[]),
                 opt_def("edit/trim", "Trim", "bool", "false", &[]),
                 opt_def("edit/normalize", "Normalize", "bool", "false", &[]),
-                opt_def("edit/loop_mode", "Loop Mode", "enum", "\"Detect From WAV\"",
-                    &["Detect From WAV", "Disabled", "Forward", "Ping-Pong", "Backward"]),
+                opt_def(
+                    "edit/loop_mode",
+                    "Loop Mode",
+                    "enum",
+                    "\"Detect From WAV\"",
+                    &[
+                        "Detect From WAV",
+                        "Disabled",
+                        "Forward",
+                        "Ping-Pong",
+                        "Backward",
+                    ],
+                ),
                 opt_def("edit/loop_begin", "Loop Begin", "int", "0", &[]),
                 opt_def("edit/loop_end", "Loop End", "int", "-1", &[]),
-                opt_def("compress/mode", "Compress Mode", "enum", "\"Quite OK Audio\"",
-                    &["PCM (Uncompressed)", "IMA ADPCM", "Quite OK Audio"]),
+                opt_def(
+                    "compress/mode",
+                    "Compress Mode",
+                    "enum",
+                    "\"Quite OK Audio\"",
+                    &["PCM (Uncompressed)", "IMA ADPCM", "Quite OK Audio"],
+                ),
             ],
         ),
-        (R::Audio, _) => (vec!["Default"], STREAM.iter().map(|d| opt_def(d.name, d.label, d.ty, d.default, d.choices)).collect()),
+        (R::Audio, _) => (
+            vec!["Default"],
+            STREAM
+                .iter()
+                .map(|d| opt_def(d.name, d.label, d.ty, d.default, d.choices))
+                .collect(),
+        ),
         (R::Scene, "obj") => (
             vec!["Default"],
             vec![
-                opt_def("generate_tangents", "Generate Tangents", "bool", "true", &[]),
+                opt_def(
+                    "generate_tangents",
+                    "Generate Tangents",
+                    "bool",
+                    "true",
+                    &[],
+                ),
                 opt_def("generate_lods", "Generate LODs", "bool", "true", &[]),
-                opt_def("generate_shadow_mesh", "Generate Shadow Mesh", "bool", "true", &[]),
-                opt_def("force_disable_mesh_compression", "Force Disable Mesh Compression", "bool", "false", &[]),
+                opt_def(
+                    "generate_shadow_mesh",
+                    "Generate Shadow Mesh",
+                    "bool",
+                    "true",
+                    &[],
+                ),
+                opt_def(
+                    "force_disable_mesh_compression",
+                    "Force Disable Mesh Compression",
+                    "bool",
+                    "false",
+                    &[],
+                ),
             ],
         ),
         (R::Scene, _) => (
@@ -27788,7 +28037,13 @@ pub fn godot_import_options(
             vec![
                 opt_def("nodes/root_type", "Root Type", "string", "\"\"", &[]),
                 opt_def("nodes/root_name", "Root Name", "string", "\"\"", &[]),
-                opt_def("nodes/apply_root_scale", "Apply Root Scale", "bool", "true", &[]),
+                opt_def(
+                    "nodes/apply_root_scale",
+                    "Apply Root Scale",
+                    "bool",
+                    "true",
+                    &[],
+                ),
                 opt_def("nodes/root_scale", "Root Scale", "float", "1.0", &[]),
                 opt_def("animation/import", "Import Animation", "bool", "true", &[]),
                 opt_def("animation/fps", "Animation FPS", "float", "30", &[]),
@@ -27798,29 +28053,76 @@ pub fn godot_import_options(
             vec!["Default"],
             vec![
                 opt_def("generate_lods", "Generate LODs", "bool", "true", &[]),
-                opt_def("generate_shadow_mesh", "Generate Shadow Mesh", "bool", "true", &[]),
+                opt_def(
+                    "generate_shadow_mesh",
+                    "Generate Shadow Mesh",
+                    "bool",
+                    "true",
+                    &[],
+                ),
             ],
         ),
         (R::Font, _) => (
             vec!["Default"],
             vec![
-                opt_def("antialiasing", "Antialiasing", "enum", "\"Grayscale\"", &["None", "Grayscale", "LCD Subpixel"]),
+                opt_def(
+                    "antialiasing",
+                    "Antialiasing",
+                    "enum",
+                    "\"Grayscale\"",
+                    &["None", "Grayscale", "LCD Subpixel"],
+                ),
                 opt_def("generate_mipmaps", "Generate Mipmaps", "bool", "false", &[]),
-                opt_def("multichannel_signed_distance_field", "Multichannel SDF", "bool", "false", &[]),
+                opt_def(
+                    "multichannel_signed_distance_field",
+                    "Multichannel SDF",
+                    "bool",
+                    "false",
+                    &[],
+                ),
                 opt_def("msdf_pixel_range", "MSDF Pixel Range", "int", "8", &[]),
                 opt_def("msdf_size", "MSDF Size", "int", "48", &[]),
-                opt_def("allow_system_fallback", "Allow System Fallback", "bool", "true", &[]),
+                opt_def(
+                    "allow_system_fallback",
+                    "Allow System Fallback",
+                    "bool",
+                    "true",
+                    &[],
+                ),
                 opt_def("force_autohinter", "Force Autohinter", "bool", "false", &[]),
-                opt_def("hinting", "Hinting", "enum", "\"Light\"", &["None", "Light", "Normal"]),
-                opt_def("subpixel_positioning", "Subpixel Positioning", "enum", "\"Auto (Except Pixel Fonts)\"",
-                    &["Disabled", "Auto", "One Half of a Pixel", "One Quarter of a Pixel", "Auto (Except Pixel Fonts)"]),
+                opt_def(
+                    "hinting",
+                    "Hinting",
+                    "enum",
+                    "\"Light\"",
+                    &["None", "Light", "Normal"],
+                ),
+                opt_def(
+                    "subpixel_positioning",
+                    "Subpixel Positioning",
+                    "enum",
+                    "\"Auto (Except Pixel Fonts)\"",
+                    &[
+                        "Disabled",
+                        "Auto",
+                        "One Half of a Pixel",
+                        "One Quarter of a Pixel",
+                        "Auto (Except Pixel Fonts)",
+                    ],
+                ),
                 opt_def("oversampling", "Oversampling", "float", "0.0", &[]),
                 opt_def("compress", "Compress", "bool", "true", &[]),
             ],
         ),
         (R::Shader | R::Script, _) => (
             vec!["Default"],
-            vec![opt_def("keep_compiled", "Keep On Reimport", "bool", "true", &[])],
+            vec![opt_def(
+                "keep_compiled",
+                "Keep On Reimport",
+                "bool",
+                "true",
+                &[],
+            )],
         ),
     }
 }
@@ -28292,7 +28594,7 @@ fn api_vcs_diff(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpSt
             return;
         }
     };
-    let staged = query_param(query, "staged").map_or(false, |v| v == "true" || v == "1");
+    let staged = query_param(query, "staged").is_some_and(|v| v == "true" || v == "1");
     let cwd = vcs_repo_dir(state);
     let diff = if staged {
         crate::vcs::get_file_diff_staged(&cwd, &file)
@@ -28693,6 +28995,7 @@ mod tests {
     use super::*;
     use gdcore::math::{Color, Vector2};
     use gdscene::node::Node;
+    use gdscene::packed_scene::add_packed_scene_to_tree;
     #[allow(unused_imports)]
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
@@ -29494,14 +29797,21 @@ position = Vector2(10, 20)
             let st = handle.state().lock().unwrap();
             let t = &st.scene_tree;
             let inst = find_node_by_raw_id(t, root_id).expect("instanced root");
-            let sprite = t.get_node_relative(inst, "Sprite").expect("instanced subtree is built under the root");
+            let sprite = t
+                .get_node_relative(inst, "Sprite")
+                .expect("instanced subtree is built under the root");
             let scene_root = t.get_node(t.root_id()).unwrap().children()[0];
-            assert!(gdscene::packed_scene::is_foreign_node(t, scene_root, sprite));
+            assert!(gdscene::packed_scene::is_foreign_node(
+                t, scene_root, sprite
+            ));
         }
         let listed = instanced["children"]
             .as_array()
             .map_or(false, |c| c.iter().any(|c| c["name"] == "Sprite"));
-        assert!(!listed, "an instance's own nodes are not listed in the dock");
+        assert!(
+            !listed,
+            "an instance's own nodes are not listed in the dock"
+        );
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);
@@ -32593,7 +32903,8 @@ position = Vector2(10, 20)
         assert_eq!(entry.name, "Player");
         assert_eq!(entry.children.len(), 1);
         let cnt = tree.node_count();
-        let nid = super::paste_clipboard_entry(&mut tree, root, &entry, &mut std::iter::empty()).unwrap();
+        let nid =
+            super::paste_clipboard_entry(&mut tree, root, &entry, &mut std::iter::empty()).unwrap();
         assert_eq!(tree.node_count(), cnt + 2);
         assert_eq!(tree.get_node(nid).unwrap().name(), "Player");
     }
@@ -33922,9 +34233,16 @@ position = Vector2(10, 20)
         let resp = http_get(port, "/api/runtime/input/state");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(v["actions"]["ui_left"], false, "`a` is not a ui_left binding in Godot");
+        assert_eq!(
+            v["actions"]["ui_left"], false,
+            "`a` is not a ui_left binding in Godot"
+        );
 
-        http_post(port, "/api/runtime/input/key_down", r#"{"key":"ArrowLeft"}"#);
+        http_post(
+            port,
+            "/api/runtime/input/key_down",
+            r#"{"key":"ArrowLeft"}"#,
+        );
         let resp = http_get(port, "/api/runtime/input/state");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -34048,7 +34366,10 @@ position = Vector2(10, 20)
             let st = handle.state().lock().unwrap();
             let t = &st.scene_tree;
             let inst = find_node_by_raw_id(t, v["id"].as_u64().unwrap()).unwrap();
-            assert!(t.get_node_relative(inst, "Sprite").is_some(), "tree should contain Sprite node");
+            assert!(
+                t.get_node_relative(inst, "Sprite").is_some(),
+                "tree should contain Sprite node"
+            );
         }
 
         // Cleanup.

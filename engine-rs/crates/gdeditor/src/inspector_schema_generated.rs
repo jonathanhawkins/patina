@@ -1089,7 +1089,7 @@ pub fn generated_schema(class_name: &str) -> Option<Vec<EditorProp>> {
             EditorProp::new("disabled", "bool", 0, "", Variant::Bool(false), Variant::Bool(false)),
             EditorProp::new("one_way_collision", "bool", 42, "", Variant::Bool(false), Variant::Bool(false)),
             EditorProp::new("one_way_collision_margin", "float", 1, "0,128,0.1,suffix:px", Variant::Float(1.0), Variant::Float(1.0)),
-            EditorProp::new("debug_color", "Color", 0, "", Variant::Color(Color { r: 0.0, g: 0.600000023841858, b: 0.699999988079071, a: 0.419999986886978 }), Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })),
+            EditorProp::new("debug_color", "Color", 0, "", Variant::Color(Color { r: 0.0, g: 0.6, b: 0.7, a: 0.42 }), Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })),
             EditorProp::new("script", "Object", 17, "Script", Variant::Nil, Variant::Nil),
         ],
         "CollisionShape3D" => vec![
@@ -1110,7 +1110,7 @@ pub fn generated_schema(class_name: &str) -> Option<Vec<EditorProp>> {
             EditorProp::new("visibility_parent", "NodePath", 26, "GeometryInstance3D", Variant::NodePath(NodePath::empty()), Variant::NodePath(NodePath::empty())),
             EditorProp::new("shape", "Object", 17, "Shape3D", Variant::Nil, Variant::Nil),
             EditorProp::new("disabled", "bool", 0, "", Variant::Bool(false), Variant::Bool(false)),
-            EditorProp::new("debug_color", "Color", 0, "", Variant::Color(Color { r: 0.0, g: 0.600000023841858, b: 0.699999988079071, a: 0.419999986886978 }), Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })),
+            EditorProp::new("debug_color", "Color", 0, "", Variant::Color(Color { r: 0.0, g: 0.6, b: 0.7, a: 0.42 }), Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })),
             EditorProp::new("debug_fill", "bool", 0, "", Variant::Bool(true), Variant::Bool(true)),
             EditorProp::new("script", "Object", 17, "Script", Variant::Nil, Variant::Nil),
         ],

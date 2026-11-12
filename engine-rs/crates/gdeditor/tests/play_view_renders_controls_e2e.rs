@@ -118,7 +118,10 @@ fn play_view_renders_controls_e2e() {
             .iter()
             .all(|i| i.z_index < CONTROL_Z_BASE && i.z_index == 0 && i.canvas_layer == 0),
         "control items must carry their node's own z/layer: {:?}",
-        items.iter().map(|i| (i.z_index, i.canvas_layer)).collect::<Vec<_>>()
+        items
+            .iter()
+            .map(|i| (i.z_index, i.canvas_layer))
+            .collect::<Vec<_>>()
     );
 
     // 3. The container stacked its children instead of leaving them at the origin.

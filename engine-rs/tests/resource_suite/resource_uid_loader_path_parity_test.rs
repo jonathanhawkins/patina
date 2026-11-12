@@ -289,7 +289,10 @@ fn fixture_theme_tres_uid_round_trips() {
     // text_to_id` (core/io/resource_uid.cpp:90) accepts only `a-z`/`0-9`
     // after `uid://` and returns INVALID_ID at the `_`. So the header parses to
     // an invalid UID and is ignored — exactly what Godot does with it.
-    assert!(!parsed.uid.is_valid(), "an underscore makes the header UID invalid");
+    assert!(
+        !parsed.uid.is_valid(),
+        "an underscore makes the header UID invalid"
+    );
     assert_eq!(parsed.class_name, "Theme");
     assert_eq!(parsed.uid, parse_uid_string("uid://theme_res"));
 

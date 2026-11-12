@@ -21,7 +21,7 @@ fn build_ctex_image_rgba8(width: u32, height: u32, raw: &[u8]) -> Vec<u8> {
     d.extend_from_slice(&0u32.to_le_bytes()); // df flags
     d.extend_from_slice(&0u32.to_le_bytes()); // mipmap_limit
     d.extend_from_slice(&[0u8; 12]); // 3 reserved u32
-    // Inner image header: data_format=IMAGE(0), w16, h16, mipmaps=0, RGBA8(5).
+                                     // Inner image header: data_format=IMAGE(0), w16, h16, mipmaps=0, RGBA8(5).
     d.extend_from_slice(&0u32.to_le_bytes());
     d.extend_from_slice(&(width as u16).to_le_bytes());
     d.extend_from_slice(&(height as u16).to_le_bytes());
@@ -64,8 +64,11 @@ fn resource_loader_follows_import_remap() {
         0, 0, 255, 255, // (0,1) blue
         255, 255, 255, 255, // (1,1) white
     ];
-    std::fs::write(imported.join("icon.ctex"), build_ctex_image_rgba8(2, 2, &raw))
-        .expect("ctex artifact");
+    std::fs::write(
+        imported.join("icon.ctex"),
+        build_ctex_image_rgba8(2, 2, &raw),
+    )
+    .expect("ctex artifact");
 
     // Load the SOURCE path; the loader must follow the remap to the `.ctex`.
     let res = ResourceFormatLoader::with_defaults()

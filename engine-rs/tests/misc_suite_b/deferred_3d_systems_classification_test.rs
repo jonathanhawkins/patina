@@ -9,10 +9,14 @@
 
 use std::fs;
 
-const AUDIT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../prd/PHASE6_3D_PARITY_AUDIT.md");
-const PARITY_REPORT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/3D_DEMO_PARITY_REPORT.md");
+const AUDIT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../prd/PHASE6_3D_PARITY_AUDIT.md"
+);
+const PARITY_REPORT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/3D_DEMO_PARITY_REPORT.md"
+);
 const MIGRATION_GUIDE_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/migration-guide.md");
 
@@ -32,11 +36,7 @@ const DEFERRED_SYSTEMS: &[&str] = &[
 ];
 
 /// Systems with data models only (no runtime integration).
-const DATA_MODEL_ONLY: &[&str] = &[
-    "PinJoint3D",
-    "HingeJoint3D",
-    "SliderJoint3D",
-];
+const DATA_MODEL_ONLY: &[&str] = &["PinJoint3D", "HingeJoint3D", "SliderJoint3D"];
 
 // ===========================================================================
 // 1. Audit lists all deferred systems
@@ -125,7 +125,9 @@ fn parity_report_lists_key_deferred_systems() {
 // ===========================================================================
 
 fn extract_matrix_section(doc: &str, header: &str) -> String {
-    let start = doc.find(header).unwrap_or_else(|| panic!("section '{header}' must exist"));
+    let start = doc
+        .find(header)
+        .unwrap_or_else(|| panic!("section '{header}' must exist"));
     let rest = &doc[start + header.len()..];
     let end = rest
         .find("\n### ")

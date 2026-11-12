@@ -49,6 +49,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:

@@ -202,7 +202,11 @@ fn camera_feed_ycbcr_and_signals_connections_are_per_feed() {
         "feed b's listener must NOT fire for feed a's frame — connections are \
          per feed, not global"
     );
-    assert_eq!(int_at(&v, 2), 1, "after disconnect, a's listener stops firing");
+    assert_eq!(
+        int_at(&v, 2),
+        1,
+        "after disconnect, a's listener stops firing"
+    );
     assert_eq!(int_at(&v, 3), 0, "b still untouched");
     assert_eq!(arr(&v)[4], Variant::Bool(false), "and reports disconnected");
 }

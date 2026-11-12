@@ -17,7 +17,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -64,7 +68,9 @@ fn viewport_scale_tool_uses_r_key() {
     );
     // The shortcut help lists Scale tool -> R.
     assert!(
-        html.contains(r#"<span class="help-desc">Scale tool</span><span class="help-key">R</span>"#),
+        html.contains(
+            r#"<span class="help-desc">Scale tool</span><span class="help-key">R</span>"#
+        ),
         "the shortcut help should list Scale tool as R"
     );
 

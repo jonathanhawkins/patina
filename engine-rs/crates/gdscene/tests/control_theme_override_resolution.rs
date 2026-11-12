@@ -13,7 +13,9 @@ use gdscene::theme::Theme;
 fn control_theme_override_resolution() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let button = tree.add_child(root, Node::new("MyButton", "Button")).unwrap();
+    let button = tree
+        .add_child(root, Node::new("MyButton", "Button"))
+        .unwrap();
 
     let default = Theme::default_theme();
     let red = Color::new(1.0, 0.0, 0.0, 1.0);
@@ -22,7 +24,11 @@ fn control_theme_override_resolution() {
 
     // (1) A local add_theme_color_override wins over everything.
     control::add_theme_color_override(&mut tree, button, "font_color", red);
-    assert!(control::has_theme_color_override(&tree, button, "font_color"));
+    assert!(control::has_theme_color_override(
+        &tree,
+        button,
+        "font_color"
+    ));
     assert_eq!(
         control::resolve_theme_color(&tree, button, "Button", "", None, &default, "font_color"),
         Some(red),
@@ -31,7 +37,11 @@ fn control_theme_override_resolution() {
 
     // (2) Removing the override falls back to the assigned Theme's Button color.
     control::remove_theme_color_override(&mut tree, button, "font_color");
-    assert!(!control::has_theme_color_override(&tree, button, "font_color"));
+    assert!(!control::has_theme_color_override(
+        &tree,
+        button,
+        "font_color"
+    ));
     let mut assigned = Theme::new("assigned");
     assigned.set_color("Button", "font_color", green);
     assert_eq!(
@@ -82,7 +92,10 @@ fn control_theme_override_resolution() {
 
     // (5) Theme + ThemeDB are constructible via ClassDB.
     gdobject::class_db::register_2d_classes();
-    assert!(gdobject::class_db::class_exists("Theme"), "Theme in ClassDB");
+    assert!(
+        gdobject::class_db::class_exists("Theme"),
+        "Theme in ClassDB"
+    );
     assert!(
         gdobject::class_db::class_exists("ThemeDB"),
         "ThemeDB in ClassDB"

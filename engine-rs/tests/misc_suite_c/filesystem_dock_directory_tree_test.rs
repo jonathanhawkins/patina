@@ -88,7 +88,10 @@ fn api_filesystem_tree_nonexistent_root() {
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
     assert!(v["error"]["message"].is_string());
-    assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
     handle.stop();
 }
 

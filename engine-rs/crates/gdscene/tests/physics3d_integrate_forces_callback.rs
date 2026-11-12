@@ -119,7 +119,8 @@ func _integrate_forces(state):
         // `_integrate_forces` from the flush that follows a step, and a body
         // that entered with the scene has no step before its first tick.
         Variant::Int(n) => assert_eq!(
-            n, ticks - 1,
+            n,
+            ticks - 1,
             "_integrate_forces must run exactly once per physics tick after the \
              body's first — got {n} calls across {ticks} ticks. Fewer means it \
              is gated on something extra; more means it is being dispatched per \

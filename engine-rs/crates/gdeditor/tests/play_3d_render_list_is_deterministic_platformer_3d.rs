@@ -16,7 +16,8 @@ use gdscene::SceneTree;
 
 fn load_stage() -> SceneTree {
     gdobject::class_db::register_all_classes();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/platformer_3d");
+    let dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/platformer_3d");
     gdcore::file_access::set_path_roots(Some(dir.clone()), None);
     let tscn = std::fs::read_to_string(dir.join("stage/stage.tscn")).expect("stage.tscn");
     let packed = gdscene::packed_scene::PackedScene::from_tscn(&tscn).unwrap();
@@ -35,7 +36,10 @@ fn the_grid_map_cells_come_out_in_the_same_order_every_frame() {
         .iter()
         .filter(|i| matches!(&i.kind, Render3DKind::Mesh { path } if path.starts_with("res://stage/meshes/")))
         .count();
-    assert!(tiles > 2000, "only {tiles} GridMap tiles in the list — the level did not load");
+    assert!(
+        tiles > 2000,
+        "only {tiles} GridMap tiles in the list — the level did not load"
+    );
     for frame in 1..4 {
         let again = vp.build_render_list(&tree);
         let moved = first
@@ -44,6 +48,9 @@ fn the_grid_map_cells_come_out_in_the_same_order_every_frame() {
             .filter(|(a, b)| a.global_transform != b.global_transform || a.kind != b.kind)
             .count();
         assert_eq!(first.len(), again.len());
-        assert_eq!(moved, 0, "frame {frame}: {moved} items changed place in the list");
+        assert_eq!(
+            moved, 0,
+            "frame {frame}: {moved} items changed place in the list"
+        );
     }
 }

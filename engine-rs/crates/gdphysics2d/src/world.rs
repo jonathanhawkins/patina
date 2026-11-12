@@ -456,7 +456,13 @@ impl PhysicsWorld2D {
                 // The body's AABB at its PREVIOUS position: the sweep's start.
                 let (lo, hi) = world_aabb(b);
                 let back = prev - b.position;
-                (b.position, lo + back, hi + back, b.collision_layer, b.collision_mask)
+                (
+                    b.position,
+                    lo + back,
+                    hi + back,
+                    b.collision_layer,
+                    b.collision_mask,
+                )
             }
             None => return,
         };
@@ -487,7 +493,7 @@ impl PhysicsWorld2D {
             let Some(t) = swept_aabb_toi(self_min, self_max, motion, o_min, o_max) else {
                 continue;
             };
-            if earliest.map_or(true, |e| t < e) {
+            if earliest.is_none_or(|e| t < e) {
                 earliest = Some(t);
             }
         }
@@ -1003,7 +1009,7 @@ impl PhysicsWorld2D {
                     // normal. Several bodies may contain `from`; pick the lowest
                     // id so the result is deterministic (BodyId is not Ord, and
                     // the body map is unordered) rather than map-order dependent.
-                    let better = inside.as_ref().map_or(true, |c| id.0 < c.body_id.0);
+                    let better = inside.as_ref().is_none_or(|c| id.0 < c.body_id.0);
                     if better {
                         inside = Some(RaycastHit {
                             body_id: id,
@@ -1017,7 +1023,7 @@ impl PhysicsWorld2D {
             }
 
             if let Some(hit) = raycast_shape(query.from, dir, max_distance, body) {
-                if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
+                if closest.as_ref().is_none_or(|c| hit.distance < c.distance) {
                     closest = Some(hit);
                 }
             }
@@ -1437,7 +1443,7 @@ fn ray_edges(
         if t < 0.0 || t > max_distance || !(0.0..=1.0).contains(&u) {
             continue;
         }
-        if best.as_ref().map_or(false, |c| t >= c.distance) {
+        if best.as_ref().is_some_and(|c| t >= c.distance) {
             continue;
         }
         let mut normal = Vector2::new(e.y, -e.x).normalized();

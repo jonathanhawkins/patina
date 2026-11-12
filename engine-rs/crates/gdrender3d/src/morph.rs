@@ -156,11 +156,7 @@ pub fn apply_morph(base: &[Vector3], targets: &[MorphTarget], weights: &[f32]) -
         }
         for (i, d) in target.deltas.iter().enumerate() {
             if i < out.len() {
-                out[i] = Vector3::new(
-                    out[i].x + d.x * w,
-                    out[i].y + d.y * w,
-                    out[i].z + d.z * w,
-                );
+                out[i] = Vector3::new(out[i].x + d.x * w, out[i].y + d.y * w, out[i].z + d.z * w);
             }
         }
     }
@@ -268,7 +264,10 @@ mod tests {
     #[test]
     fn blendshapes_struct_morphs_by_name() {
         let mut bs = BlendShapes::new(base_tri());
-        bs.add_target(MorphTarget::new("open", vec![Vector3::new(0.0, 0.0, 3.0); 3]));
+        bs.add_target(MorphTarget::new(
+            "open",
+            vec![Vector3::new(0.0, 0.0, 3.0); 3],
+        ));
         let idx = bs.find("open").unwrap();
         bs.set_weight(idx, 1.0);
         let out = bs.morphed();

@@ -82,7 +82,10 @@ fn segment_circle_collides() {
         &tf(0.0, 3.0),
     )
     .unwrap();
-    assert!(hit.colliding, "circle overlapping the segment should collide");
+    assert!(
+        hit.colliding,
+        "circle overlapping the segment should collide"
+    );
     assert!((hit.depth - 2.0).abs() < 0.1, "depth ~2, got {}", hit.depth);
 
     // A circle well clear of the segment does not collide.
@@ -93,7 +96,10 @@ fn segment_circle_collides() {
         &tf(0.0, 20.0),
     )
     .unwrap();
-    assert!(!miss.colliding, "distant circle should not collide with segment");
+    assert!(
+        !miss.colliding,
+        "distant circle should not collide with segment"
+    );
 }
 
 /// Segment vs rect: a segment crossing the rectangle collides.
@@ -116,7 +122,10 @@ fn segment_rect_collides() {
         &tf(0.0, 0.0),
     )
     .unwrap();
-    assert!(!miss.colliding, "segment clear of the rect should not collide");
+    assert!(
+        !miss.colliding,
+        "segment clear of the rect should not collide"
+    );
 }
 
 /// Segment vs segment: two crossing segments collide.
@@ -139,7 +148,10 @@ fn segment_segment_collides() {
         &tf(0.0, 50.0),
     )
     .unwrap();
-    assert!(!miss.colliding, "far-apart parallel segments should not collide");
+    assert!(
+        !miss.colliding,
+        "far-apart parallel segments should not collide"
+    );
 }
 
 /// Capsule vs circle: overlapping shapes collide with combined-radius depth.
@@ -152,9 +164,16 @@ fn capsule_circle_collides() {
         &tf(0.0, 0.0),
     )
     .unwrap();
-    assert!(hit.colliding, "coincident capsule and circle should collide");
+    assert!(
+        hit.colliding,
+        "coincident capsule and circle should collide"
+    );
     // Circle center lies on the capsule core → depth = r_capsule + r_circle.
-    assert!((hit.depth - 10.0).abs() < 0.1, "depth ~10, got {}", hit.depth);
+    assert!(
+        (hit.depth - 10.0).abs() < 0.1,
+        "depth ~10, got {}",
+        hit.depth
+    );
 }
 
 /// Capsule vs rect: a capsule grazing the rect edge collides.

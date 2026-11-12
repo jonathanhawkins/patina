@@ -75,15 +75,27 @@ struct Frame {
 
 fn play_splitscreen() -> Frame {
     gdobject::class_db::register_all_classes();
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
     let g = game();
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{}"}}"#, g.display()));
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{}"}}"#, g.display()),
+    );
     let load = request(
         port,
         "POST",
         "/api/scene/load",
-        &format!(r#"{{"path":"{}"}}"#, g.join("game_splitscreen.tscn").display()),
+        &format!(
+            r#"{{"path":"{}"}}"#,
+            g.join("game_splitscreen.tscn").display()
+        ),
     );
     assert!(load.contains("\"ok\""), "load: {load}");
     let r = request(port, "POST", "/api/runtime/play", "{}");
@@ -110,20 +122,31 @@ fn play_splitscreen() -> Frame {
             .get_node_by_path(path)
             .unwrap_or_else(|| panic!("running tree must contain {path}"))
     };
-    let sprite_1 = id(&format!("{base}/ViewportContainer1/Viewport1/Player1/Sprite2D")).raw();
-    let sprite_2 = id(&format!("{base}/ViewportContainer1/Viewport1/Player2/Sprite2D")).raw();
+    let sprite_1 = id(&format!(
+        "{base}/ViewportContainer1/Viewport1/Player1/Sprite2D"
+    ))
+    .raw();
+    let sprite_2 = id(&format!(
+        "{base}/ViewportContainer1/Viewport1/Player2/Sprite2D"
+    ))
+    .raw();
     let vp1 = id(&format!("{base}/ViewportContainer1/Viewport1"));
     let vp2 = id(&format!("{base}/ViewportContainer2/Viewport2"));
-    let cam2 = id(&format!("{base}/ViewportContainer1/Viewport1/Player2/Camera"));
+    let cam2 = id(&format!(
+        "{base}/ViewportContainer1/Viewport1/Player2/Camera"
+    ));
     let world_owner_2 = ml
         .tree()
         .get_node(vp2)
         .unwrap()
         .get_property(gdscene::canvas_render::WORLD_2D_OWNER_PROP);
-    let camera_2_viewport = gdscene::behavioral_2d::camera2d_viewport(ml.tree(), cam2).map(|v| v.raw());
+    let camera_2_viewport =
+        gdscene::behavioral_2d::camera2d_viewport(ml.tree(), cam2).map(|v| v.raw());
     let camera_2_current_in_2 =
         gdscene::behavioral_2d::current_camera2d_in(ml.tree(), Some(vp2)) == Some(cam2);
-    let bg2 = id(&format!("{base}/ViewportContainer2/Viewport2/ParallaxBackground"));
+    let bg2 = id(&format!(
+        "{base}/ViewportContainer2/Viewport2/ParallaxBackground"
+    ));
     let mut background_2 = Vec::new();
     ml.tree().collect_subtree_top_down(bg2, &mut background_2);
     let background_2 = background_2.into_iter().map(|n| n.raw()).collect();
@@ -152,7 +175,9 @@ fn placements(items: &[Render2DItem], node: u64) -> Vec<(f32, f32, f32)> {
         .iter()
         .filter(|i| i.node_id == node)
         .map(|i| {
-            let clip = i.clip_rect.expect("a sub-viewport item is clipped to its container");
+            let clip = i
+                .clip_rect
+                .expect("a sub-viewport item is clipped to its container");
             (i.global_transform.origin.x, clip.position.x, clip.size.x)
         })
         .collect()

@@ -6,7 +6,7 @@
 
 pub use crate::script_gutter::GutterMarker;
 use crate::settings::ExternalEditorConfig;
-use gdscript_interop::tokenizer::{tokenize, LexError, Token, TokenSpan};
+use gdscript_interop::tokenizer::{tokenize, LexError, Token};
 use std::collections::BTreeSet;
 
 // ── Syntax highlighting ─────────────────────────────────────────────────
@@ -1434,8 +1434,7 @@ pub fn detect_fold_regions(source: &str) -> Vec<FoldRegion> {
             // Find the block end by looking for the next line with equal or less indentation.
             let base_indent = line.len() - line.trim_start().len();
             let mut end = line_num;
-            for j in (i + 1)..lines.len() {
-                let next = lines[j];
+            for (j, next) in lines.iter().enumerate().skip(i + 1) {
                 if next.trim().is_empty() {
                     continue;
                 }
@@ -2036,12 +2035,12 @@ fn is_whole_word(line: &str, col: usize, length: usize) -> bool {
     } else {
         line.as_bytes()
             .get(col - 1)
-            .map_or(true, |&b| !is_word_char(b))
+            .is_none_or(|&b| !is_word_char(b))
     };
     let after = line
         .as_bytes()
         .get(col + length)
-        .map_or(true, |&b| !is_word_char(b));
+        .is_none_or(|&b| !is_word_char(b));
     before && after
 }
 

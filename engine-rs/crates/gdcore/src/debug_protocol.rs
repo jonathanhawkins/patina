@@ -463,11 +463,8 @@ fn parse_json_object(s: &str) -> Option<HashMap<String, JsonValue>> {
         map.insert(key, value);
 
         skip_whitespace(&mut chars);
-        match chars.peek() {
-            Some(',') => {
-                chars.next();
-            }
-            _ => {}
+        if let Some(',') = chars.peek() {
+            chars.next();
         }
     }
 

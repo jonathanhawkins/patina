@@ -438,7 +438,8 @@ impl BitMap {
     /// the walk fails to close within `2 * (w * h + 1)` steps — both are Godot's
     /// `ERR_FAIL_COND_V` bail-outs.
     fn march_square(&self, rect: &BitMapRect, start_x: i32, start_y: i32) -> Vec<Vec<Vector2>> {
-        let (mut step_x, mut step_y) = (0i32, 0i32);
+        let mut step_x: i32;
+        let mut step_y: i32;
         let (mut prev_x, mut prev_y) = (0i32, 0i32);
         let (mut cur_x, mut cur_y) = (start_x, start_y);
         let mut count: i64 = 0;

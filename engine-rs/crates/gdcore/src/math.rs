@@ -807,6 +807,7 @@ pub fn ease(x: f32, c: f32) -> f32 {
     }
 }
 
+/// Rounds `value` to the nearest multiple of `step` (Godot's `snappedf`); a zero `step` returns `value` unchanged.
 pub fn snapped_scalar(value: f32, step: f32) -> f32 {
     if step != 0.0 {
         (value / step + 0.5).floor() * step

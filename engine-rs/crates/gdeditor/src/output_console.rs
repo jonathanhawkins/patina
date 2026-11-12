@@ -58,20 +58,11 @@ impl OutputLine {
 }
 
 /// The Output console: captured lines plus the per-severity visibility filter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OutputConsole {
     lines: Vec<OutputLine>,
     /// Severities currently hidden by the filter.
     hidden: Vec<OutputSeverity>,
-}
-
-impl Default for OutputConsole {
-    fn default() -> Self {
-        Self {
-            lines: Vec::new(),
-            hidden: Vec::new(),
-        }
-    }
 }
 
 impl OutputConsole {

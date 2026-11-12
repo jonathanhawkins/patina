@@ -1935,7 +1935,9 @@ mod binary_tests {
         };
         assert_eq!(surface.get("vertex_count"), Some(Variant::Int(4)));
         assert_eq!(surface.get("index_count"), Some(Variant::Int(6)));
-        assert!(matches!(surface.get("vertex_data"), Some(Variant::PackedByteArray(b)) if b.len() == 80));
+        assert!(
+            matches!(surface.get("vertex_data"), Some(Variant::PackedByteArray(b)) if b.len() == 80)
+        );
         // The material is the external tile_material.tres.
         assert_eq!(
             res.ext_resources.get("0").map(|e| e.path.as_str()),
@@ -1953,7 +1955,9 @@ mod binary_tests {
             panic!("no points: {:?}", res.get_property("points"));
         };
         assert_eq!(points.len(), 10);
-        assert!(points.iter().all(|p| p.x.abs() <= 1.0 && p.y.abs() <= 1.0 && p.z.abs() <= 1.0));
+        assert!(points
+            .iter()
+            .all(|p| p.x.abs() <= 1.0 && p.y.abs() <= 1.0 && p.z.abs() <= 1.0));
     }
 
     /// The same entry point still loads a text `.tres` (sniffed, not by

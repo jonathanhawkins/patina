@@ -127,8 +127,12 @@ fn a_press_with_coordinates_and_no_prior_move_lands_where_it_happened() {
     );
 
     // No mouse_move at all: the press alone says where it happened.
-    assert!(post(port, "/api/runtime/input/mouse_down", r#"{"button":0,"x":123,"y":45}"#)
-        .contains("200 OK"));
+    assert!(post(
+        port,
+        "/api/runtime/input/mouse_down",
+        r#"{"button":0,"x":123,"y":45}"#
+    )
+    .contains("200 OK"));
     post(port, "/api/runtime/step", "");
     assert_eq!(script_var(port, "press_x").as_f64(), Some(123.0));
     assert_eq!(script_var(port, "press_y").as_f64(), Some(45.0));
@@ -138,8 +142,12 @@ fn a_press_with_coordinates_and_no_prior_move_lands_where_it_happened() {
         "a pointer that moved to the press point is reported as a motion first"
     );
 
-    assert!(post(port, "/api/runtime/input/mouse_up", r#"{"button":0,"x":130,"y":45}"#)
-        .contains("200 OK"));
+    assert!(post(
+        port,
+        "/api/runtime/input/mouse_up",
+        r#"{"button":0,"x":130,"y":45}"#
+    )
+    .contains("200 OK"));
     post(port, "/api/runtime/step", "");
     assert_eq!(script_var(port, "release_x").as_f64(), Some(130.0));
 
@@ -166,7 +174,9 @@ fn the_game_tab_surface_forwards_pointer_input() {
         );
     }
     // A press sends its own position.
-    assert!(EDITOR_HTML.contains("api('POST', '/api/runtime/input/mouse_down', gameButtonBody(e));"));
+    assert!(
+        EDITOR_HTML.contains("api('POST', '/api/runtime/input/mouse_down', gameButtonBody(e));")
+    );
     // A natively draggable <img> starts a drag on press-and-move and the
     // browser then never delivers the `mouseup`.
     assert!(EDITOR_HTML.contains(r#"<img id="game-screen-img" alt="game" draggable="false""#));
@@ -213,8 +223,12 @@ fn a_wheel_notch_with_a_position_lands_there() {
     assert!(post(port, "/api/runtime/play", "{}").contains("200 OK"));
     post(port, "/api/runtime/pause", "");
     post(port, "/api/runtime/step", "");
-    assert!(post(port, "/api/runtime/input/mouse_wheel", r#"{"delta_y":1.0,"x":77,"y":5}"#)
-        .contains("200 OK"));
+    assert!(post(
+        port,
+        "/api/runtime/input/mouse_wheel",
+        r#"{"delta_y":1.0,"x":77,"y":5}"#
+    )
+    .contains("200 OK"));
     post(port, "/api/runtime/step", "");
     assert_eq!(script_var(port, "wheel_x").as_f64(), Some(77.0));
     handle.stop();
@@ -241,11 +255,18 @@ fn play_audio_is_opt_in_and_mute_reaches_the_running_game() {
 
     assert!(post(port, "/api/runtime/play", "{}").contains("200 OK"));
     let s = status(port);
-    assert_eq!(s["audio_output"], false, "no `audio` request, no device: {s}");
+    assert_eq!(
+        s["audio_output"], false,
+        "no `audio` request, no device: {s}"
+    );
     assert_eq!(s["audio_muted"], false);
 
     assert!(post(port, "/api/runtime/mute", r#"{"muted":true}"#).contains("200 OK"));
-    assert_eq!(status(port)["audio_muted"], true, "mute is applied to the running game");
+    assert_eq!(
+        status(port)["audio_muted"],
+        true,
+        "mute is applied to the running game"
+    );
     post(port, "/api/runtime/mute", r#"{"muted":false}"#);
     assert_eq!(status(port)["audio_muted"], false);
 
@@ -257,5 +278,6 @@ fn play_audio_is_opt_in_and_mute_reaches_the_running_game() {
     handle.stop();
 
     // The page's Play buttons ask for sound.
-    assert!(EDITOR_HTML.contains("api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true })"));
+    assert!(EDITOR_HTML
+        .contains("api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true })"));
 }

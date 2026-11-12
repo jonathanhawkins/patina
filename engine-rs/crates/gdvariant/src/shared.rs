@@ -615,7 +615,7 @@ impl SharedArray {
 
     fn with_body<R>(&self, f: impl FnOnce(&ArrayBody) -> R) -> R {
         let body = self.inner.read().expect("SharedArray lock poisoned");
-        f(&*body)
+        f(&body)
     }
 }
 
@@ -1002,7 +1002,7 @@ impl SharedDictionary {
 
     fn with_body<R>(&self, f: impl FnOnce(&DictBody) -> R) -> R {
         let body = self.inner.read().expect("SharedDictionary lock poisoned");
-        f(&*body)
+        f(&body)
     }
 }
 

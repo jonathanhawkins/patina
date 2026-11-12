@@ -500,15 +500,11 @@ fn brackets_balance(stmt: &str) -> bool {
     for c in stmt.chars() {
         match c {
             '(' | '[' => stack.push(c),
-            ')' => {
-                if stack.pop() != Some('(') {
-                    return false;
-                }
+            ')' if stack.pop() != Some('(') => {
+                return false;
             }
-            ']' => {
-                if stack.pop() != Some('[') {
-                    return false;
-                }
+            ']' if stack.pop() != Some('[') => {
+                return false;
             }
             _ => {}
         }
@@ -2425,7 +2421,11 @@ void fragment() {
             wgsl.contains("textureSample(TEXTURE, TEXTURE_sampler, UV)"),
             "default COLOR should sample TEXTURE: {wgsl}"
         );
-        assert!(compiled.unsupported.is_empty(), "{:?}", compiled.unsupported);
+        assert!(
+            compiled.unsupported.is_empty(),
+            "{:?}",
+            compiled.unsupported
+        );
         assert_brace_balanced(&wgsl);
     }
 

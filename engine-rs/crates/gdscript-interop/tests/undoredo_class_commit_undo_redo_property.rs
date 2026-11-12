@@ -125,7 +125,9 @@ impl Harness {
         let state = Rc::new(RefCell::new(SceneState::default()));
         let mut interp = Interpreter::new();
         let class_def = interp.run_class(SCRIPT).expect("script parses");
-        let inst = interp.instantiate_class(&class_def).expect("script instantiates");
+        let inst = interp
+            .instantiate_class(&class_def)
+            .expect("script instantiates");
         interp.set_scene_access(
             Box::new(SceneMock {
                 state: state.clone(),
@@ -211,7 +213,10 @@ fn undoredo_class_commit_undo_redo_property() {
     // -- A script records a do/undo property change -------------------------
     let mut h = Harness::new();
     assert_eq!(h.value(), Variant::Nil, "nothing written before commit");
-    assert!(!h.boolean("has_undo"), "a fresh UndoRedo has nothing to undo");
+    assert!(
+        !h.boolean("has_undo"),
+        "a fresh UndoRedo has nothing to undo"
+    );
 
     h.record("Set Value", 0, 1, 2);
 
@@ -343,7 +348,11 @@ fn undoredo_version_tracks_committed_mutations() {
 
     // Exhausted redo changes nothing.
     h.boolean("do_redo");
-    assert_eq!(h.int("version"), 3, "a no-op redo does not bump the version");
+    assert_eq!(
+        h.int("version"),
+        3,
+        "a no-op redo does not bump the version"
+    );
 }
 
 /// A new action taken after an undo forks the history: the redoable tail is

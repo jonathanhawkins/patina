@@ -635,7 +635,10 @@ fn test_flr_filesystem_mkdir_and_delete() {
     let outside = std::env::temp_dir().join("patina_fs_test_flr_outside");
     let body = format!(r#"{{"path":"{}"}}"#, outside.display());
     let resp = http_post(port, "/api/filesystem/mkdir", &body);
-    assert!(resp.contains("403"), "absolute mkdir must be refused: {resp}");
+    assert!(
+        resp.contains("403"),
+        "absolute mkdir must be refused: {resp}"
+    );
 
     // Create a subfolder
     let body = format!(r#"{{"path":"res://{rel}/newdir"}}"#);
@@ -765,7 +768,10 @@ fn editor_open_project_roots_filesystem() {
         "/api/project/open",
         &format!(r#"{{"path":"{}"}}"#, proj.display()),
     );
-    assert!(resp.contains("200 OK"), "open project should succeed: {resp}");
+    assert!(
+        resp.contains("200 OK"),
+        "open project should succeed: {resp}"
+    );
     let opened: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
     assert_eq!(opened["ok"].as_bool(), Some(true));
     assert!(
@@ -794,7 +800,10 @@ fn editor_open_project_roots_filesystem() {
         "/api/scene/tabs/open",
         r#"{"path":"res://scenes/main.tscn","name":"main.tscn"}"#,
     );
-    assert!(open_tab.contains("200 OK"), "open scene tab failed: {open_tab}");
+    assert!(
+        open_tab.contains("200 OK"),
+        "open scene tab failed: {open_tab}"
+    );
     let tab: serde_json::Value = serde_json::from_str(extract_body(&open_tab)).unwrap();
     assert_eq!(tab["ok"].as_bool(), Some(true));
     assert!(tab["tab_id"].as_u64().is_some(), "expected a tab_id: {tab}");

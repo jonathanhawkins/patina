@@ -464,7 +464,9 @@ pub fn generate_shadow_maps_incremental_reusing(
     let mut map_rebuilt = vec![rebuilt; casting.len()];
     if !rebuilt {
         let in_rest: std::collections::HashSet<usize> = rest.iter().copied().collect();
-        let in_base: Vec<usize> = (0..instances.len()).filter(|i| !in_rest.contains(i)).collect();
+        let in_base: Vec<usize> = (0..instances.len())
+            .filter(|i| !in_rest.contains(i))
+            .collect();
         for (mi, ((l, f), sig)) in casting.iter().zip(&frames).zip(&map_sigs).enumerate() {
             if cache.map_sigs[mi] == *sig {
                 continue;
@@ -513,7 +515,10 @@ pub fn generate_shadow_maps_incremental_reusing(
         .zip(&frames)
         .enumerate()
         .map(|(mi, ((l, base), f))| {
-            let reusable = previous.get_mut(mi).and_then(Option::take).filter(|_| !map_rebuilt[mi]);
+            let reusable = previous
+                .get_mut(mi)
+                .and_then(Option::take)
+                .filter(|_| !map_rebuilt[mi]);
             let mut depth = match reusable {
                 Some(mut prev) => {
                     let (w, _) = base.dimensions();
@@ -577,7 +582,10 @@ pub fn generate_shadow_maps_incremental_reusing(
     });
     cache.rest_rects = rest_rects;
     cache.recycled_maps += recycled;
-    cache.last_out = maps.iter().map(|m| m.depth.as_slice().as_ptr() as usize).collect();
+    cache.last_out = maps
+        .iter()
+        .map(|m| m.depth.as_slice().as_ptr() as usize)
+        .collect();
     maps
 }
 
@@ -761,7 +769,9 @@ fn rasterize_instance_refs_into_shadow<'a>(
             });
         }
     };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
     if tris.len() < PARALLEL_SHADOW_TRIS || threads <= 1 {
         for pts in &tris {
             grow(rasterize_shadow_triangle(pts, depth_buf, size, size));
@@ -780,7 +790,11 @@ fn rasterize_instance_refs_into_shadow<'a>(
     let band_rows = h.div_ceil(threads as u32).max(1);
     let tris = &tris;
     std::thread::scope(|scope| {
-        for (bi, rows) in depth_buf.as_mut_slice().chunks_mut((band_rows * w) as usize).enumerate() {
+        for (bi, rows) in depth_buf
+            .as_mut_slice()
+            .chunks_mut((band_rows * w) as usize)
+            .enumerate()
+        {
             let y0 = bi as u32 * band_rows;
             let y1 = y0 + rows.len() as u32 / w.max(1);
             scope.spawn(move || {
@@ -843,7 +857,10 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
 
 /// The cubemap [`generate_omni_shadow_cubemaps`] makes for `light` (a casting
 /// point light), over borrowed instances.
-pub fn generate_omni_shadow_cubemap_refs(light: &Light3D, instances: &[&Instance3D]) -> ShadowCubemap {
+pub fn generate_omni_shadow_cubemap_refs(
+    light: &Light3D,
+    instances: &[&Instance3D],
+) -> ShadowCubemap {
     let size = OMNI_SHADOW_SIZE;
     let mut cubemap = ShadowCubemap::new(size);
     let near = 0.05_f32;
@@ -925,14 +942,25 @@ pub fn generate_omni_shadow_cubemap_refs(light: &Light3D, instances: &[&Instance
 /// its world box lies wholly beyond the light's range, and the cubemap raster
 /// drops every triangle with a vertex past the range. Conservative (a box
 /// corner test with slack), so `true` never wrongly drops a caster.
-pub fn omni_caster_in_range(light: &Light3D, inst: &Instance3D, local_aabb: Option<gdcore::math3d::Aabb>) -> bool {
+pub fn omni_caster_in_range(
+    light: &Light3D,
+    inst: &Instance3D,
+    local_aabb: Option<gdcore::math3d::Aabb>,
+) -> bool {
     let Some(aabb) = local_aabb else {
         // No vertices: draws nothing either way.
         return false;
     };
-    let far = if light.range > 0.0 { light.range } else { 100.0 };
+    let far = if light.range > 0.0 {
+        light.range
+    } else {
+        100.0
+    };
     let (lo, hi) = (aabb.position, aabb.position + aabb.size);
-    let (mut wlo, mut whi) = (Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY), Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY));
+    let (mut wlo, mut whi) = (
+        Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+        Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+    );
     for k in 0..8 {
         let c = Vector3::new(
             if k & 1 == 0 { lo.x } else { hi.x },
@@ -943,7 +971,13 @@ pub fn omni_caster_in_range(light: &Light3D, inst: &Instance3D, local_aabb: Opti
         wlo = Vector3::new(wlo.x.min(w.x), wlo.y.min(w.y), wlo.z.min(w.z));
         whi = Vector3::new(whi.x.max(w.x), whi.y.max(w.y), whi.z.max(w.z));
     }
-    if !(wlo.x.is_finite() && whi.x.is_finite() && wlo.y.is_finite() && whi.y.is_finite() && wlo.z.is_finite() && whi.z.is_finite()) {
+    if !(wlo.x.is_finite()
+        && whi.x.is_finite()
+        && wlo.y.is_finite()
+        && whi.y.is_finite()
+        && wlo.z.is_finite()
+        && whi.z.is_finite())
+    {
         return true;
     }
     let p = light.position;
@@ -1188,7 +1222,7 @@ pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
     let view = transform_to_matrix(&light_transform.inverse());
     let proj = orthographic_projection_matrix(-half, half, -half, half, 0.0, z_range);
 
-    let size = params.split_size().min(DIRECTIONAL_FIT_MAX_SIZE).max(16);
+    let size = params.split_size().clamp(16, DIRECTIONAL_FIT_MAX_SIZE);
     let texel_world = 2.0 * half / size as f32;
 
     // Godot's own numbers for the filter and bias (`light_storage.cpp:696`,
@@ -1220,7 +1254,11 @@ pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
 
 /// The texel bounds [`rasterize_shadow_triangle`] loops over (and returns),
 /// or `None` when it draws nothing.
-fn shadow_triangle_bounds(pts: &[(f32, f32, f32); 3], width: u32, height: u32) -> Option<TexelRect> {
+fn shadow_triangle_bounds(
+    pts: &[(f32, f32, f32); 3],
+    width: u32,
+    height: u32,
+) -> Option<TexelRect> {
     let (x0, y0, _) = pts[0];
     let (x1, y1, _) = pts[1];
     let (x2, y2, _) = pts[2];
@@ -1404,14 +1442,24 @@ mod tests {
             let mut inst = Instance3D::new(Instance3DId(i + 1));
             inst.mesh = Some(Mesh3D::cube(0.4 + (i % 7) as f32 * 0.3));
             let (x, z) = ((i % 21) as f32 - 10.0, (i / 21) as f32 - 10.0);
-            inst.transform = Transform3D::IDENTITY.translated(Vector3::new(x * 0.9, (i % 5) as f32 * 0.7, z * 0.9));
+            inst.transform = Transform3D::IDENTITY.translated(Vector3::new(
+                x * 0.9,
+                (i % 5) as f32 * 0.7,
+                z * 0.9,
+            ));
             inst.visible = true;
             instances.push(inst);
         }
         let size = SHADOW_MAP_SIZE;
         let mut banded = DepthBuffer::new(size, size);
-        let banded_bounds =
-            rasterize_instance_refs_into_shadow(instances.iter(), 1, &view, &proj, &mut banded, size);
+        let banded_bounds = rasterize_instance_refs_into_shadow(
+            instances.iter(),
+            1,
+            &view,
+            &proj,
+            &mut banded,
+            size,
+        );
 
         // Serial reference: the same projection, one triangle at a time.
         let mut serial = DepthBuffer::new(size, size);
@@ -1442,7 +1490,10 @@ mod tests {
                 }
             }
         }
-        assert!(tris > PARALLEL_SHADOW_TRIS, "{tris} triangles must take the banded path");
+        assert!(
+            tris > PARALLEL_SHADOW_TRIS,
+            "{tris} triangles must take the banded path"
+        );
         assert_eq!(banded_bounds, serial_bounds);
         let differing = banded
             .as_slice()
@@ -1450,7 +1501,10 @@ mod tests {
             .zip(serial.as_slice())
             .filter(|(a, b)| a.to_bits() != b.to_bits())
             .count();
-        assert_eq!(differing, 0, "{differing} texels differ between the banded and serial raster");
+        assert_eq!(
+            differing, 0,
+            "{differing} texels differ between the banded and serial raster"
+        );
         assert!(banded.as_slice().iter().filter(|d| **d < f32::MAX).count() > 10_000);
     }
 
@@ -1482,8 +1536,13 @@ mod tests {
             projs.push(directional_shadow_frame(&light).proj);
         }
         for (i, p) in projs.iter().enumerate() {
-            let bits = |m: &[[f32; 4]; 4]| m.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
-            assert_eq!(bits(p), bits(&projs[0]), "pose {i}: the fitted projection changed");
+            let bits =
+                |m: &[[f32; 4]; 4]| m.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                bits(p),
+                bits(&projs[0]),
+                "pose {i}: the fitted projection changed"
+            );
         }
     }
 

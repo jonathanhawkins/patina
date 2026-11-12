@@ -14,7 +14,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -48,7 +52,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -56,9 +63,16 @@ fn http_post(port: u16, path: &str, body: &str) -> String {
 }
 
 fn first_child_id(port: u16) -> u64 {
-    let scene: serde_json::Value =
-        serde_json::from_str(http_get(port, "/api/scene").split("\r\n\r\n").nth(1).unwrap_or("")).unwrap();
-    scene["nodes"]["children"][0]["id"].as_u64().expect("a child node id")
+    let scene: serde_json::Value = serde_json::from_str(
+        http_get(port, "/api/scene")
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or(""),
+    )
+    .unwrap();
+    scene["nodes"]["children"][0]["id"]
+        .as_u64()
+        .expect("a child node id")
 }
 
 #[test]
@@ -67,24 +81,47 @@ fn editor_play_edit_lock() {
     let node = first_child_id(port);
 
     // While editing, a tree-mutating route succeeds.
-    let before = http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{node},"group":"editable"}}"#));
-    assert!(before.contains("200 OK"), "mutation allowed while editing, got:\n{before}");
+    let before = http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{node},"group":"editable"}}"#),
+    );
+    assert!(
+        before.contains("200 OK"),
+        "mutation allowed while editing, got:\n{before}"
+    );
 
     // Play starts the runtime.
     assert!(http_post(port, "/api/runtime/play", "{}").contains("200 OK"));
 
     // Now the same mutation is rejected — the editor is read-only while running.
-    let locked = http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{node},"group":"while_running"}}"#));
-    assert!(!locked.contains("200 OK"), "mutation must be blocked while running, got:\n{locked}");
+    let locked = http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{node},"group":"while_running"}}"#),
+    );
     assert!(
-        locked.contains("edit_locked") || locked.contains("read-only") || locked.contains("running"),
+        !locked.contains("200 OK"),
+        "mutation must be blocked while running, got:\n{locked}"
+    );
+    assert!(
+        locked.contains("edit_locked")
+            || locked.contains("read-only")
+            || locked.contains("running"),
         "rejection should explain the play-mode edit-lock, got:\n{locked}"
     );
 
     // Stop lifts the lock — the route is writable again.
     assert!(http_post(port, "/api/runtime/stop", "{}").contains("200 OK"));
-    let after = http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{node},"group":"after_stop"}}"#));
-    assert!(after.contains("200 OK"), "mutation allowed again after Stop, got:\n{after}");
+    let after = http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{node},"group":"after_stop"}}"#),
+    );
+    assert!(
+        after.contains("200 OK"),
+        "mutation allowed again after Stop, got:\n{after}"
+    );
 
     handle.stop();
 }

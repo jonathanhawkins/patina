@@ -455,6 +455,7 @@ impl ProjectSettings {
         self.defaults.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Every explicitly set entry whose key lies under `prefix/`.
     pub fn get_section(&self, prefix: &str) -> Vec<(&str, &SettingsValue)> {
         let prefix_slash = if prefix.ends_with('/') {
             prefix.to_string()

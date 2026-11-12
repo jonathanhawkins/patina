@@ -504,7 +504,7 @@ impl AreaStore {
                 })
             })
             .collect();
-        overlapping.sort_by(|a, b| a.priority.cmp(&b.priority));
+        overlapping.sort_by_key(|a| a.priority);
         overlapping
     }
 

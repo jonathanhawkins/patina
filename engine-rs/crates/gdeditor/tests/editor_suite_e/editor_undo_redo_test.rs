@@ -80,7 +80,10 @@ fn nodes(port: u16) -> Vec<(String, u64)> {
     let scene = http_get_json(port, "/api/scene");
     let mut out = Vec::new();
     fn walk(n: &serde_json::Value, out: &mut Vec<(String, u64)>) {
-        if let (Some(name), Some(id)) = (n.get("name").and_then(|v| v.as_str()), n.get("id").and_then(|v| v.as_u64())) {
+        if let (Some(name), Some(id)) = (
+            n.get("name").and_then(|v| v.as_str()),
+            n.get("id").and_then(|v| v.as_u64()),
+        ) {
             out.push((name.to_string(), id));
         }
         if let Some(ch) = n.get("children").and_then(|v| v.as_array()) {
@@ -95,7 +98,10 @@ fn nodes(port: u16) -> Vec<(String, u64)> {
 }
 
 fn id_of(port: u16, name: &str) -> Option<u64> {
-    nodes(port).into_iter().find(|(n, _)| n == name).map(|(_, i)| i)
+    nodes(port)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, i)| i)
 }
 
 /// The `position` of a node as `[x, y]`, via GET /api/node/<id>.
@@ -116,13 +122,23 @@ fn editor_delete_undo_redo_round_trips() {
     let (_h, port) = make_server();
     let target = id_of(port, "Target").expect("Target present");
     let base_count = nodes(port).len();
-    assert!(id_of(port, "Inner").is_some(), "Inner child present initially");
+    assert!(
+        id_of(port, "Inner").is_some(),
+        "Inner child present initially"
+    );
 
     // Delete Target (and its Inner subtree).
-    let (st, _) = http_post(port, "/api/node/delete", &format!(r#"{{"node_id":{target}}}"#));
+    let (st, _) = http_post(
+        port,
+        "/api/node/delete",
+        &format!(r#"{{"node_id":{target}}}"#),
+    );
     assert!(st.contains("200"), "delete should succeed: {st}");
     assert!(id_of(port, "Target").is_none(), "Target removed");
-    assert!(id_of(port, "Inner").is_none(), "Inner subtree removed with parent");
+    assert!(
+        id_of(port, "Inner").is_none(),
+        "Inner subtree removed with parent"
+    );
     assert_eq!(nodes(port).len(), base_count - 2, "two nodes removed");
 
     // Undo: the node AND its child come back, with properties intact.
@@ -147,10 +163,16 @@ fn editor_delete_undo_redo_round_trips() {
         "redo of a delete must succeed (regression: stale original id); got {st} {body}"
     );
     assert!(id_of(port, "Target").is_none(), "redo removes Target again");
-    assert!(id_of(port, "Inner").is_none(), "redo removes the subtree again");
+    assert!(
+        id_of(port, "Inner").is_none(),
+        "redo removes the subtree again"
+    );
 
     // And undo once more restores it again (repeatable).
     let (st, _) = http_post(port, "/api/undo", "");
     assert!(st.contains("200"));
-    assert!(id_of(port, "Target").is_some(), "second undo restores again");
+    assert!(
+        id_of(port, "Target").is_some(),
+        "second undo restores again"
+    );
 }

@@ -78,10 +78,18 @@ fn rgb(fb: &gdrender2d::renderer::FrameBuffer, x: u32, y: u32) -> [u8; 3] {
 fn a_node2d_after_a_background_colorrect_draws_on_top_of_it() {
     let fb = render();
     // Control region: background only.
-    assert_eq!(rgb(&fb, 95, 55), [0, 0, 255], "the background fills the view");
+    assert_eq!(
+        rgb(&fb, 95, 55),
+        [0, 0, 255],
+        "the background fills the view"
+    );
     // The polygon is later in the tree at the same z: it draws over the
     // background (it used to be covered by it).
-    assert_eq!(rgb(&fb, 12, 12), [255, 0, 0], "the Node2D after the ColorRect is visible");
+    assert_eq!(
+        rgb(&fb, 12, 12),
+        [255, 0, 0],
+        "the Node2D after the ColorRect is visible"
+    );
 }
 
 /// Only a translucent ColorRect over the clear colour: with nothing opaque in

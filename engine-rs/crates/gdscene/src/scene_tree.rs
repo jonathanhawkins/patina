@@ -429,6 +429,9 @@ struct ReplicationState {
 /// (`scene/main/scene_tree.cpp:1647-1740`). Previously only
 /// `change_scene_to_file` was deferred, so a script calling either of the others
 /// had its own node freed underneath it mid-callback.
+// `Packed` is large, but at most one change is pending and it is short-lived;
+// boxing it would only add an allocation per scene change.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum PendingSceneChange {
     /// Instance this scene as the new current scene.
@@ -933,7 +936,11 @@ impl SceneTree {
     }
 
     /// Records (or, with `None`, forgets) the save baseline of `root`'s scene.
-    pub fn set_save_baseline(&mut self, root: NodeId, baseline: Option<crate::scene_saver::SaveBaseline>) {
+    pub fn set_save_baseline(
+        &mut self,
+        root: NodeId,
+        baseline: Option<crate::scene_saver::SaveBaseline>,
+    ) {
         match baseline {
             Some(b) => {
                 self.save_baselines.insert(root, b);
@@ -2641,7 +2648,8 @@ impl SceneTree {
             // SAFETY: same invariant as `process_script_coroutines_unscaled` —
             // the accessor lives only for this call and is cleared before the
             // script goes back into the arena.
-            let accessor = unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+            let accessor =
+                unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
             script.set_scene_access(Box::new(accessor), node_id.raw());
             script.notify_await_signal(gdscript_interop::coroutine::FRAME_PRE_DRAW_SIGNAL, &[]);
             script.notify_await_signal(gdscript_interop::coroutine::FRAME_POST_DRAW_SIGNAL, &[]);
@@ -3129,7 +3137,10 @@ impl SceneTree {
         // `call_group` — Dodge the Creeps' restart `call_group("mobs",
         // "queue_free")` reached no mob. Removal already unindexes them.
         for group in node.groups() {
-            self.groups.entry(group.clone()).or_default().insert(child_id);
+            self.groups
+                .entry(group.clone())
+                .or_default()
+                .insert(child_id);
         }
         self.nodes.insert(child_id, node);
 
@@ -4482,13 +4493,10 @@ impl SceneTree {
         // A DEFERRED callback connection is queued, not run: Godot routes
         // every CONNECT_DEFERRED delivery through the MessageQueue
         // (object.cpp `emit_signalp`), and this fired them synchronously.
-        let (results, deferred_cbs) = self
-            .signal_stores
-            .get_mut(&source)
-            .map_or_else(
-                || (Vec::new(), Vec::new()),
-                |store| store.emit_collecting_deferred(signal_name, args),
-            );
+        let (results, deferred_cbs) = self.signal_stores.get_mut(&source).map_or_else(
+            || (Vec::new(), Vec::new()),
+            |store| store.emit_collecting_deferred(signal_name, args),
+        );
         for (call, (target_id, method, ..)) in deferred_cbs
             .into_iter()
             .zip(connections.iter().filter(|c| c.3))
@@ -4904,7 +4912,7 @@ impl SceneTree {
             // Gathered inside the player borrow below, but kept out of the
             // returned tuple: widening that tuple would re-indent the whole
             // match arm, and this file carries other agents' uncommitted work.
-            let mut clip_starts: Vec<(String, String)> = Vec::new();
+            let clip_starts: Vec<(String, String)>;
             let (values, skip, method_calls, audio_keys, root_node, signals, current) =
                 match self.animation_players.get_mut(&node_id) {
                     Some(player) => {
@@ -5175,9 +5183,7 @@ impl SceneTree {
             };
             let mut autostart: Option<String> = None;
             let playing = matches!(node.get_property("playing"), Variant::Bool(true));
-            if !playing
-                && !matches!(node.get_property("__sf_autoplayed"), Variant::Bool(true))
-            {
+            if !playing && !matches!(node.get_property("__sf_autoplayed"), Variant::Bool(true)) {
                 autostart = name_of(node.get_property("autoplay"));
             }
             let Some(frames) = sprite_frames_from_node(node) else {
@@ -5706,7 +5712,7 @@ impl SceneTree {
                     // owner is absent in plenty of Rust-side fixtures that add a
                     // tween without a node, and killing those would change
                     // long-standing behaviour.
-                    let gone = tween.bound_node.is_some() && self.nodes.get(&bound).is_none();
+                    let gone = tween.bound_node.is_some() && !self.nodes.contains_key(&bound);
                     (
                         tween.process_mode == mode,
                         tween.can_process(paused, Some(self.should_process_node(bound))),
@@ -5915,8 +5921,11 @@ impl SceneTree {
         // marked key may be a native property ClassDB just hasn't registered,
         // so it stays on the node.
         if !dropped.is_empty() {
-            let script_vars: Vec<String> =
-                script.list_properties().into_iter().map(|p| p.name).collect();
+            let script_vars: Vec<String> = script
+                .list_properties()
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 for key in dropped.iter().filter(|k| script_vars.contains(k)) {
                     node.remove_property(key);
@@ -7121,21 +7130,6 @@ impl SceneTree {
         }
     }
 
-    /// The GUI stage of [`push_input`](Self::push_input): hit-tests Controls and
-    /// delivers the event to the one under the cursor (pat-0q2kx.18).
-    ///
-    /// Mirrors Godot's `Viewport::_gui_input_event`:
-    /// - the topmost Control at the position receives `_gui_input` and emits
-    ///   `gui_input`;
-    /// - `MOUSE_FILTER_PASS` bubbles the event to ancestors, `STOP` consumes it,
-    ///   `IGNORE` is already excluded by the hit test;
-    /// - hover transitions emit `mouse_exited` on the old control and
-    ///   `mouse_entered` on the new one;
-    /// - a press followed by a release **inside the same control** is a click,
-    ///   which emits `button_down` / `pressed` / `button_up` on a BaseButton;
-    /// - a disabled button consumes the event without emitting anything;
-    /// - key events skip the hit test entirely and go to the focus owner
-    ///   ([`gui_key_stage`](Self::gui_key_stage), pat-0q2kx.84).
     /// The open popup's geometry and model, for the draw pass (pat-s3rrv.72).
     ///
     /// Returns the SAME model the hit-test measures, so the rows drawn and the
@@ -7385,7 +7379,7 @@ impl SceneTree {
         }
         let origin = self.control_global_position(bar);
         let local_y = position.y - origin.y;
-        if local_y < 0.0 || local_y >= crate::menu::MenuBarModel::TITLE_HEIGHT {
+        if !(0.0..crate::menu::MenuBarModel::TITLE_HEIGHT).contains(&local_y) {
             return None;
         }
         crate::menu::MenuBarModel::new(self.menu_bar_titles(bar)).title_at(position.x - origin.x)
@@ -7696,6 +7690,21 @@ impl SceneTree {
         true
     }
 
+    /// The GUI stage of [`push_input`](Self::push_input): hit-tests Controls and
+    /// delivers the event to the one under the cursor (pat-0q2kx.18).
+    ///
+    /// Mirrors Godot's `Viewport::_gui_input_event`:
+    /// - the topmost Control at the position receives `_gui_input` and emits
+    ///   `gui_input`;
+    /// - `MOUSE_FILTER_PASS` bubbles the event to ancestors, `STOP` consumes it,
+    ///   `IGNORE` is already excluded by the hit test;
+    /// - hover transitions emit `mouse_exited` on the old control and
+    ///   `mouse_entered` on the new one;
+    /// - a press followed by a release **inside the same control** is a click,
+    ///   which emits `button_down` / `pressed` / `button_up` on a BaseButton;
+    /// - a disabled button consumes the event without emitting anything;
+    /// - key events skip the hit test entirely and go to the focus owner
+    ///   ([`gui_key_stage`](Self::gui_key_stage), pat-0q2kx.84).
     fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
         use gdplatform::input::InputEvent as Ev;
         let position = match event {
@@ -7993,19 +8002,18 @@ impl SceneTree {
             // Keyed on the drag being in flight rather than on `hit`, so the node
             // keeps following the cursor once it has been dragged out from under
             // the pointer's original target.
-            Ev::MouseMotion { .. } if self.gui_graph_node_drag.is_some() => {
-                if self.graph_edit_motion(position) {
-                    self.input_handled = true;
-                    return;
-                }
+            Ev::MouseMotion { .. }
+                if self.gui_graph_node_drag.is_some() && self.graph_edit_motion(position) =>
+            {
+                self.input_handled = true;
+                return;
             }
             Ev::MouseButton { pressed: false, .. }
-                if self.gui_graph_port_drag.is_some() || self.gui_graph_node_drag.is_some() =>
+                if (self.gui_graph_port_drag.is_some() || self.gui_graph_node_drag.is_some())
+                    && self.graph_edit_release(position) =>
             {
-                if self.graph_edit_release(position) {
-                    self.input_handled = true;
-                    return;
-                }
+                self.input_handled = true;
+                return;
             }
             _ => {}
         }
@@ -9799,9 +9807,9 @@ impl SceneTree {
             &crate::packed_scene::load_scene_from_res,
         )?;
         prepare(self, id);
-        let root_node = self.take_node(id).ok_or_else(|| {
-            EngineError::InvalidOperation("detached scene root vanished".into())
-        })?;
+        let root_node = self
+            .take_node(id)
+            .ok_or_else(|| EngineError::InvalidOperation("detached scene root vanished".into()))?;
         let root = self.root_id;
         self.add_child(root, root_node)?;
         crate::packed_scene::finish_attached_scene(self, id);
@@ -10601,7 +10609,7 @@ impl SceneTree {
             .filter(|&id| match self.nodes.get(&id) {
                 Some(n) => {
                     wildcard_match(pattern, n.name())
-                        && type_name.map_or(true, |t| n.class_name() == t)
+                        && type_name.is_none_or(|t| n.class_name() == t)
                 }
                 None => false,
             })

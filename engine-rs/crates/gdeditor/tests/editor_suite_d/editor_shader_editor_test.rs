@@ -19,7 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -37,7 +41,8 @@ fn http_get(port: u16, path: &str) -> String {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
     let mut buf = Vec::new();
@@ -67,16 +72,25 @@ fn shader_panel_has_files_list_and_editor_split() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
 
-    assert!(html.contains(r#"id="shader-panel""#), "shader panel present");
+    assert!(
+        html.contains(r#"id="shader-panel""#),
+        "shader panel present"
+    );
     // Left: the open-shader ItemList.
     assert!(
         html.contains(r#"id="shader-files-list""#),
         "left shader file list (Godot shader_list ItemList)"
     );
     // A drag handle for the split (Godot HSplitContainer).
-    assert!(html.contains(r#"id="shader-split-handle""#), "split resize handle");
+    assert!(
+        html.contains(r#"id="shader-split-handle""#),
+        "split resize handle"
+    );
     // Right: the TextShaderEditor container.
-    assert!(html.contains(r#"id="shader-editor-main""#), "TextShaderEditor container");
+    assert!(
+        html.contains(r#"id="shader-editor-main""#),
+        "TextShaderEditor container"
+    );
 
     handle.stop();
 }
@@ -128,8 +142,14 @@ fn shader_editor_has_code_editor_with_gutter_and_highlight() {
     let html = http_get(port, "/editor");
 
     assert!(html.contains(r#"id="shader-gutter""#), "line-number gutter");
-    assert!(html.contains(r#"id="shader-highlight""#), "syntax highlight underlay");
-    assert!(html.contains(r#"id="shader-source""#), "editable source textarea");
+    assert!(
+        html.contains(r#"id="shader-highlight""#),
+        "syntax highlight underlay"
+    );
+    assert!(
+        html.contains(r#"id="shader-source""#),
+        "editable source textarea"
+    );
     // Syntax token color classes (ShaderHighlightKind parity).
     assert!(html.contains(".sh-keyword"), "keyword token color");
     assert!(html.contains(".sh-type"), "builtin-type token color");
@@ -144,7 +164,10 @@ fn shader_editor_has_warnings_panel_and_status_bar() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
 
-    assert!(html.contains(r#"id="shader-warnings""#), "warnings panel (Godot warnings_panel)");
+    assert!(
+        html.contains(r#"id="shader-warnings""#),
+        "warnings panel (Godot warnings_panel)"
+    );
     assert!(html.contains(r#"id="shader-status""#), "status bar");
     assert!(
         html.contains(r#"id="shader-status-linecol""#) && html.contains("Line 1, Col 1"),
@@ -164,10 +187,14 @@ fn shader_editor_has_warnings_panel_and_status_bar() {
 #[test]
 fn validate_endpoint_reports_clean_shader() {
     let (handle, port) = make_server();
-    let body = r#"{"source":"shader_type canvas_item;\nvoid fragment() {\n  COLOR = vec4(1.0);\n}\n"}"#;
+    let body =
+        r#"{"source":"shader_type canvas_item;\nvoid fragment() {\n  COLOR = vec4(1.0);\n}\n"}"#;
     let resp = http_post(port, "/api/shader_validate", body);
 
-    assert!(resp.contains(r#""ok":true"#), "clean shader validates: {resp}");
+    assert!(
+        resp.contains(r#""ok":true"#),
+        "clean shader validates: {resp}"
+    );
     assert!(resp.contains(r#""errors":[]"#), "no errors: {resp}");
 
     handle.stop();
@@ -181,8 +208,14 @@ fn validate_endpoint_reports_error_for_missing_shader_type() {
     let body = r#"{"source":"void fragment() { COLOR = vec4(1.0); }"}"#;
     let resp = http_post(port, "/api/shader_validate", body);
 
-    assert!(resp.contains(r#""ok":false"#), "invalid shader fails: {resp}");
-    assert!(resp.contains("shader_type"), "error names the cause: {resp}");
+    assert!(
+        resp.contains(r#""ok":false"#),
+        "invalid shader fails: {resp}"
+    );
+    assert!(
+        resp.contains("shader_type"),
+        "error names the cause: {resp}"
+    );
     assert!(resp.contains(r#""line":1"#), "error carries a line: {resp}");
 
     handle.stop();
@@ -196,7 +229,10 @@ fn validate_endpoint_reports_unused_uniform_warning() {
     let body = r#"{"source":"shader_type canvas_item;\nuniform vec4 tint : source_color;\nvoid fragment() {\n  COLOR = vec4(1.0);\n}\n"}"#;
     let resp = http_post(port, "/api/shader_validate", body);
 
-    assert!(resp.contains(r#""ok":true"#), "unused uniform is non-fatal: {resp}");
+    assert!(
+        resp.contains(r#""ok":true"#),
+        "unused uniform is non-fatal: {resp}"
+    );
     assert!(resp.contains("tint"), "warning names the uniform: {resp}");
     assert!(resp.contains("never used"), "warning explains: {resp}");
 

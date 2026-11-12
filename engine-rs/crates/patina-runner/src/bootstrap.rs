@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use gdaudio::AudioOutputStream;
 use gdscene::scene_tree::SceneTree;
 use gdscene::{LifecycleManager, MainLoop, PackedScene};
-use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
 // BootPhase

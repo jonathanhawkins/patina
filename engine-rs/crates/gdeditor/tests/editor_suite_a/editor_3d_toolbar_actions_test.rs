@@ -39,7 +39,11 @@ fn build_3d_scene() -> (SceneTree, u64) {
     let crate_id = tree
         .add_child(root, Node::new("Crate", "MeshInstance3D"))
         .unwrap();
-    node3d::set_position(&mut tree, crate_id, gdcore::math::Vector3::new(2.0, 5.0, -1.0));
+    node3d::set_position(
+        &mut tree,
+        crate_id,
+        gdcore::math::Vector3::new(2.0, 5.0, -1.0),
+    );
     (tree, crate_id.raw())
 }
 
@@ -73,11 +77,25 @@ fn body(resp: &str) -> String {
 #[test]
 fn resize_sets_and_clamps_render_size() {
     let (handle, port, _) = start();
-    let r = body(&http_post(port, "/api/viewport/resize", r#"{"w":1280,"h":720}"#));
-    assert!(r.contains(r#""w":1280"#) && r.contains(r#""h":720"#), "resize echo: {r}");
+    let r = body(&http_post(
+        port,
+        "/api/viewport/resize",
+        r#"{"w":1280,"h":720}"#,
+    ));
+    assert!(
+        r.contains(r#""w":1280"#) && r.contains(r#""h":720"#),
+        "resize echo: {r}"
+    );
     // Over-large requests clamp to 2048; tiny ones clamp up to 64.
-    let r2 = body(&http_post(port, "/api/viewport/resize", r#"{"w":9000,"h":10}"#));
-    assert!(r2.contains(r#""w":2048"#), "width should clamp to 2048: {r2}");
+    let r2 = body(&http_post(
+        port,
+        "/api/viewport/resize",
+        r#"{"w":9000,"h":10}"#,
+    ));
+    assert!(
+        r2.contains(r#""w":2048"#),
+        "width should clamp to 2048: {r2}"
+    );
     assert!(r2.contains(r#""h":64"#), "height should clamp to 64: {r2}");
     handle.stop();
 }
@@ -102,9 +120,17 @@ fn view_flag_toggles_each_flag() {
         assert!(r.contains(off), "flag {flag} should be off: {r}");
     }
     // local_space / snap default off → flipping with no value turns them on.
-    let r = body(&http_post(port, "/api/viewport/3d/view_flag", r#"{"flag":"local_space"}"#));
+    let r = body(&http_post(
+        port,
+        "/api/viewport/3d/view_flag",
+        r#"{"flag":"local_space"}"#,
+    ));
     assert!(r.contains(r#""local":true"#), "local flip: {r}");
-    let r = body(&http_post(port, "/api/viewport/3d/view_flag", r#"{"flag":"snap"}"#));
+    let r = body(&http_post(
+        port,
+        "/api/viewport/3d/view_flag",
+        r#"{"flag":"snap"}"#,
+    ));
     assert!(r.contains(r#""snap":true"#), "snap flip: {r}");
     handle.stop();
 }
@@ -128,11 +154,29 @@ fn snap_config_sets_increments() {
 #[test]
 fn lock_and_group_act_on_selection() {
     let (handle, port, crate_raw) = start();
-    http_post(port, "/api/node/select", &format!(r#"{{"node_id":{crate_raw}}}"#));
-    let r = body(&http_post(port, "/api/viewport/3d/lock", r#"{"locked":true}"#));
-    assert!(r.contains(r#""count":1"#) && r.contains(r#""locked":true"#), "lock: {r}");
-    let r = body(&http_post(port, "/api/viewport/3d/group", r#"{"grouped":true}"#));
-    assert!(r.contains(r#""count":1"#) && r.contains(r#""grouped":true"#), "group: {r}");
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{crate_raw}}}"#),
+    );
+    let r = body(&http_post(
+        port,
+        "/api/viewport/3d/lock",
+        r#"{"locked":true}"#,
+    ));
+    assert!(
+        r.contains(r#""count":1"#) && r.contains(r#""locked":true"#),
+        "lock: {r}"
+    );
+    let r = body(&http_post(
+        port,
+        "/api/viewport/3d/group",
+        r#"{"grouped":true}"#,
+    ));
+    assert!(
+        r.contains(r#""count":1"#) && r.contains(r#""grouped":true"#),
+        "group: {r}"
+    );
     handle.stop();
 }
 
@@ -140,9 +184,16 @@ fn lock_and_group_act_on_selection() {
 #[test]
 fn snap_to_floor_moves_selection() {
     let (handle, port, crate_raw) = start();
-    http_post(port, "/api/node/select", &format!(r#"{{"node_id":{crate_raw}}}"#));
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{crate_raw}}}"#),
+    );
     let r = body(&http_post(port, "/api/viewport/3d/snap_to_floor", "{}"));
-    assert!(r.contains(r#""moved":1"#), "snap_to_floor should move 1 node: {r}");
+    assert!(
+        r.contains(r#""moved":1"#),
+        "snap_to_floor should move 1 node: {r}"
+    );
     handle.stop();
 }
 
@@ -150,13 +201,20 @@ fn snap_to_floor_moves_selection() {
 #[test]
 fn translate_selection_moves() {
     let (handle, port, crate_raw) = start();
-    http_post(port, "/api/node/select", &format!(r#"{{"node_id":{crate_raw}}}"#));
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{crate_raw}}}"#),
+    );
     let r = body(&http_post(
         port,
         "/api/viewport/3d/translate_selection",
         r#"{"dx":1,"dy":2,"dz":3}"#,
     ));
-    assert!(r.contains(r#""moved":1"#), "translate should move 1 node: {r}");
+    assert!(
+        r.contains(r#""moved":1"#),
+        "translate should move 1 node: {r}"
+    );
     handle.stop();
 }
 
@@ -166,8 +224,15 @@ fn translate_selection_moves() {
 fn ground_point_hits_floor() {
     let (handle, port, _) = start();
     // Centre of an 800x600 viewport — the default camera frames the origin.
-    let r = body(&http_post(port, "/api/viewport/3d/ground_point", r#"{"x":400,"y":300}"#));
-    assert!(r.contains(r#""hit":true"#), "centre ray should hit the floor: {r}");
+    let r = body(&http_post(
+        port,
+        "/api/viewport/3d/ground_point",
+        r#"{"x":400,"y":300}"#,
+    ));
+    assert!(
+        r.contains(r#""hit":true"#),
+        "centre ray should hit the floor: {r}"
+    );
     handle.stop();
 }
 
@@ -176,7 +241,10 @@ fn ground_point_hits_floor() {
 fn view_flag_rejects_unknown() {
     let (handle, port, _) = start();
     let resp = http_post(port, "/api/viewport/3d/view_flag", r#"{"flag":"bogus"}"#);
-    assert!(resp.starts_with("HTTP/1.1 400"), "unknown flag should 400: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 400"),
+        "unknown flag should 400: {resp}"
+    );
     handle.stop();
 }
 
@@ -194,7 +262,10 @@ fn build_centered_3d_scene() -> SceneTree {
 }
 
 /// Count pixels that differ (beyond a small epsilon) between two frames.
-fn count_diff(a: &gdrender2d::renderer::FrameBuffer, b: &gdrender2d::renderer::FrameBuffer) -> usize {
+fn count_diff(
+    a: &gdrender2d::renderer::FrameBuffer,
+    b: &gdrender2d::renderer::FrameBuffer,
+) -> usize {
     a.pixels
         .iter()
         .zip(b.pixels.iter())

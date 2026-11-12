@@ -71,7 +71,9 @@ fn add_color_rect(
     color: Color,
     z: i64,
 ) -> gdscene::NodeId {
-    let id = tree.add_child(parent, Node::new(name, "ColorRect")).unwrap();
+    let id = tree
+        .add_child(parent, Node::new(name, "ColorRect"))
+        .unwrap();
     set_v2(tree, id, "position", pos);
     set_v2(tree, id, "size", size);
     let n = tree.get_node_mut(id).unwrap();
@@ -141,7 +143,9 @@ fn runtime_canvas_paints_real_sprite_rect_and_label_pixels() {
         RED,
         999,
     );
-    let ui_layer = tree.add_child(main, Node::new("UI", "CanvasLayer")).unwrap();
+    let ui_layer = tree
+        .add_child(main, Node::new("UI", "CanvasLayer"))
+        .unwrap();
     tree.get_node_mut(ui_layer)
         .unwrap()
         .set_property("layer", Variant::Int(2));
@@ -182,9 +186,27 @@ fn runtime_canvas_paints_real_sprite_rect_and_label_pixels() {
 
     // CanvasLayer ordering beats z_index: Hud (layer 2, z=-100) over WorldHigh
     // (layer 0, z=999) in the overlap.
-    assert_pixel(&fb, 90, 150, GREEN, "the CanvasLayer HUD over the world rect");
-    assert_pixel(&fb, 120, 180, RED, "the WorldHigh rect where the HUD does not cover");
-    assert_pixel(&fb, 65, 125, GREEN, "the HUD rect where the world rect does not cover");
+    assert_pixel(
+        &fb,
+        90,
+        150,
+        GREEN,
+        "the CanvasLayer HUD over the world rect",
+    );
+    assert_pixel(
+        &fb,
+        120,
+        180,
+        RED,
+        "the WorldHigh rect where the HUD does not cover",
+    );
+    assert_pixel(
+        &fb,
+        65,
+        125,
+        GREEN,
+        "the HUD rect where the world rect does not cover",
+    );
 
     // Label: some lit glyph pixels appear in the label's region (10..40, 10..30).
     //
@@ -215,7 +237,13 @@ fn runtime_canvas_paints_real_sprite_rect_and_label_pixels() {
 
     // No editor chrome: the top-left corner has no grid line or ruler, just the
     // runtime clear color.
-    assert_pixel(&fb, 2, 2, RUNTIME_CLEAR_COLOR, "clear (no editor grid/rulers)");
+    assert_pixel(
+        &fb,
+        2,
+        2,
+        RUNTIME_CLEAR_COLOR,
+        "clear (no editor grid/rulers)",
+    );
 }
 
 /// The render list orders items by `(canvas_layer, z_index)` — the exact draw
@@ -247,7 +275,9 @@ fn runtime_render_list_orders_by_layer_then_z() {
         BLUE,
         900,
     );
-    let layer = tree.add_child(main, Node::new("UI", "CanvasLayer")).unwrap();
+    let layer = tree
+        .add_child(main, Node::new("UI", "CanvasLayer"))
+        .unwrap();
     tree.get_node_mut(layer)
         .unwrap()
         .set_property("layer", Variant::Int(1));
@@ -278,5 +308,8 @@ fn runtime_render_list_orders_by_layer_then_z() {
     let hud_item = items.iter().find(|i| i.node_id == hud.raw()).unwrap();
     assert_eq!(hud_item.canvas_layer, 1, "HUD resolves to CanvasLayer 1");
     let world_item = items.iter().find(|i| i.node_id == high_z.raw()).unwrap();
-    assert_eq!(world_item.canvas_layer, 0, "default-canvas nodes are layer 0");
+    assert_eq!(
+        world_item.canvas_layer, 0,
+        "default-canvas nodes are layer 0"
+    );
 }

@@ -40,7 +40,10 @@ fn every_handle_tag_owns_a_distinct_top_byte() {
         };
         for line in text.lines() {
             let line = line.trim_start();
-            if !line.starts_with("const ") && !line.starts_with("pub const ") && !line.starts_with("pub(crate) const ") {
+            if !line.starts_with("const ")
+                && !line.starts_with("pub const ")
+                && !line.starts_with("pub(crate) const ")
+            {
                 continue;
             }
             let Some((lhs, rhs)) = line.split_once("_TAG: u64 = 0x") else {
@@ -63,7 +66,10 @@ fn every_handle_tag_owns_a_distinct_top_byte() {
         }
     }
 
-    assert!(owners.len() > 20, "the scan must find the tag families at all");
+    assert!(
+        owners.len() > 20,
+        "the scan must find the tag families at all"
+    );
     let clashes: Vec<String> = owners
         .iter()
         .filter(|(_, names)| names.len() > 1)

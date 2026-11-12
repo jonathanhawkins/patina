@@ -51,7 +51,6 @@ use std::path::Path;
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
 use gdscene::{LifecycleManager, MainLoop};
-use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 use serde_json::{json, Map, Value};
 

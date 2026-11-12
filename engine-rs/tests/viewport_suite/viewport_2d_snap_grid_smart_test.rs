@@ -250,7 +250,13 @@ fn test_apply_snap_grid_only() {
     };
 
     let candidate = Vector2::new(13.0, 27.0);
-    let (snapped, guides) = apply_snap(&tree, &settings, &gdeditor::guides::GuideSet::default(), nid, candidate);
+    let (snapped, guides) = apply_snap(
+        &tree,
+        &settings,
+        &gdeditor::guides::GuideSet::default(),
+        nid,
+        candidate,
+    );
     assert_eq!(snapped.x, 16.0);
     assert_eq!(snapped.y, 32.0);
     assert!(
@@ -280,7 +286,13 @@ fn test_apply_snap_smart_only() {
     };
 
     let candidate = Vector2::new(102.0, 197.0);
-    let (snapped, guides) = apply_snap(&tree, &settings, &gdeditor::guides::GuideSet::default(), nid, candidate);
+    let (snapped, guides) = apply_snap(
+        &tree,
+        &settings,
+        &gdeditor::guides::GuideSet::default(),
+        nid,
+        candidate,
+    );
     assert_eq!(snapped.x, 100.0);
     assert_eq!(snapped.y, 200.0);
     assert_eq!(guides.len(), 2);
@@ -301,7 +313,13 @@ fn test_apply_snap_both_disabled() {
     };
 
     let candidate = Vector2::new(13.7, 27.3);
-    let (snapped, guides) = apply_snap(&tree, &settings, &gdeditor::guides::GuideSet::default(), nid, candidate);
+    let (snapped, guides) = apply_snap(
+        &tree,
+        &settings,
+        &gdeditor::guides::GuideSet::default(),
+        nid,
+        candidate,
+    );
     assert_eq!(snapped.x, 13.7);
     assert_eq!(snapped.y, 27.3);
     assert!(guides.is_empty());
@@ -332,7 +350,13 @@ fn test_apply_snap_grid_then_smart() {
     // X=104 is within 5px of anchor X=100, so snaps to 100.
     // Y=200 exactly matches anchor Y=200.
     let candidate = Vector2::new(103.0, 199.0);
-    let (snapped, _) = apply_snap(&tree, &settings, &gdeditor::guides::GuideSet::default(), nid, candidate);
+    let (snapped, _) = apply_snap(
+        &tree,
+        &settings,
+        &gdeditor::guides::GuideSet::default(),
+        nid,
+        candidate,
+    );
     assert_eq!(
         snapped.x, 100.0,
         "grid snap to 104, then smart snap to anchor at 100"

@@ -54,6 +54,8 @@ impl VideoStream {
     /// Layout: `"PATVID01"`, then little-endian `u32` width, `u32` height,
     /// `u32` frame_count, `f32` fps, followed by `frame_count` frames of
     /// `width × height` RGBA8 pixels.
+    // `!(x > 0.0)` is deliberate: it rejects NaN as well.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn from_fixture_bytes(data: &[u8]) -> Result<Self, VideoStreamError> {
         if data.len() < HEADER_LEN || &data[..8] != FIXTURE_MAGIC {
             return Err(VideoStreamError::BadMagic);
@@ -102,6 +104,7 @@ impl VideoStream {
 
     /// Builds a stream directly from decoded frames (the seam a real codec
     /// would use). Errors if `fps` is not positive.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // also rejects a NaN fps
     pub fn from_frames(frames: Vec<Image>, fps: f64) -> Result<Self, VideoStreamError> {
         if !(fps > 0.0) {
             return Err(VideoStreamError::Invalid(format!(
@@ -133,6 +136,7 @@ impl VideoStream {
 
     /// The frame visible at `time` seconds, clamped to the last frame.
     /// Returns `None` for an empty stream or a negative time.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // also rejects a NaN time
     pub fn frame_at(&self, time: f64) -> Option<&Image> {
         if self.frames.is_empty() || !(time >= 0.0) {
             return None;

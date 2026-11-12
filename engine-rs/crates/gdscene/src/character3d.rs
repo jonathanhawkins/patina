@@ -35,6 +35,8 @@ use crate::scene_tree::SceneTree;
 
 /// Godot's `CharacterBody3D` defaults, from `doc/classes/CharacterBody3D.xml`.
 const DEFAULT_UP_DIRECTION: Vector3 = Vector3::new(0.0, 1.0, 0.0);
+// Godot's documented default, spelled as in the XML (it is PI/4).
+#[allow(clippy::approx_constant)]
 const DEFAULT_FLOOR_MAX_ANGLE: f32 = 0.7853982;
 const DEFAULT_FLOOR_SNAP_LENGTH: f32 = 0.1;
 const DEFAULT_WALL_MIN_SLIDE_ANGLE: f32 = 0.2617994;
@@ -228,7 +230,10 @@ fn slide_one(
     // Godot's `platform_rid` / `platform_layer` (pat-kiuul): the body the last
     // call stood on, whose CURRENT velocity the next call re-reads before it
     // moves. Stored as the raw body id; -1 (or absent) is "none".
-    let platform_body = match tree.get_node(node_id).map(|n| n.get_property("_platform_body")) {
+    let platform_body = match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("_platform_body"))
+    {
         Some(Variant::Int(i)) if i >= 0 => Some(gdphysics3d::body::BodyId3D(i as u64)),
         _ => None,
     };
@@ -240,8 +245,7 @@ fn slide_one(
     character.shape_offset = body_rot.xform(shape_offset);
     character.shape_rotation = body_rot * shape_rotation;
     character.up_direction = vec3_prop(tree, node_id, "up_direction", DEFAULT_UP_DIRECTION);
-    character.floor_max_angle =
-        f32_prop(tree, node_id, "floor_max_angle", DEFAULT_FLOOR_MAX_ANGLE);
+    character.floor_max_angle = f32_prop(tree, node_id, "floor_max_angle", DEFAULT_FLOOR_MAX_ANGLE);
     character.floor_snap_length = f32_prop(
         tree,
         node_id,
@@ -261,8 +265,7 @@ fn slide_one(
     // Godot's default is EVERY layer (4294967295), so an unauthored scene
     // keeps the carry-everything behaviour it had before this existed
     // (`CharacterBody3D.xml:168`).
-    character.platform_floor_layers =
-        u32_prop(tree, node_id, "platform_floor_layers", u32::MAX);
+    character.platform_floor_layers = u32_prop(tree, node_id, "platform_floor_layers", u32::MAX);
     // ⚠️ Default 0, NOT u32::MAX like its floor sibling directly above.
     // Godot ignores every wall body unless a scene opts one in
     // (`CharacterBody3D.xml`, "all wall bodies are ignored"), so the two

@@ -21,13 +21,19 @@ use std::time::Duration;
 fn get(port: u16, path: &str) -> serde_json::Value {
     let mut stream = (0..40)
         .find_map(|_| {
-            TcpStream::connect(format!("127.0.0.1:{port}")).ok().or_else(|| {
-                thread::sleep(Duration::from_millis(50));
-                None
-            })
+            TcpStream::connect(format!("127.0.0.1:{port}"))
+                .ok()
+                .or_else(|| {
+                    thread::sleep(Duration::from_millis(50));
+                    None
+                })
         })
         .expect("connect");
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut resp = String::new();
     stream.read_to_string(&mut resp).unwrap();
     serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap()
@@ -68,15 +74,30 @@ fn the_reported_view_origin_is_the_one_the_server_renders_with() {
         v["pan_x"].as_f64().unwrap() as f32,
         v["pan_y"].as_f64().unwrap() as f32,
     );
-    let cx = v["scene_center_x"].as_f64().expect("scene_center_x is reported") as f32;
-    let cy = v["scene_center_y"].as_f64().expect("scene_center_y is reported") as f32;
-    assert!(cx != 0.0 || cy != 0.0, "precondition: the bounds are off-origin");
+    let cx = v["scene_center_x"]
+        .as_f64()
+        .expect("scene_center_x is reported") as f32;
+    let cy = v["scene_center_y"]
+        .as_f64()
+        .expect("scene_center_y is reported") as f32;
+    assert!(
+        cx != 0.0 || cy != 0.0,
+        "precondition: the bounds are off-origin"
+    );
     // The page's formula (`viewOriginX/Y`) on the reported numbers lands on
     // the server's own origin.
     let page_x = 800.0 / 2.0 + pan_x - cx * zoom;
     let page_y = 600.0 / 2.0 + pan_y - cy * zoom;
-    assert!((page_x - expected.x).abs() < 1e-3, "x: page {page_x} vs server {}", expected.x);
-    assert!((page_y - expected.y).abs() < 1e-3, "y: page {page_y} vs server {}", expected.y);
+    assert!(
+        (page_x - expected.x).abs() < 1e-3,
+        "x: page {page_x} vs server {}",
+        expected.x
+    );
+    assert!(
+        (page_y - expected.y).abs() < 1e-3,
+        "y: page {page_y} vs server {}",
+        expected.y
+    );
 }
 
 #[test]
@@ -86,7 +107,14 @@ fn the_page_overlay_uses_the_scene_centred_origin_everywhere() {
     ));
     assert!(EDITOR_HTML.contains("var ox = viewOriginX(cw);"));
     // No screen<->world conversion is left on the old panel-centred formula.
-    for stale in ["(rect.width / 2 + viewportPanX)", "(rect.height / 2 + viewportPanY)", "var ox = cw / 2 + panX;"] {
-        assert!(!EDITOR_HTML.contains(stale), "stale overlay origin: {stale}");
+    for stale in [
+        "(rect.width / 2 + viewportPanX)",
+        "(rect.height / 2 + viewportPanY)",
+        "var ox = cw / 2 + panX;",
+    ] {
+        assert!(
+            !EDITOR_HTML.contains(stale),
+            "stale overlay origin: {stale}"
+        );
     }
 }

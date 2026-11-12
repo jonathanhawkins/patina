@@ -81,7 +81,8 @@ static ROOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn boot(dir: &std::path::Path) -> MainLoop {
     gdobject::class_db::register_all_classes();
     gdcore::file_access::set_path_roots(Some(dir.to_path_buf()), None);
-    let packed = PackedScene::from_tscn(&std::fs::read_to_string(dir.join("main.tscn")).unwrap()).unwrap();
+    let packed =
+        PackedScene::from_tscn(&std::fs::read_to_string(dir.join("main.tscn")).unwrap()).unwrap();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     gdscene::packed_scene::begin_subscene_session();
@@ -112,7 +113,11 @@ fn key(pressed: bool) -> InputEvent {
 fn frame_post_draw_resumes_between_frames_on_godots_timeline() {
     let _roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("project.godot"), "config_version=5\n[application]\nrun/main_scene=\"res://main.tscn\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("project.godot"),
+        "config_version=5\n[application]\nrun/main_scene=\"res://main.tscn\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("main.gd"), SCRIPT).unwrap();
     std::fs::write(
         dir.path().join("main.tscn"),
@@ -122,7 +127,13 @@ fn frame_post_draw_resumes_between_frames_on_godots_timeline() {
     let mut ml = boot(dir.path());
     let main = ml.tree().get_node_by_path("/root/Main").expect("Main");
 
-    let names = ["awaited_at", "resumed_at", "spawned", "processed_since_resume", "ready_resumed_at"];
+    let names = [
+        "awaited_at",
+        "resumed_at",
+        "spawned",
+        "processed_since_resume",
+        "ready_resumed_at",
+    ];
     // Godot 4.6.1's record (see the module docs), frames 1..=9.
     let godot: [[i64; 5]; 9] = [
         [-1, -1, 0, 0, -1],
@@ -162,5 +173,9 @@ fn frame_post_draw_resumes_between_frames_on_godots_timeline() {
     }
     assert!(ml.tree().get_node_by_path("/root/Main/Spawned").is_some());
     let out = ml.tree_mut().drain_script_output();
-    assert!(out.errors.is_empty(), "no script errors, got {:?}", out.errors);
+    assert!(
+        out.errors.is_empty(),
+        "no script errors, got {:?}",
+        out.errors
+    );
 }

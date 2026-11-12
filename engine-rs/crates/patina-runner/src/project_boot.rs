@@ -24,7 +24,7 @@ use gdcore::{set_path_roots, ProjectSettings};
 use gdplatform::InputMap;
 use gdresource::{AutoloadEntry, ProjectLoader};
 use gdscene::scripting::GDScriptNodeInstance;
-use gdscene::{add_packed_scene_to_tree, Node, NodeId, PackedScene, SceneTree};
+use gdscene::{Node, NodeId, PackedScene, SceneTree};
 use gdvariant::Variant;
 
 /// A project booted from `project.godot`: the populated scene tree plus the
@@ -629,7 +629,11 @@ pub fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) -> usize {
 /// [`attach_scripts`] over a DETACHED subtree (not yet reachable from the
 /// root), so a scene's scripts are attached BEFORE its one lifecycle pass —
 /// attaching after it enters would skip every `_enter_tree`/`_ready`.
-pub fn attach_subtree_scripts(tree: &mut SceneTree, subtree_root: NodeId, project_dir: &Path) -> usize {
+pub fn attach_subtree_scripts(
+    tree: &mut SceneTree,
+    subtree_root: NodeId,
+    project_dir: &Path,
+) -> usize {
     let mut ids = Vec::new();
     let mut stack = vec![subtree_root];
     while let Some(id) = stack.pop() {

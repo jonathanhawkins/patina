@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -60,12 +64,21 @@ fn top_bar_renderer_is_dropdown() {
         );
     }
     // It carries the renderer option values used by Godot's settings.
-    for value in [r#"value="forward_plus""#, r#"value="mobile""#, r#"value="gl_compatibility""#] {
-        assert!(html.contains(value), "renderer dropdown should have option `{value}`");
+    for value in [
+        r#"value="forward_plus""#,
+        r#"value="mobile""#,
+        r#"value="gl_compatibility""#,
+    ] {
+        assert!(
+            html.contains(value),
+            "renderer dropdown should have option `{value}`"
+        );
     }
     // The old static text form must be gone.
     assert!(
-        !html.contains(r#"<span class="renderer-indicator" title="Rendering method">Forward+</span>"#),
+        !html.contains(
+            r#"<span class="renderer-indicator" title="Rendering method">Forward+</span>"#
+        ),
         "the renderer should no longer be a static <span>"
     );
 

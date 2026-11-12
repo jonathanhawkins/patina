@@ -18,7 +18,8 @@ use std::time::Duration;
 use gdeditor::editor_server::atomic_write;
 
 const OLD_CONTENT: &str = "[gd_scene format=3]\n[node name=\"Old\" type=\"Node\"]\n";
-const NEW_CONTENT: &str = "[gd_scene format=3]\n[node name=\"New\" type=\"Node2D\"]\nposition = Vector2(1, 2)\n";
+const NEW_CONTENT: &str =
+    "[gd_scene format=3]\n[node name=\"New\" type=\"Node2D\"]\nposition = Vector2(1, 2)\n";
 
 const ENV_PATH: &str = "PATINA_ATOMIC_SAVE_PATH";
 const ENV_CONTENT: &str = "PATINA_ATOMIC_SAVE_CONTENT";
@@ -78,8 +79,7 @@ fn atomic_write_preserves_old_content_when_write_fails() {
     let bad_path = dir.path().join("does-not-exist").join("scene.tscn");
     let err = atomic_write(&bad_path, NEW_CONTENT.as_bytes()).unwrap_err();
     assert!(
-        err.kind() == std::io::ErrorKind::NotFound
-            || err.kind() == std::io::ErrorKind::Other,
+        err.kind() == std::io::ErrorKind::NotFound || err.kind() == std::io::ErrorKind::Other,
         "expected NotFound for missing parent, got {err:?}"
     );
 

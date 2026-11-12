@@ -109,10 +109,7 @@ fn editor_signals_goto_and_autocreate() {
     );
 
     // --- Go-to-method resolves the connection to the new definition's line ---
-    let goto_body = format!(
-        r#"{{"path":"{}","method":"_on_button_pressed"}}"#,
-        path_str
-    );
+    let goto_body = format!(r#"{{"path":"{}","method":"_on_button_pressed"}}"#, path_str);
     let resp = http_post(port, "/api/signal/goto_method", &goto_body);
     assert!(
         resp.contains("200 OK"),

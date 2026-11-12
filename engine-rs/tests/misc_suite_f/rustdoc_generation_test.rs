@@ -10,6 +10,37 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Where `cargo doc` writes: `$CARGO_TARGET_DIR/doc` when that is set (the
+/// child `cargo` inherits it), else `<workspace>/target/doc`.
+fn doc_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() {
+                dir.join("doc")
+            } else {
+                workspace_root().join(dir).join("doc")
+            }
+        }
+        None => workspace_root().join("target").join("doc"),
+    }
+}
+
+/// Crates whose generated doc output is missing `index.html`.
+fn crates_missing_doc_index(doc_dir: &std::path::Path) -> Vec<&'static str> {
+    PUBLIC_CRATES
+        .iter()
+        .copied()
+        // Crate directories use underscores, not hyphens.
+        .filter(|name| {
+            !doc_dir
+                .join(name.replace('-', "_"))
+                .join("index.html")
+                .exists()
+        })
+        .collect()
+}
+
 /// All public crates in the workspace that should generate docs.
 const PUBLIC_CRATES: &[&str] = &[
     "gdaudio",
@@ -63,68 +94,17 @@ fn cargo_doc_builds_without_errors() {
     );
 
     eprintln!("cargo doc --workspace --no-deps succeeded.");
-}
 
-#[test]
-fn doc_output_directories_exist() {
-    // After cargo doc, each crate should have a directory in target/doc/
-    let doc_dir = workspace_root().join("target").join("doc");
-
-    if !doc_dir.exists() {
-        eprintln!("target/doc/ does not exist — skipping directory check (run cargo doc first).");
-        return;
-    }
-
-    let mut missing = Vec::new();
-    for crate_name in PUBLIC_CRATES {
-        // Crate directories use underscores, not hyphens
-        let dir_name = crate_name.replace('-', "_");
-        let crate_doc_dir = doc_dir.join(&dir_name);
-        if !crate_doc_dir.exists() {
-            missing.push(*crate_name);
-        }
-    }
-
+    // 🔑 Checked HERE, after the build above, not in separate tests. They used
+    // to be standalone tests reading `target/doc`, which raced this one under
+    // a parallel runner (and read a stale or half-written tree from an earlier
+    // build or a restored CI cache), and they ignored CARGO_TARGET_DIR even
+    // though the `cargo doc` they depended on honours it.
+    let doc_dir = doc_dir();
+    let missing = crates_missing_doc_index(&doc_dir);
     assert!(
         missing.is_empty(),
-        "Documentation directories missing for crates: {:?}\n\
-         Run `cargo doc --workspace --no-deps` first.",
-        missing
-    );
-
-    eprintln!(
-        "All {} crate doc directories verified.",
-        PUBLIC_CRATES.len()
-    );
-}
-
-#[test]
-fn doc_index_html_files_exist() {
-    let doc_dir = workspace_root().join("target").join("doc");
-
-    if !doc_dir.exists() {
-        eprintln!("target/doc/ does not exist — skipping index check.");
-        return;
-    }
-
-    let mut missing_index = Vec::new();
-    for crate_name in PUBLIC_CRATES {
-        let dir_name = crate_name.replace('-', "_");
-        let index = doc_dir.join(&dir_name).join("index.html");
-        if !index.exists() {
-            missing_index.push(*crate_name);
-        }
-    }
-
-    assert!(
-        missing_index.is_empty(),
-        "index.html missing for crates: {:?}",
-        missing_index
-    );
-
-    eprintln!(
-        "All {} crate index.html files present.",
-        PUBLIC_CRATES.len()
+        "cargo doc succeeded but index.html is missing under {doc_dir:?} for crates: {missing:?}"
     );
 }
 

@@ -232,7 +232,10 @@ fn tilemap_paint_tools_e2e() {
         })
         .expect("the layer survives the round trip");
 
-    let bytes = match reloaded.get_node(tiles).map(|n| n.get_property("tile_map_data")) {
+    let bytes = match reloaded
+        .get_node(tiles)
+        .map(|n| n.get_property("tile_map_data"))
+    {
         Some(Variant::PackedByteArray(b)) => b,
         other => panic!("tile_map_data should be a PackedByteArray, got {other:?}"),
     };
@@ -325,7 +328,11 @@ fn flip_and_rotate_persist_as_alternative_tile_ids() {
             .scene_tree
             .get_node_by_path("/root/Main/Tiles")
             .expect("layer exists");
-        match state.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data")) {
+        match state
+            .scene_tree
+            .get_node(nid)
+            .map(|n| n.get_property("tile_map_data"))
+        {
             Some(Variant::PackedByteArray(b)) => b,
             other => panic!("expected PackedByteArray, got {other:?}"),
         }
@@ -367,7 +374,11 @@ fn flip_and_rotate_persist_as_alternative_tile_ids() {
             .scene_tree
             .get_node_by_path("/root/Main/Tiles")
             .expect("layer exists");
-        match state.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data")) {
+        match state
+            .scene_tree
+            .get_node(nid)
+            .map(|n| n.get_property("tile_map_data"))
+        {
             Some(Variant::PackedByteArray(b)) => b,
             other => panic!("expected PackedByteArray, got {other:?}"),
         }

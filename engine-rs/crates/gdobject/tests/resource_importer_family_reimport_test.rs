@@ -14,11 +14,11 @@
 //! properties would make `class_get_property_list` report fiction as truth, so
 //! the tests below assert the family stays property-free.
 
+use gdobject::class_db::is_abstract;
 use gdobject::{
     class_exists, class_get_integer_constant, class_has_enum, get_property_list, is_parent_class,
     register_editor_classes,
 };
-use gdobject::class_db::is_abstract;
 
 /// The 16 concrete importers Godot ships (the base is handled separately).
 const CONCRETE_IMPORTERS: &[&str] = &[
@@ -51,7 +51,10 @@ fn props(class: &str) -> Vec<String> {
 fn resource_importer_family_is_registered() {
     register_editor_classes();
 
-    assert!(class_exists("ResourceImporter"), "the base must be registered");
+    assert!(
+        class_exists("ResourceImporter"),
+        "the base must be registered"
+    );
     for class in CONCRETE_IMPORTERS {
         assert!(class_exists(class), "ClassDB must know {class}");
         assert!(
@@ -64,7 +67,10 @@ fn resource_importer_family_is_registered() {
             is_parent_class(class, "RefCounted"),
             "{class} must reach RefCounted through ResourceImporter"
         );
-        assert!(is_parent_class(class, "Object"), "{class} must reach Object");
+        assert!(
+            is_parent_class(class, "Object"),
+            "{class} must reach Object"
+        );
     }
     assert_eq!(
         CONCRETE_IMPORTERS.len(),
@@ -147,7 +153,10 @@ fn the_asset_types_the_acceptance_names_all_have_importers() {
         "ResourceImporterOBJ",
         "ResourceImporterDynamicFont",
     ] {
-        assert!(class_exists(class), "{class} must exist for its source type");
+        assert!(
+            class_exists(class),
+            "{class} must exist for its source type"
+        );
     }
 }
 

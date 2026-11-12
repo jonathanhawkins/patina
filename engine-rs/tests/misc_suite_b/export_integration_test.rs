@@ -12,12 +12,9 @@
 use std::fs;
 use std::path::Path;
 
-use gdplatform::export::{
-    BuildProfile, ExportConfig, PackageError, PackageExecutor,
-};
+use gdplatform::export::{BuildProfile, ExportConfig, PackageError, PackageExecutor};
 use gdplatform::linux::{
-    appdir_name, appimage_filename, desktop_filename, linux_icon_filename,
-    sanitize_desktop_id,
+    appdir_name, appimage_filename, desktop_filename, linux_icon_filename, sanitize_desktop_id,
 };
 use tempfile::TempDir;
 
@@ -114,10 +111,7 @@ fn macos_bundle_info_plist_contains_required_keys() {
     let mut executor = PackageExecutor::new(macos_config("Patina Demo"), &project, &output);
     assert!(executor.run().success);
 
-    let plist = fs::read_to_string(
-        output.join("Patina Demo.app/Contents/Info.plist"),
-    )
-    .unwrap();
+    let plist = fs::read_to_string(output.join("Patina Demo.app/Contents/Info.plist")).unwrap();
 
     assert!(plist.contains("<key>CFBundleExecutable</key>"));
     assert!(plist.contains("<string>Patina Demo</string>"));
@@ -178,10 +172,7 @@ fn macos_bundle_omits_icon_key_when_unset() {
     let mut executor = PackageExecutor::new(cfg, &project, &output);
     assert!(executor.run().success);
 
-    let plist = fs::read_to_string(
-        output.join("BareApp.app/Contents/Info.plist"),
-    )
-    .unwrap();
+    let plist = fs::read_to_string(output.join("BareApp.app/Contents/Info.plist")).unwrap();
     assert!(plist.contains("<key>CFBundleIconFile</key>"));
     assert!(plist.contains("<string></string>"));
 
@@ -217,7 +208,11 @@ fn macos_bundle_embeds_real_binary_via_run_with_binary() {
 
     let mut executor = PackageExecutor::new(macos_config("RealBinGame"), &project, &output);
     let result = executor.run_with_binary(Some(&fake_binary));
-    assert!(result.success, "run_with_binary failed: {:?}", result.messages);
+    assert!(
+        result.success,
+        "run_with_binary failed: {:?}",
+        result.messages
+    );
 
     let embedded = output.join("RealBinGame.app/Contents/MacOS/RealBinGame");
     assert_eq!(fs::read(&embedded).unwrap(), b"ELF_FAKE_BINARY_CONTENTS");
@@ -421,7 +416,11 @@ fn windows_exe_embeds_real_binary_via_run_with_binary() {
 
     let mut executor = PackageExecutor::new(windows_config("RealBinGame"), &project, &output);
     let result = executor.run_with_binary(Some(&fake_binary));
-    assert!(result.success, "run_with_binary failed: {:?}", result.messages);
+    assert!(
+        result.success,
+        "run_with_binary failed: {:?}",
+        result.messages
+    );
 
     let embedded = output.join("RealBinGame.exe");
     assert_eq!(fs::read(&embedded).unwrap(), b"MZ_FAKE_PE_BINARY_CONTENTS");

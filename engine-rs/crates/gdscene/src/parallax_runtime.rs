@@ -81,12 +81,7 @@ pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
 
 /// [`process_parallax`] for the nodes of one viewport (`None` = the root).
 /// `filter` restricts the pass to nodes inside `vp`; off, every node is taken.
-fn process_parallax_in(
-    tree: &mut SceneTree,
-    vp: Option<NodeId>,
-    filter: bool,
-    delta_secs: f32,
-) {
+fn process_parallax_in(tree: &mut SceneTree, vp: Option<NodeId>, filter: bool, delta_secs: f32) {
     let viewport = crate::behavioral_2d::sub_viewport_size(tree, vp);
     let Some(cam) = crate::behavioral_2d::current_camera2d_in(tree, vp) else {
         return;

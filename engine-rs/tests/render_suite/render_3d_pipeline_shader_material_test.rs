@@ -145,7 +145,11 @@ fn unshaded_shader_material_ignores_lights() {
 fn dominant_colours(fb: &FrameBuffer3D) -> Vec<((u8, u8, u8), usize)> {
     let mut counts = std::collections::HashMap::new();
     for c in &fb.pixels {
-        let k = ((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8);
+        let k = (
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8,
+        );
         if k != (0, 0, 0) {
             *counts.entry(k).or_insert(0usize) += 1;
         }

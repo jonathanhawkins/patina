@@ -55,7 +55,10 @@ fn runner_boots_project_godot() {
         resolved.display(),
         project_dir.display(),
     );
-    assert!(resolved.exists(), "resolved res:// path should exist on disk");
+    assert!(
+        resolved.exists(),
+        "resolved res:// path should exist on disk"
+    );
 
     // (d) ProjectSettings reflects a project.godot value (physics tick rate = 72).
     assert_eq!(

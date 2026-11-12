@@ -68,9 +68,7 @@ func _ready():
 ";
 
 fn node_prop(tree: &SceneTree, node: NodeId, name: &str) -> Variant {
-    tree.get_node(node)
-        .expect("node exists")
-        .get_property(name)
+    tree.get_node(node).expect("node exists").get_property(name)
 }
 
 fn script_var(tree: &SceneTree, node: NodeId, name: &str) -> Variant {

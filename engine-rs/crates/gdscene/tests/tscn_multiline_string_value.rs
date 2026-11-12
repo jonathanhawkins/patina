@@ -59,7 +59,9 @@ horizontal_alignment = 1
     let root = tree.root_id();
     let id = gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
     assert_eq!(
-        tree.get_node(id).unwrap().get_property("horizontal_alignment"),
+        tree.get_node(id)
+            .unwrap()
+            .get_property("horizontal_alignment"),
         Variant::Int(1),
         "the property after the string must not be swallowed into it"
     );

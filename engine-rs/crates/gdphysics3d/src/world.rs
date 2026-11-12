@@ -88,11 +88,18 @@ struct SupportFeature {
 
 impl SupportFeature {
     fn vertex(centre: Vector3) -> Self {
-        Self { centre, axes: [(Vector3::ZERO, 0.0); 2], n_axes: 0 }
+        Self {
+            centre,
+            axes: [(Vector3::ZERO, 0.0); 2],
+            n_axes: 0,
+        }
     }
     /// (dimension, extent): a vertex < an edge < a face, then by size.
     fn rank(&self) -> (usize, f32) {
-        let size = self.axes[..self.n_axes].iter().map(|a| a.1).product::<f32>();
+        let size = self.axes[..self.n_axes]
+            .iter()
+            .map(|a| a.1)
+            .product::<f32>();
         (self.n_axes, if self.n_axes == 0 { 0.0 } else { size })
     }
     /// `p` projected onto the feature (clamped to its extent).
@@ -112,7 +119,10 @@ fn support_is_face(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3)
         Shape3D::BoxShape { .. } => support_feature(shape, pos, rot, dir).n_axes == 2,
         Shape3D::ConvexPolygonShape { points } => {
             let d = rot.inverse().xform(dir.normalized());
-            let best = points.iter().map(|p| p.dot(d)).fold(f32::NEG_INFINITY, f32::max);
+            let best = points
+                .iter()
+                .map(|p| p.dot(d))
+                .fold(f32::NEG_INFINITY, f32::max);
             let on: Vec<Vector3> = points
                 .iter()
                 .copied()
@@ -211,7 +221,11 @@ fn contact_position(
     }
     let fa = support_feature(shape_a, pos_a, rot_a, normal);
     let fb = support_feature(shape_b, pos_b, rot_b, normal * -1.0);
-    let (small, large) = if fa.rank() <= fb.rank() { (&fa, &fb) } else { (&fb, &fa) };
+    let (small, large) = if fa.rank() <= fb.rank() {
+        (&fa, &fb)
+    } else {
+        (&fb, &fa)
+    };
     let on_large = large.clamp(small.centre);
     let n = normal.normalized();
     on_large + n * ((small.centre - on_large).dot(n) * 0.5)
@@ -702,7 +716,9 @@ impl JoltContactParams {
         if pre >= 0.0 {
             // Already touching: the velocity solve stopped this step's sinking,
             // and the position solve takes a fraction of what exceeds the slop.
-            let keep = (1.0 - self.baumgarte).max(0.0).powi(self.position_steps as i32);
+            let keep = (1.0 - self.baumgarte)
+                .max(0.0)
+                .powi(self.position_steps as i32);
             let excess = (pre - self.penetration_slop).max(0.0);
             Some((pre - excess * (1.0 - keep)).min(depth))
         } else if -pre < self.speculative_contact_distance {
@@ -927,7 +943,10 @@ impl PhysicsWorld3D {
                 let half = local.size * 0.5;
                 let r = (local.position + half).length() + half.length();
                 let r = if r.is_finite() { r } else { f32::MAX / 4.0 };
-                Aabb::new(a.position - Vector3::new(r, r, r), Vector3::new(2.0 * r, 2.0 * r, 2.0 * r))
+                Aabb::new(
+                    a.position - Vector3::new(r, r, r),
+                    Vector3::new(2.0 * r, 2.0 * r, 2.0 * r),
+                )
             })
             .collect();
         let body_map: HashMap<BodyId3D, PhysicsBody3D> = self
@@ -1127,7 +1146,7 @@ impl PhysicsWorld3D {
                         *shape_rot_b,
                         sb,
                     );
-                    if r.colliding && hit.as_ref().map_or(true, |(best, ..)| r.depth > best.depth) {
+                    if r.colliding && hit.as_ref().is_none_or(|(best, ..)| r.depth > best.depth) {
                         hit = Some((
                             r,
                             *shape_pos_a,
@@ -1269,7 +1288,9 @@ impl PhysicsWorld3D {
                     }
 
                     if let Some(jolt) = self.jolt_contacts {
-                        self.solve_contact_manifolds(id_a, id_b, pos_a, pos_b, &manifolds, dt, jolt);
+                        self.solve_contact_manifolds(
+                            id_a, id_b, pos_a, pos_b, &manifolds, dt, jolt,
+                        );
                         continue;
                     }
 
@@ -1460,9 +1481,8 @@ impl PhysicsWorld3D {
             v.vb = v.vb + p * inv_b;
             v.wb = v.wb + b.apply_inverse_inertia(rb.cross(p));
         };
-        let relative = |v: &Vel, ra: Vector3, rb: Vector3| {
-            (v.va + v.wa.cross(ra)) - (v.vb + v.wb.cross(rb))
-        };
+        let relative =
+            |v: &Vel, ra: Vector3, rb: Vector3| (v.va + v.wa.cross(ra)) - (v.vb + v.wb.cross(rb));
         let mut rows: Vec<Row> = Vec::new();
         for m in manifolds {
             let n = m.normal.normalized();
@@ -1508,8 +1528,13 @@ impl PhysicsWorld3D {
                 }
                 let rel = relative(&v, r.ra, r.rb);
                 let mut f = [0.0f32; 2];
+                #[allow(clippy::needless_range_loop)] // `k` indexes four parallel arrays
                 for k in 0..2 {
-                    let step = if r.kt[k] > 0.0 { rel.dot(r.t[k]) / r.kt[k] } else { 0.0 };
+                    let step = if r.kt[k] > 0.0 {
+                        rel.dot(r.t[k]) / r.kt[k]
+                    } else {
+                        0.0
+                    };
                     f[k] = r.friction_impulse[k] + step;
                 }
                 let limit = friction * r.normal_impulse;
@@ -2201,15 +2226,14 @@ impl PhysicsWorld3D {
             for (pos, rot, shape) in rigid.shapes_world() {
                 let r =
                     collision::test_collision_rot(pos, rot, &shape, *box_pos, *box_rot, box_shape);
-                if r.colliding && best.as_ref().map_or(true, |(b, ..)| r.depth > b.depth) {
+                if r.colliding && best.as_ref().is_none_or(|(b, ..)| r.depth > b.depth) {
                     best = Some((r, pos, rot, shape));
                 }
             }
             let Some((r, pos, rot, shape)) = best else {
                 continue;
             };
-            let point =
-                contact_position(&shape, pos, rot, box_shape, *box_pos, *box_rot, r.normal);
+            let point = contact_position(&shape, pos, rot, box_shape, *box_pos, *box_rot, r.normal);
             // `r.normal` points from the rigid body into the box, so the box's
             // touching feature is its support toward `-normal`.
             let face = support_is_face(box_shape, *box_pos, *box_rot, r.normal * -1.0);
@@ -2296,7 +2320,7 @@ impl PhysicsWorld3D {
         }
 
         // Deterministic ascending-id order, matching the prior all-pairs scan.
-        pairs.sort_by(|x, y| (x.0 .0, x.1 .0).cmp(&(y.0 .0, y.1 .0)));
+        pairs.sort_by_key(|x| (x.0 .0, x.1 .0));
         pairs
     }
 
@@ -2324,7 +2348,7 @@ impl PhysicsWorld3D {
                             normal,
                             distance: t,
                         };
-                        if closest.as_ref().map_or(true, |c| t < c.distance) {
+                        if closest.as_ref().is_none_or(|c| t < c.distance) {
                             closest = Some(hit);
                         }
                     }
@@ -3267,7 +3291,10 @@ mod concave_contact_point_tests {
             Quaternion::IDENTITY,
             n * -1.0,
         );
-        assert!((p - at).length() < 1.0, "contact {p:?} is not on the box at {at:?}");
+        assert!(
+            (p - at).length() < 1.0,
+            "contact {p:?} is not on the box at {at:?}"
+        );
     }
 
     /// The behaviour that contact point drives: a box dropped on a gentle
@@ -3276,7 +3303,13 @@ mod concave_contact_point_tests {
     #[test]
     fn a_box_dropped_on_a_gentle_trimesh_slope_rests() {
         let mut world = PhysicsWorld3D::new();
-        world.add_body(PhysicsBody3D::new(BodyId3D(1), BodyType3D::Static, Vector3::ZERO, ramp(), 0.0));
+        world.add_body(PhysicsBody3D::new(
+            BodyId3D(1),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            ramp(),
+            0.0,
+        ));
         let start = Vector3::new(30.0, -3.0 + 1.5, 0.0);
         let id = world.add_body(PhysicsBody3D::new(
             BodyId3D(2),
@@ -3292,7 +3325,10 @@ mod concave_contact_point_tests {
         }
         let p = world.get_body(id).unwrap().position;
         let drift = ((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt();
-        assert!(drift < 0.5, "box slid {drift} m down a 5.7 degree slope to {p:?}");
+        assert!(
+            drift < 0.5,
+            "box slid {drift} m down a 5.7 degree slope to {p:?}"
+        );
         assert!(p.y > -3.5, "box fell through the ramp: {p:?}");
     }
 
@@ -3304,7 +3340,13 @@ mod concave_contact_point_tests {
     fn jolt_box_on_a_trimesh_slope_lands_flush_through_four_contacts() {
         let mut world = PhysicsWorld3D::new();
         world.jolt_contacts = Some(JoltContactParams::default());
-        world.add_body(PhysicsBody3D::new(BodyId3D(1), BodyType3D::Static, Vector3::ZERO, ramp(), 0.0));
+        world.add_body(PhysicsBody3D::new(
+            BodyId3D(1),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            ramp(),
+            0.0,
+        ));
         let start = Vector3::new(30.0, -3.0 + 1.5, 0.0);
         let mut body = PhysicsBody3D::new(
             BodyId3D(2),
@@ -3324,24 +3366,37 @@ mod concave_contact_point_tests {
             most_contacts = most_contacts.max(world.get_body(id).unwrap().get_contact_count());
         }
         let b = world.get_body(id).unwrap();
-        assert_eq!(most_contacts, 4, "the box's bottom face touches the slope at its four corners");
+        assert_eq!(
+            most_contacts, 4,
+            "the box's bottom face touches the slope at its four corners"
+        );
         let drift = ((b.position.x - start.x).powi(2) + (b.position.z - start.z).powi(2)).sqrt();
         // Measured: 0.056 m, all of it while landing; one contact point
         // crept 0.088 m and was still turning after 5 s.
-        assert!(drift < 0.07, "box crept {drift} m down a 5.7 degree slope (friction 1.0)");
+        assert!(
+            drift < 0.07,
+            "box crept {drift} m down a 5.7 degree slope (friction 1.0)"
+        );
         // Flush: its up axis is the slope normal.
         let up = b.rotation.xform(Vector3::new(0.0, 1.0, 0.0));
         let normal = Vector3::new(0.1, 1.0, 0.0).normalized();
-        assert!(up.dot(normal) > 0.9999, "box rests tipped: up {up:?}, slope normal {normal:?}");
-        assert!(b.angular_velocity.length() < 1e-3, "box still turning: {:?}", b.angular_velocity);
+        assert!(
+            up.dot(normal) > 0.9999,
+            "box rests tipped: up {up:?}, slope normal {normal:?}"
+        );
+        assert!(
+            b.angular_velocity.length() < 1e-3,
+            "box still turning: {:?}",
+            b.angular_velocity
+        );
     }
 }
 
 #[cfg(test)]
 mod softbody_world_tests {
     use super::*;
-    use gdcore::math::Vector3;
     use crate::softbody3d::{SoftBody3D, SoftBodyId3D};
+    use gdcore::math::Vector3;
 
     #[test]
     fn soft_body_steps_with_world() {

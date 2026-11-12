@@ -462,7 +462,10 @@ fn test_invalid_track_type_rejected() {
         "/api/animation/track/add",
         r#"{"animation":"inv","node_path":"Player","property":"x","track_type":"bezier"}"#,
     );
-    assert!(response_ok(&resp), "a bezier track is a Godot track type: {resp}");
+    assert!(
+        response_ok(&resp),
+        "a bezier track is a Godot track type: {resp}"
+    );
 
     let resp = http_post(
         port,

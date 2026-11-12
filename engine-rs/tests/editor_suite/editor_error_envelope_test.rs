@@ -119,7 +119,10 @@ fn assert_error_envelope(resp: &str, expected_status: u16) -> (String, String) {
         .as_str()
         .unwrap_or_else(|| panic!("envelope.error.message must be a string; body was: {body}"))
         .to_string();
-    assert!(!code_str.is_empty(), "envelope.error.code must be non-empty");
+    assert!(
+        !code_str.is_empty(),
+        "envelope.error.code must be non-empty"
+    );
     assert!(
         !msg_str.is_empty(),
         "envelope.error.message must be non-empty"
@@ -213,8 +216,7 @@ fn unauthorized_request_returns_401_envelope() {
     // valid token must produce the standardized envelope, not an empty body.
     let port = free_port();
     let state = EditorState::new(SceneTree::new());
-    let handle =
-        EditorServerHandle::start_with_auth(port, state, Some("super-secret".into()));
+    let handle = EditorServerHandle::start_with_auth(port, state, Some("super-secret".into()));
     for _ in 0..40 {
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;

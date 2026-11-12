@@ -27,9 +27,10 @@ use gdcore::math3d::Basis;
 /// Billboard mode controlling how the sprite faces the camera.
 ///
 /// Integer values match Godot's `BaseMaterial3D.BillboardMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BillboardMode3D {
     /// No billboarding — the sprite uses its local transform.
+    #[default]
     Disabled,
     /// Full billboard — sprite always faces the camera.
     Enabled,
@@ -37,12 +38,6 @@ pub enum BillboardMode3D {
     YBillboard,
     /// Particles billboard — used by particle systems for per-particle facing.
     Particles,
-}
-
-impl Default for BillboardMode3D {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl BillboardMode3D {
@@ -77,9 +72,10 @@ impl BillboardMode3D {
 /// Alpha cut mode for sprite transparency handling.
 ///
 /// Integer values match Godot's `SpriteBase3D.AlphaCutMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlphaCutMode {
     /// No alpha cutting — standard transparent blend.
+    #[default]
     Disabled,
     /// Discard fragments below the scissor threshold.
     Discard,
@@ -87,12 +83,6 @@ pub enum AlphaCutMode {
     OpaquePrepass,
     /// Hashed alpha — stochastic dithered alpha test.
     Hash,
-}
-
-impl Default for AlphaCutMode {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl AlphaCutMode {
@@ -127,20 +117,15 @@ impl AlphaCutMode {
 /// The axis the sprite's plane normal aligns with.
 ///
 /// Integer values match Godot's `Vector3.Axis` enum (X=0, Y=1, Z=2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Axis3D {
     /// Sprite lies in the YZ plane (normal along X).
     X,
     /// Sprite lies in the XZ plane (normal along Y) — e.g. a floor decal.
     Y,
     /// Sprite lies in the XY plane (normal along Z) — the default.
+    #[default]
     Z,
-}
-
-impl Default for Axis3D {
-    fn default() -> Self {
-        Self::Z
-    }
 }
 
 impl Axis3D {

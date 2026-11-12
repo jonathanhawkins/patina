@@ -116,7 +116,9 @@ fn tile_meshes_resolve_their_surface_material_with_texture_paths() {
     let mats =
         gdscene::array_mesh::load_array_mesh_surface_materials("res://stage/meshes/floor.res");
     assert_eq!(mats.len(), 1, "floor.res has one surface");
-    let mat = mats[0].as_ref().expect("surface 0 names tile_material.tres");
+    let mat = mats[0]
+        .as_ref()
+        .expect("surface 0 names tile_material.tres");
     assert_eq!(mat.class, "StandardMaterial3D");
     assert_eq!(
         mat.props.get("albedo_texture"),

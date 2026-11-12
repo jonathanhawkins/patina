@@ -15,7 +15,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,10 +54,10 @@ fn output_panel_renders_editorlog_toolbar() {
         "id=\"output-log\"",
         "placeholder=\"Filter Messages\"", // search_box (editor_log.cpp:531)
         "id=\"output-toolbar\"",
-        "id=\"output-clear\"",       // Clear (editor_log.cpp:547)
-        "id=\"output-copy\"",        // Copy (556)
-        "id=\"output-collapse\"",    // Collapse toggle (574)
-        "id=\"output-show-search\"", // Show Search toggle (584)
+        "id=\"output-clear\"",          // Clear (editor_log.cpp:547)
+        "id=\"output-copy\"",           // Copy (556)
+        "id=\"output-collapse\"",       // Collapse toggle (574)
+        "id=\"output-show-search\"",    // Show Search toggle (584)
         "id=\"output-filter-std\"",     // Standard Messages (598)
         "id=\"output-filter-error\"",   // Errors (604)
         "id=\"output-filter-warning\"", // Warnings (609)

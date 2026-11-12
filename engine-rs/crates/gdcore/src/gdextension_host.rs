@@ -3,7 +3,9 @@
 /// Loaded extension metadata (no native code executed in this slice).
 #[derive(Debug, Clone)]
 pub struct GdExtensionMeta {
+    /// Path to the native library (`.so`/`.dylib`/`.dll`).
     pub library_path: String,
+    /// Name of the library's initialization entry symbol.
     pub entry_symbol: String,
     /// The `.gdextension` manifest this came from, when it was registered from
     /// one (pat-0q2kx.252). `GDExtensionManager` addresses extensions by manifest
@@ -15,10 +17,12 @@ pub struct GdExtensionMeta {
 /// Host that records registered extensions.
 #[derive(Debug, Default)]
 pub struct GdExtensionHost {
+    /// Registered extensions, in registration order.
     pub extensions: Vec<GdExtensionMeta>,
 }
 
 impl GdExtensionHost {
+    /// Creates a host with no registered extensions.
     pub fn new() -> Self {
         Self::default()
     }
@@ -32,6 +36,7 @@ impl GdExtensionHost {
         });
     }
 
+    /// Number of registered extensions.
     pub fn count(&self) -> usize {
         self.extensions.len()
     }

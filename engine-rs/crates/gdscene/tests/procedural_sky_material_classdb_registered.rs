@@ -19,8 +19,14 @@ fn procedural_sky_material_classdb_registered() {
         class_db::class_exists("ProceduralSkyMaterial"),
         "ProceduralSkyMaterial must be registered in ClassDB"
     );
-    assert!(class_db::is_parent_class("ProceduralSkyMaterial", "Material"));
-    assert!(class_db::is_parent_class("ProceduralSkyMaterial", "Resource"));
+    assert!(class_db::is_parent_class(
+        "ProceduralSkyMaterial",
+        "Material"
+    ));
+    assert!(class_db::is_parent_class(
+        "ProceduralSkyMaterial",
+        "Resource"
+    ));
 
     // (2) Instantiable, and the registered property defaults match the render
     // struct's `default()` (get_property_list exposes the documented surface).
@@ -46,7 +52,10 @@ fn procedural_sky_material_classdb_registered() {
     }
     match default_of("sky_curve") {
         Some(Variant::Float(v)) => {
-            assert!((v as f32 - def.sky_curve).abs() < 1e-4, "sky_curve default, got {v}")
+            assert!(
+                (v as f32 - def.sky_curve).abs() < 1e-4,
+                "sky_curve default, got {v}"
+            )
         }
         other => panic!("sky_curve property missing/wrong: {other:?}"),
     }

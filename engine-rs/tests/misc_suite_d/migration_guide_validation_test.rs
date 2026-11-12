@@ -815,4 +815,3 @@ fn pat_0kqn8_guide_covers_scope_gaps_and_upgrade_path() {
         "upgrade path must include the end-to-end porting walkthrough"
     );
 }
-

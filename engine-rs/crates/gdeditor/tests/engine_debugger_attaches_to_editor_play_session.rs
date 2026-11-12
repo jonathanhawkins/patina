@@ -249,7 +249,10 @@ fn engine_debugger_attaches_to_editor_play_session() {
         "the debug() pause must survive a second read, not flip back to running: {again}"
     );
     let cont = json_of(&http_post(port, "/api/debug/continue", ""));
-    assert_eq!(cont["ok"], true, "continue must find the live pause: {cont}");
+    assert_eq!(
+        cont["ok"], true,
+        "continue must find the live pause: {cont}"
+    );
     assert_eq!(
         cont["paused"], false,
         "Continue must resume a debug() break (it has no parked frame): {cont}"

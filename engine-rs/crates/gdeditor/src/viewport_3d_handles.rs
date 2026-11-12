@@ -72,7 +72,14 @@ fn snapped(value: f32, step: f32) -> f32 {
 /// (`gizmo_3d_helper.cpp:80-81`), which pairs with the push order in
 /// [`box_get_handles`] — even ids are the `+axis` face, odd ids the `-axis`.
 pub fn box_handle_axis_sign(handle_id: usize) -> (usize, f32) {
-    (handle_id / 2, if handle_id % 2 == 0 { 1.0 } else { -1.0 })
+    (
+        handle_id / 2,
+        if handle_id.is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        },
+    )
 }
 
 /// Local-space positions of a `BoxShape3D`'s six face-centre handles, in
@@ -297,6 +304,7 @@ pub fn cylinder_get_handles(height: f32, radius: f32) -> [Vector3; CYLINDER_HAND
 /// applies to the projected drag distance rather than to the resulting
 /// dimension — snapping the result would quantise height in steps of half the
 /// grid.
+#[allow(clippy::too_many_arguments)]
 pub fn cylinder_or_capsule_set_handle(
     initial_radius: f32,
     initial_height: f32,

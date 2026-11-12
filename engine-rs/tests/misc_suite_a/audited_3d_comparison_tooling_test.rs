@@ -80,7 +80,9 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
 }
 
 fn load_golden(name: &str) -> Value {
-    let path = fixtures_dir().join("golden/scenes").join(format!("{name}.json"));
+    let path = fixtures_dir()
+        .join("golden/scenes")
+        .join(format!("{name}.json"));
     load_json_fixture(&path)
 }
 
@@ -251,16 +253,11 @@ fn physics_golden_traces_load_and_self_compare() {
     ];
 
     for trace_file in &traces {
-        let path = fixtures_dir()
-            .join("golden/physics")
-            .join(trace_file);
-        let trace = load_physics_trace_file(&path)
-            .unwrap_or_else(|e| panic!("load {trace_file}: {e}"));
+        let path = fixtures_dir().join("golden/physics").join(trace_file);
+        let trace =
+            load_physics_trace_file(&path).unwrap_or_else(|e| panic!("load {trace_file}: {e}"));
 
-        assert!(
-            !trace.is_empty(),
-            "{trace_file}: trace should not be empty"
-        );
+        assert!(!trace.is_empty(), "{trace_file}: trace should not be empty");
 
         // Self-comparison must be exact match
         let result = compare_physics_traces(&trace, &trace, 0.0, 0.0);
@@ -505,7 +502,10 @@ fn batch_report_with_physics_golden_traces() {
     let traces = [
         ("minimal_3d_freefall", "minimal_3d_10frames.json"),
         ("multi_body_3d", "multi_body_3d_20frames.json"),
-        ("rigid_sphere_bounce", "rigid_sphere_bounce_3d_20frames.json"),
+        (
+            "rigid_sphere_bounce",
+            "rigid_sphere_bounce_3d_20frames.json",
+        ),
     ];
 
     let mut report = BatchComparisonReport::new("phase6-physics-golden");

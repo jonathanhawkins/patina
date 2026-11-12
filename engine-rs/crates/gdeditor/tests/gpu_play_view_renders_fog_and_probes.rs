@@ -62,7 +62,13 @@ fn viewport(fog: bool) -> Viewport3D {
 
 fn to_rgb_bytes(data: &[u8]) -> Vec<(f32, f32, f32)> {
     data.chunks_exact(4)
-        .map(|p| (p[2] as f32 / 255.0, p[1] as f32 / 255.0, p[0] as f32 / 255.0))
+        .map(|p| {
+            (
+                p[2] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[0] as f32 / 255.0,
+            )
+        })
         .collect()
 }
 
@@ -132,7 +138,10 @@ fn environment_fog_renders_on_the_gpu_and_matches_software() {
     let gpu_clear = gpu_rgb(BOX_SCENE, &clear);
 
     let delta_fog = mean_abs_diff(&sw_fog, &sw_clear);
-    assert!(delta_fog > 0.02, "fixture: fog must change the software frame ({delta_fog})");
+    assert!(
+        delta_fog > 0.02,
+        "fixture: fog must change the software frame ({delta_fog})"
+    );
     let gpu_effect = mean_abs_diff(&gpu_fog, &gpu_clear);
     assert!(
         gpu_effect > delta_fog * 0.5,

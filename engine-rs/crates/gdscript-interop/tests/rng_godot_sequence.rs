@@ -59,12 +59,21 @@ fn global_builtins_draw_godots_sequence_for_seed_12345() {
     pin_random_seed(None);
 
     let v = run_list("seed(12345)\nreturn [randi(), randi(), randi(), randi()]\n");
-    assert_eq!(ints(&v), [1321476956, 17539747, 3348728241, 2863338820], "randi()");
+    assert_eq!(
+        ints(&v),
+        [1321476956, 17539747, 3348728241, 2863338820],
+        "randi()"
+    );
 
     let v = run_list("seed(12345)\nreturn [randf(), randf(), randf(), randf()]\n");
     assert_eq!(
         float_bits(&v),
-        [4599214296151359488, 4571358312406188032, 4605198011839021056, 4604180076135710720],
+        [
+            4599214296151359488,
+            4571358312406188032,
+            4605198011839021056,
+            4604180076135710720
+        ],
         "randf()"
     );
 
@@ -73,7 +82,12 @@ fn global_builtins_draw_godots_sequence_for_seed_12345() {
     );
     assert_eq!(
         float_bits(&v),
-        [-4618076179319626536, 4611886223412725118, 4616729034502416664, -4622809327214796736],
+        [
+            -4618076179319626536,
+            4611886223412725118,
+            4616729034502416664,
+            -4622809327214796736
+        ],
         "randf_range(-3.5, 7.25)"
     );
 
@@ -87,7 +101,12 @@ fn global_builtins_draw_godots_sequence_for_seed_12345() {
     );
     assert_eq!(
         float_bits(&v),
-        [-4611022827862630423, 4603723601486594154, 4612259917416913723, -4628335758851322544],
+        [
+            -4611022827862630423,
+            4603723601486594154,
+            4612259917416913723,
+            -4628335758851322544
+        ],
         "randfn(1.0, 2.0)"
     );
 
@@ -96,7 +115,8 @@ fn global_builtins_draw_godots_sequence_for_seed_12345() {
     );
     assert_eq!(ints(&v), [6, 7, 1, 0, 6, 9], "pick_random()");
 
-    let v = run_list("seed(12345)\nvar sh = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\nsh.shuffle()\nreturn sh\n");
+    let v =
+        run_list("seed(12345)\nvar sh = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\nsh.shuffle()\nreturn sh\n");
     assert_eq!(ints(&v), [3, 2, 5, 8, 4, 0, 9, 1, 7, 6], "shuffle()");
 }
 
@@ -128,7 +148,10 @@ fn random_number_generator_draws_godots_sequence_for_seed_12345() {
         probe.randfn(1.0, 2.0).to_bits() as i64,
     ];
     assert_eq!(float_bits(&v[2..]), expect);
-    assert_eq!(expect[0], 4598212003255812096, "Godot's first r.randf() for seed 12345");
+    assert_eq!(
+        expect[0], 4598212003255812096,
+        "Godot's first r.randf() for seed 12345"
+    );
 }
 
 /// A pinned run (the agent `play` tool, the Godot reference capture) derives
@@ -145,14 +168,29 @@ fn a_pinned_seed_makes_randomize_and_new_generators_reproducible() {
     let second = ints(&run_list(src));
     pin_random_seed(None);
     assert_eq!(first, second, "a pinned run replays exactly");
-    assert_eq!(first[1], 42 + 1_000_000 + 1, "the 1st RandomNumberGenerator.new() seeds base + 1000001");
-    assert_eq!(first[2], 42 + 1_000_000 + 2, "its randomize() takes the next instance seed");
+    assert_eq!(
+        first[1],
+        42 + 1_000_000 + 1,
+        "the 1st RandomNumberGenerator.new() seeds base + 1000001"
+    );
+    assert_eq!(
+        first[2],
+        42 + 1_000_000 + 2,
+        "its randomize() takes the next instance seed"
+    );
     let mut after_randomize = gdcore::rng::Rng::with_seed(43);
-    assert_eq!(first[0], after_randomize.randi() as i64, "the 1st randomize() seeds base + 1");
+    assert_eq!(
+        first[0],
+        after_randomize.randi() as i64,
+        "the 1st randomize() seeds base + 1"
+    );
 
     // Unpinned, Godot's RandomNumberGenerator.new() is randomized.
     let seeds = ints(&run_list(
         "var a = RandomNumberGenerator.new()\nvar b = RandomNumberGenerator.new()\nreturn [a.seed, b.seed]\n",
     ));
-    assert_ne!(seeds[0], seeds[1], "two unpinned generators must not share a seed");
+    assert_ne!(
+        seeds[0], seeds[1],
+        "two unpinned generators must not share a seed"
+    );
 }

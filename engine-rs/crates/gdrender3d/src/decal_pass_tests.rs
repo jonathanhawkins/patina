@@ -82,7 +82,8 @@ fn ground_depth(camera: &Transform3D, proj: &[[f32; 4]; 4], inv_proj: &[[f32; 4]
             let t = -camera.origin.y / dir.y;
             let hit = camera.origin + dir * t;
             let v = view_of_world.xform(hit);
-            let clip = |r: usize| proj[0][r] * v.x + proj[1][r] * v.y + proj[2][r] * v.z + proj[3][r];
+            let clip =
+                |r: usize| proj[0][r] * v.x + proj[1][r] * v.y + proj[2][r] * v.z + proj[3][r];
             let mut d = clip(2) / clip(3);
             // A nearer slab down the left quarter of the screen.
             if x < W / 4 && y > H / 3 {
@@ -113,7 +114,12 @@ fn decal_at(origin: Vector3, size: Vector3, basis: Basis, tint: Color) -> Decal3
 }
 
 fn check(camera: Transform3D, decals: &[Decal3D]) -> usize {
-    let proj = perspective_projection_matrix(std::f32::consts::FRAC_PI_3, W as f32 / H as f32, 0.05, 400.0);
+    let proj = perspective_projection_matrix(
+        std::f32::consts::FRAC_PI_3,
+        W as f32 / H as f32,
+        0.05,
+        400.0,
+    );
     let inv_proj = invert_projection(&proj);
     let depth = ground_depth(&camera, &proj, &inv_proj);
     let mut fast = frame(Color::new(0.6, 0.5, 0.4, 1.0));
@@ -130,7 +136,10 @@ fn check(camera: Transform3D, decals: &[Decal3D]) -> usize {
                 || a.a.to_bits() != b.a.to_bits()
         })
         .count();
-    assert_eq!(differing, 0, "{differing} pixels differ from the per-pixel walk");
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels differ from the per-pixel walk"
+    );
     // How many pixels the decals touched — a test whose decals hit nothing
     // proves nothing.
     let base = frame(Color::new(0.6, 0.5, 0.4, 1.0));
@@ -139,7 +148,10 @@ fn check(camera: Transform3D, decals: &[Decal3D]) -> usize {
 
 /// A camera at `origin` whose -Z (Godot's forward) points at `target`.
 fn camera_at(origin: Vector3, target: Vector3) -> Transform3D {
-    Transform3D { basis: Basis::looking_at(target - origin, Vector3::UP), origin }
+    Transform3D {
+        basis: Basis::looking_at(target - origin, Vector3::UP),
+        origin,
+    }
 }
 
 #[test]
@@ -180,8 +192,18 @@ fn a_column_around_and_across_the_camera_plane_matches_the_per_pixel_walk() {
 fn decals_behind_or_beside_the_view_draw_nothing_and_still_match() {
     let cam = camera_at(Vector3::new(0.0, 4.0, 8.0), Vector3::ZERO);
     let decals = [
-        decal_at(Vector3::new(0.0, 0.0, 20.0), Vector3::new(2.0, 2.0, 2.0), Basis::IDENTITY, Color::WHITE),
-        decal_at(Vector3::new(-90.0, 0.0, 0.0), Vector3::new(2.0, 2.0, 2.0), Basis::IDENTITY, Color::WHITE),
+        decal_at(
+            Vector3::new(0.0, 0.0, 20.0),
+            Vector3::new(2.0, 2.0, 2.0),
+            Basis::IDENTITY,
+            Color::WHITE,
+        ),
+        decal_at(
+            Vector3::new(-90.0, 0.0, 0.0),
+            Vector3::new(2.0, 2.0, 2.0),
+            Basis::IDENTITY,
+            Color::WHITE,
+        ),
     ];
     assert_eq!(check(cam, &decals), 0);
 }
@@ -196,16 +218,29 @@ fn rotated_scaled_and_overlapping_decals_match_the_per_pixel_walk() {
         y: turn.y * 0.5,
         z: turn.z * 2.0,
     };
-    let mut glow = decal_at(Vector3::new(0.5, 0.0, 0.0), Vector3::new(2.0, 3.0, 2.0), tilt, Color::new(0.2, 0.9, 0.3, 1.0));
-    glow.emission_image = Some(std::sync::Arc::new(gdserver3d::material::TextureImage::new(
-        1,
-        1,
-        vec![Color::new(0.5, 0.4, 0.1, 1.0)],
-    )));
+    let mut glow = decal_at(
+        Vector3::new(0.5, 0.0, 0.0),
+        Vector3::new(2.0, 3.0, 2.0),
+        tilt,
+        Color::new(0.2, 0.9, 0.3, 1.0),
+    );
+    glow.emission_image = Some(std::sync::Arc::new(
+        gdserver3d::material::TextureImage::new(1, 1, vec![Color::new(0.5, 0.4, 0.1, 1.0)]),
+    ));
     let decals = [
-        decal_at(Vector3::new(0.0, 0.0, -1.0), Vector3::new(3.0, 2.0, 3.0), scaled, Color::new(0.1, 0.1, 0.8, 1.0)),
+        decal_at(
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(3.0, 2.0, 3.0),
+            scaled,
+            Color::new(0.1, 0.1, 0.8, 1.0),
+        ),
         glow,
-        decal_at(Vector3::new(-1.0, 0.0, -2.0), Vector3::new(4.0, 4.0, 1.0), turn, Color::new(1.0, 1.0, 0.0, 0.5)),
+        decal_at(
+            Vector3::new(-1.0, 0.0, -2.0),
+            Vector3::new(4.0, 4.0, 1.0),
+            turn,
+            Color::new(1.0, 1.0, 0.0, 0.5),
+        ),
     ];
     assert!(check(cam, &decals) > 200);
 }

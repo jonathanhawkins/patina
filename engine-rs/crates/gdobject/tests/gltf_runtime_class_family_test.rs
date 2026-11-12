@@ -22,7 +22,10 @@ const GLTF_CLASSES: &[(&str, &str)] = &[
     ("GLTFCamera", "Resource"),
     ("GLTFDocument", "Resource"),
     ("GLTFDocumentExtension", "Resource"),
-    ("GLTFDocumentExtensionConvertImporterMesh", "GLTFDocumentExtension"),
+    (
+        "GLTFDocumentExtensionConvertImporterMesh",
+        "GLTFDocumentExtension",
+    ),
     ("GLTFLight", "Resource"),
     ("GLTFMesh", "Resource"),
     ("GLTFNode", "Resource"),
@@ -89,11 +92,11 @@ fn object_model_property_is_the_lone_refcounted() {
         "it is RefCounted, not a Resource — the only one in the family"
     );
     // ...and every other one really is a Resource.
-    for (class, _) in GLTF_CLASSES.iter().filter(|(c, _)| *c != "GLTFObjectModelProperty") {
-        assert!(
-            is_parent_class(class, "Resource"),
-            "{class} is a Resource"
-        );
+    for (class, _) in GLTF_CLASSES
+        .iter()
+        .filter(|(c, _)| *c != "GLTFObjectModelProperty")
+    {
+        assert!(is_parent_class(class, "Resource"), "{class} is a Resource");
     }
 }
 
@@ -119,7 +122,20 @@ fn gltf_state_carries_the_parse_output_collections() {
     register_io_classes();
     assert_props(
         "GLTFState",
-        &["json", "nodes", "meshes", "accessors", "buffer_views", "animations", "skins", "skeletons", "cameras", "lights", "textures", "materials"],
+        &[
+            "json",
+            "nodes",
+            "meshes",
+            "accessors",
+            "buffer_views",
+            "animations",
+            "skins",
+            "skeletons",
+            "cameras",
+            "lights",
+            "textures",
+            "materials",
+        ],
     );
     // The collections default to empty rather than Nil, so a fresh state is
     // readable before a parse rather than erroring.
@@ -154,10 +170,19 @@ fn gltf_document_is_a_registered_resource() {
 #[test]
 fn data_holders_carry_their_own_distinct_schemas() {
     register_io_classes();
-    assert_props("GLTFNode", &["parent", "mesh", "skin", "position", "rotation", "scale"]);
-    assert_props("GLTFAccessor", &["buffer_view", "component_type", "count", "min", "max"]);
+    assert_props(
+        "GLTFNode",
+        &["parent", "mesh", "skin", "position", "rotation", "scale"],
+    );
+    assert_props(
+        "GLTFAccessor",
+        &["buffer_view", "component_type", "count", "min", "max"],
+    );
     assert_props("GLTFBufferView", &["buffer", "byte_offset", "byte_length"]);
-    assert_props("GLTFTextureSampler", &["mag_filter", "min_filter", "wrap_s", "wrap_t"]);
+    assert_props(
+        "GLTFTextureSampler",
+        &["mag_filter", "min_filter", "wrap_s", "wrap_t"],
+    );
     assert_props("GLTFSkeleton", &["joints", "roots"]);
 }
 

@@ -11,18 +11,13 @@ use gdcore::math3d::Transform3D;
 use crate::mesh::Mesh3D;
 
 /// Transform format for MultiMesh instances.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransformFormat {
     /// 2D transforms (Transform2D) — not yet supported, stored as 3D identity.
     Transform2D,
     /// 3D transforms (Transform3D).
+    #[default]
     Transform3D,
-}
-
-impl Default for TransformFormat {
-    fn default() -> Self {
-        Self::Transform3D
-    }
 }
 
 /// A multi-mesh resource: one shared mesh drawn at many positions.

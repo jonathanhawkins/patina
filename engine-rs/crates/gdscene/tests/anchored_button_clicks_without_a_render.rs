@@ -88,7 +88,11 @@ fn an_anchored_button_is_clicked_with_no_frame_ever_rendered() {
     let (mut ml, hud) = boot();
     // Outside the button (above it): nothing.
     click(&mut ml, 240.0, 400.0);
-    assert_eq!(starts(&ml, hud), Variant::Int(0), "a click above the button misses");
+    assert_eq!(
+        starts(&ml, hud),
+        Variant::Int(0),
+        "a click above the button misses"
+    );
     // The button's anchored rect is x 150..330, y 520..620.
     click(&mut ml, 240.0, 570.0);
     assert_eq!(

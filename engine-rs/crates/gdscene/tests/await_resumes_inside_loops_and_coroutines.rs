@@ -39,8 +39,7 @@ fn prop(ml: &MainLoop, id: gdscene::node::NodeId, name: &str) -> Option<Variant>
 #[test]
 fn await_resumes_inside_loops_and_coroutines() {
     // Three iterations, each awaiting a fresh 0.05s timer.
-    let (mut ml, id) = run(
-        "\
+    let (mut ml, id) = run("\
 extends Node
 var count = 0
 func _ready():
@@ -48,8 +47,7 @@ func _ready():
         self.count = self.count + 1
         var t = get_tree().create_timer(0.05)
         await t.timeout
-",
-    );
+");
 
     // The first iteration ran and then parked: exactly one increment so far.
     assert_eq!(
@@ -75,8 +73,7 @@ func _ready():
 /// on the callee and take its return value.
 #[test]
 fn awaiting_a_coroutine_yields_its_return_value() {
-    let (mut ml, id) = run(
-        "\
+    let (mut ml, id) = run("\
 extends Node
 signal go
 var v = -1
@@ -86,8 +83,7 @@ func helper():
 func _ready():
     var r = await helper()
     self.v = r
-",
-    );
+");
 
     // Parked inside `helper`, which is itself parked on `go`.
     assert_eq!(
@@ -109,8 +105,7 @@ func _ready():
 /// await still run each pass.
 #[test]
 fn await_inside_while_keeps_looping_and_finishes_the_body() {
-    let (mut ml, id) = run(
-        "\
+    let (mut ml, id) = run("\
 extends Node
 var n = 0
 var after = 0
@@ -120,8 +115,7 @@ func _ready():
         var t = get_tree().create_timer(0.05)
         await t.timeout
         self.after = self.after + 1
-",
-    );
+");
 
     for _ in 0..60 {
         ml.step(1.0 / 60.0);
@@ -145,8 +139,7 @@ func _ready():
 /// be replayed, innermost first.
 #[test]
 fn await_nested_in_if_inside_for_resumes_both_frames() {
-    let (mut ml, id) = run(
-        "\
+    let (mut ml, id) = run("\
 extends Node
 var hits = 0
 var tail = 0
@@ -157,8 +150,7 @@ func _ready():
             await t.timeout
             self.hits = self.hits + 1
     self.tail = 99
-",
-    );
+");
 
     for _ in 0..60 {
         ml.step(1.0 / 60.0);
@@ -183,16 +175,14 @@ func _ready():
 /// disturb it.
 #[test]
 fn top_level_await_still_resumes() {
-    let (mut ml, id) = run(
-        "\
+    let (mut ml, id) = run("\
 extends Node
 var done = false
 func _ready():
     var t = get_tree().create_timer(0.05)
     await t.timeout
     self.done = true
-",
-    );
+");
 
     for _ in 0..20 {
         ml.step(1.0 / 60.0);

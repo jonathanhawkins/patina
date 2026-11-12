@@ -39,10 +39,19 @@ fn play_3d_frame_timing() {
     let scene = std::env::var("PATINA_PLAY3D_SCENE").unwrap_or_else(|_| "game.tscn".into());
     let (w, h) = (995u32, 807u32);
     gdobject::class_db::register_all_classes();
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
     std::thread::sleep(Duration::from_millis(100));
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{project}"}}"#));
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{project}"}}"#),
+    );
     let load = request(
         port,
         "POST",
@@ -138,10 +147,19 @@ fn play_3d_frame_dump() {
     let scene = std::env::var("PATINA_PLAY3D_SCENE").unwrap_or_else(|_| "game.tscn".into());
     let (w, h) = (995u32, 807u32);
     gdobject::class_db::register_all_classes();
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
     std::thread::sleep(Duration::from_millis(100));
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{project}"}}"#));
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{project}"}}"#),
+    );
     let load = request(
         port,
         "POST",
@@ -163,7 +181,10 @@ fn play_3d_frame_dump() {
             (st.runtime_frame_count, st.is_paused)
         };
         assert!(paused, "the runtime must be paused");
-        assert!(count <= TARGET_FRAME, "the driver ran past frame {TARGET_FRAME} before pausing");
+        assert!(
+            count <= TARGET_FRAME,
+            "the driver ran past frame {TARGET_FRAME} before pausing"
+        );
         if count == TARGET_FRAME {
             break;
         }
@@ -195,7 +216,10 @@ fn play_3d_frame_dump() {
                 h,
             )
         };
-        assert!(prepared.draws_world(), "the scene must have a current Camera3D");
+        assert!(
+            prepared.draws_world(),
+            "the scene must have a current Camera3D"
+        );
         frames.push(prepared.render().data);
     }
     handle.stop();
@@ -205,7 +229,10 @@ fn play_3d_frame_dump() {
         let (n, bbox) = pixel_diff(&frames[i - 1], &frames[i], w);
         eprintln!("frame {} vs {i}: {n} pixels differ, bbox {bbox:?}", i - 1);
     }
-    assert!(frames[3] == frames[4] && frames[4] == frames[5], "renders of one paused frame differ");
+    assert!(
+        frames[3] == frames[4] && frames[4] == frames[5],
+        "renders of one paused frame differ"
+    );
     let frame = frames.pop().unwrap();
     if let Ok(path) = std::env::var("PATINA_PLAY3D_DUMP") {
         std::fs::write(&path, &frame).unwrap();
@@ -224,7 +251,10 @@ fn play_3d_frame_dump() {
                 }
             }
         }
-        eprintln!("compare: {differing} of {} pixels differ, max channel delta {max_delta}", w * h);
+        eprintln!(
+            "compare: {differing} of {} pixels differ, max channel delta {max_delta}",
+            w * h
+        );
         assert_eq!(differing, 0, "the frame changed");
     }
 }

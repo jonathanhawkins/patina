@@ -175,7 +175,10 @@ fn unknown_modifier_classes_are_left_alone() {
     // ⚠️ Was `JacobianIK3D`, which pat-0q2kx.156 has since routed (to CCD, as a
     // documented placeholder) — so the "unrouted" fixture solved and moved.
     let mut m = Node::new("IK", "SplineIK3D");
-    m.set_property("target_position", Variant::Vector3(Vector3::new(1.5, 1.0, 0.0)));
+    m.set_property(
+        "target_position",
+        Variant::Vector3(Vector3::new(1.5, 1.0, 0.0)),
+    );
     m.set_property("root_bone", Variant::Int(b0 as i64));
     m.set_property("tip_bone", Variant::Int(tip as i64));
     m.set_property("influence", Variant::Float(1.0));

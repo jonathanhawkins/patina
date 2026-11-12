@@ -72,7 +72,10 @@ fn classdb_2d_missing_classes_registered() {
         // TileSetSource is GDREGISTER_ABSTRACT_CLASS upstream (its concrete
         // forms are TileSetAtlasSource / TileSetScenesCollectionSource).
         if *class == "TileSetSource" {
-            assert!(!can_instantiate(class), "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS");
+            assert!(
+                !can_instantiate(class),
+                "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS"
+            );
         } else {
             assert!(
                 can_instantiate(class),

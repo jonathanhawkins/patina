@@ -35,8 +35,14 @@ fn config_file_encrypted_roundtrip() {
         loaded.get_value("player", "name"),
         cfg.get_value("player", "name")
     );
-    assert_eq!(loaded.get_value("player", "hp"), cfg.get_value("player", "hp"));
-    assert_eq!(loaded.get_value("game", "title"), cfg.get_value("game", "title"));
+    assert_eq!(
+        loaded.get_value("player", "hp"),
+        cfg.get_value("player", "hp")
+    );
+    assert_eq!(
+        loaded.get_value("game", "title"),
+        cfg.get_value("game", "title")
+    );
 
     // A wrong password must NOT recover the original value (decrypt / UTF-8 /
     // parse fails, or yields different data).

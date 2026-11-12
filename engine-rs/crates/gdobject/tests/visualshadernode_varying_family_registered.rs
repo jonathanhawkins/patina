@@ -13,9 +13,7 @@
 //! harmless approximation: it reads as a real varying whose name happens to be
 //! blank, and a graph would look like it had one selected.
 
-use gdobject::class_db::{
-    class_exists, get_property_list, is_parent_class, register_3d_classes,
-};
+use gdobject::class_db::{class_exists, get_property_list, is_parent_class, register_3d_classes};
 use gdvariant::Variant;
 
 /// Every property `get_property_list` reports for `class_name`, by name.

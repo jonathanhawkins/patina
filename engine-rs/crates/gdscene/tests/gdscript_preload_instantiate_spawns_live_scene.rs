@@ -42,7 +42,8 @@ fn res_root() -> &'static PathBuf {
     ROOT.get_or_init(|| {
         // A per-process directory: concurrent runs of this binary (and the rest
         // of the suite) must not collide on a fixed path.
-        let dir = std::env::temp_dir().join(format!("patina_preload_u3l8c12_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("patina_preload_u3l8c12_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp res:// root is creatable");
 
         // A scene to spawn: one Node2D root with a child, so we can prove the
@@ -128,7 +129,11 @@ fn gdscript_preload_instantiate_spawns_live_scene() {
     let node = tree
         .get_node(bullet)
         .expect("instantiate() must add the scene root to the tree");
-    assert_eq!(node.name(), "Bullet", "the spawned root keeps its .tscn name");
+    assert_eq!(
+        node.name(),
+        "Bullet",
+        "the spawned root keeps its .tscn name"
+    );
     assert_eq!(
         node.class_name(),
         "Node2D",

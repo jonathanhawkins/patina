@@ -22,7 +22,10 @@ fn real_iso_mp3_decodes_to_pcm() {
 
     let buf: AudioBuffer = decode_mp3(TONE_MP3).expect("real ISO MP3 should decode");
 
-    assert_eq!(buf.sample_rate, 44_100, "sample rate read from the MP3 header");
+    assert_eq!(
+        buf.sample_rate, 44_100,
+        "sample rate read from the MP3 header"
+    );
     assert_eq!(buf.channels, 2, "fixture is stereo");
 
     // ~0.12 s of stereo at 44.1 kHz is on the order of ten thousand interleaved
@@ -33,7 +36,11 @@ fn real_iso_mp3_decodes_to_pcm() {
         buf.samples.len()
     );
     // Interleaved stereo frames => an even number of samples.
-    assert_eq!(buf.samples.len() % 2, 0, "interleaved stereo => even sample count");
+    assert_eq!(
+        buf.samples.len() % 2,
+        0,
+        "interleaved stereo => even sample count"
+    );
     // minimp3 output is normalized to f32 in [-1, 1].
     assert!(
         buf.samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0),

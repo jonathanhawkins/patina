@@ -27,23 +27,13 @@ pub struct ContactChanges {
 
 /// Tracks the bodies currently in contact with one `RigidBody2D` and reports
 /// enter/exit transitions (Godot `contact_monitor` + `max_contacts_reported`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ContactMonitor {
     /// Whether contact reporting is enabled (`contact_monitor`).
     pub enabled: bool,
     /// Maximum number of contacts tracked; `0` disables reporting, as in Godot.
     pub max_contacts_reported: usize,
     current: HashSet<BodyId>,
-}
-
-impl Default for ContactMonitor {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_contacts_reported: 0,
-            current: HashSet::new(),
-        }
-    }
 }
 
 impl ContactMonitor {

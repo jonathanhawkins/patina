@@ -328,12 +328,16 @@ fn shape_volume_and_centroid(shape: &Shape3D) -> (f32, Vector3) {
     use std::f32::consts::PI;
     match shape {
         Shape3D::Sphere { radius } => (4.0 / 3.0 * PI * radius.powi(3), Vector3::ZERO),
-        Shape3D::BoxShape { half_extents } => {
-            (8.0 * half_extents.x * half_extents.y * half_extents.z, Vector3::ZERO)
-        }
+        Shape3D::BoxShape { half_extents } => (
+            8.0 * half_extents.x * half_extents.y * half_extents.z,
+            Vector3::ZERO,
+        ),
         Shape3D::CapsuleShape { radius, height } => {
             let cylinder = (height - 2.0 * radius).max(0.0);
-            (PI * radius * radius * cylinder + 4.0 / 3.0 * PI * radius.powi(3), Vector3::ZERO)
+            (
+                PI * radius * radius * cylinder + 4.0 / 3.0 * PI * radius.powi(3),
+                Vector3::ZERO,
+            )
         }
         Shape3D::CylinderShape { radius, height } => (PI * radius * radius * height, Vector3::ZERO),
         Shape3D::ConvexPolygonShape { .. } => {
@@ -701,7 +705,12 @@ fn gridmap_signature(
     ] {
         format!("{:?}", node.get_property(key)).hash(&mut h);
     }
-    for v in [global.basis.x, global.basis.y, global.basis.z, global.origin] {
+    for v in [
+        global.basis.x,
+        global.basis.y,
+        global.basis.z,
+        global.origin,
+    ] {
         [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()].hash(&mut h);
     }
     (layer, mask).hash(&mut h);
@@ -725,7 +734,10 @@ pub(crate) fn shape_from_resource_3d(resource: &gdresource::Resource) -> Option<
     let root = tree.root_id();
     let mut node = crate::node::Node::new("Shape", "CollisionShape3D");
     node.set_property("shape", Variant::String("SubResource:resource".into()));
-    node.set_property("__shape__class", Variant::String(resource.class_name.clone()));
+    node.set_property(
+        "__shape__class",
+        Variant::String(resource.class_name.clone()),
+    );
     for (key, value) in resource.properties() {
         node.set_property(&format!("__shape__{key}"), value.clone());
     }
@@ -1268,13 +1280,8 @@ impl PhysicsServer3D {
                     continue;
                 };
                 let placed = global * local;
-                let mut body = PhysicsBody3D::new(
-                    BodyId3D(0),
-                    BodyType3D::Static,
-                    placed.origin,
-                    shape,
-                    0.0,
-                );
+                let mut body =
+                    PhysicsBody3D::new(BodyId3D(0), BodyType3D::Static, placed.origin, shape, 0.0);
                 body.rotation = placed.basis.get_rotation_quaternion();
                 body.collision_layer = layer;
                 body.collision_mask = mask;
@@ -2280,12 +2287,12 @@ impl PhysicsServer3D {
             return;
         };
         if let Some(v) = node_lin {
-            if published.map_or(true, |(l, _)| l != v) {
+            if published.is_none_or(|(l, _)| l != v) {
                 body.linear_velocity = v;
             }
         }
         if let Some(v) = node_ang {
-            if published.map_or(true, |(_, a)| a != v) {
+            if published.is_none_or(|(_, a)| a != v) {
                 body.angular_velocity = v;
             }
         }
@@ -2453,7 +2460,11 @@ impl PhysicsServer3D {
                 };
                 updates.push(WheelOut {
                     node: *wnode,
-                    local: if posed { controller.wheel_local_transform(i, &chassis) } else { None },
+                    local: if posed {
+                        controller.wheel_local_transform(i, &chassis)
+                    } else {
+                        None
+                    },
                     in_contact: w.in_contact,
                     skid: w.skid_info,
                     rpm: w.rpm,
@@ -2518,7 +2529,11 @@ impl PhysicsServer3D {
                 })
                 .collect();
 
-            let previous = self.vehicle_wheel_nodes.get(&nid).cloned().unwrap_or_default();
+            let previous = self
+                .vehicle_wheel_nodes
+                .get(&nid)
+                .cloned()
+                .unwrap_or_default();
             let controller = self
                 .vehicles
                 .entry(nid)
@@ -2744,7 +2759,13 @@ impl PhysicsServer3D {
         // keeps a velocity a script or `_ready` impulse gave it for the step
         // that really moves it.
         self.held_this_step.clear();
-        let held: Vec<(BodyId3D, Vector3, gdcore::math3d::Quaternion, Vector3, Vector3)> = self
+        let held: Vec<(
+            BodyId3D,
+            Vector3,
+            gdcore::math3d::Quaternion,
+            Vector3,
+            Vector3,
+        )> = self
             .fresh_bodies
             .iter()
             .filter(|_| self.tick_driven)
@@ -3506,9 +3527,17 @@ mod tests {
     fn shape_offset_is_body_local_under_a_rotated_parent() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let parent = tree.add_child(root, Node::new("InstancePos", "Node3D")).unwrap();
-        node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
-        let body = tree.add_child(parent, Node::new("Body", "RigidBody3D")).unwrap();
+        let parent = tree
+            .add_child(root, Node::new("InstancePos", "Node3D"))
+            .unwrap();
+        node3d::set_rotation(
+            &mut tree,
+            parent,
+            Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+        );
+        let body = tree
+            .add_child(parent, Node::new("Body", "RigidBody3D"))
+            .unwrap();
         // The body pitched, as the car is on the ramp.
         node3d::set_rotation(&mut tree, body, Vector3::new(0.5, 0.0, 0.0));
         let mut shape_node = Node::new("Shape", "CollisionShape3D");
@@ -3673,13 +3702,29 @@ mod tests {
         node.set_property("linear_damp", Variant::Float(0.3));
         node.set_property("linear_damp_mode", Variant::Int(1));
         let replaced = tree.add_child(root, node).unwrap();
-        let combined = tree.add_child(root, Node::new("Other", "RigidBody3D")).unwrap();
+        let combined = tree
+            .add_child(root, Node::new("Other", "RigidBody3D"))
+            .unwrap();
         let mut server = PhysicsServer3D::new();
         server.set_default_linear_damp(0.5);
         server.sync_to_physics(&tree);
-        let damp = |nid| server.world().get_body(server.body_for_node(nid).unwrap()).unwrap().linear_damp;
-        assert!((damp(replaced) - 0.3).abs() < 1e-6, "replace: {}", damp(replaced));
-        assert!((damp(combined) - 0.5).abs() < 1e-6, "combine: {}", damp(combined));
+        let damp = |nid| {
+            server
+                .world()
+                .get_body(server.body_for_node(nid).unwrap())
+                .unwrap()
+                .linear_damp
+        };
+        assert!(
+            (damp(replaced) - 0.3).abs() < 1e-6,
+            "replace: {}",
+            damp(replaced)
+        );
+        assert!(
+            (damp(combined) - 0.5).abs() < 1e-6,
+            "combine: {}",
+            damp(combined)
+        );
     }
 
     /// pat-qg3nu: a rigid body under a ROTATED parent simulates in its world
@@ -3691,8 +3736,14 @@ mod tests {
     fn rigid_body_under_a_rotated_parent_uses_its_world_orientation() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let parent = tree.add_child(root, Node::new("InstancePos", "Node3D")).unwrap();
-        node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+        let parent = tree
+            .add_child(root, Node::new("InstancePos", "Node3D"))
+            .unwrap();
+        node3d::set_rotation(
+            &mut tree,
+            parent,
+            Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+        );
         let mut ball = Node::new("Ball", "RigidBody3D");
         ball.set_property("gravity_scale", Variant::Float(0.0));
         ball.set_property("can_sleep", Variant::Bool(false));
@@ -3701,13 +3752,24 @@ mod tests {
         let mut server = PhysicsServer3D::new();
         server.sync_to_physics(&tree);
         let bid = server.body_for_node(body_nid).unwrap();
-        let world_z = server.world().get_body(bid).unwrap().rotation.xform(Vector3::new(0.0, 0.0, 1.0));
-        assert!((world_z - Vector3::new(1.0, 0.0, 0.0)).length() < 1e-5, "body +Z in the world: {world_z:?}");
+        let world_z = server
+            .world()
+            .get_body(bid)
+            .unwrap()
+            .rotation
+            .xform(Vector3::new(0.0, 0.0, 1.0));
+        assert!(
+            (world_z - Vector3::new(1.0, 0.0, 0.0)).length() < 1e-5,
+            "body +Z in the world: {world_z:?}"
+        );
 
         server.step(1.0 / 60.0);
         server.sync_from_physics(&mut tree);
         let local = node3d::get_rotation(&tree, body_nid);
-        assert!(local.length() < 1e-4, "an unmoved body keeps its local rotation, got {local:?}");
+        assert!(
+            local.length() < 1e-4,
+            "an unmoved body keeps its local rotation, got {local:?}"
+        );
     }
 
     #[test]
@@ -3734,8 +3796,16 @@ mod tests {
         assert_eq!(body.collision_mask, 0b0110);
         assert!((body.gravity_scale - 2.5).abs() < 1e-5);
         // DAMP_MODE_COMBINE (the default): the space's 0.1 plus the body's 0.3.
-        assert!((body.linear_damp - 0.4).abs() < 1e-5, "linear_damp {}", body.linear_damp);
-        assert!((body.angular_damp - 0.1).abs() < 1e-5, "angular_damp {}", body.angular_damp);
+        assert!(
+            (body.linear_damp - 0.4).abs() < 1e-5,
+            "linear_damp {}",
+            body.linear_damp
+        );
+        assert!(
+            (body.angular_damp - 0.1).abs() < 1e-5,
+            "angular_damp {}",
+            body.angular_damp
+        );
         assert!((body.friction - 0.8).abs() < 1e-5);
         assert!((body.bounce - 0.6).abs() < 1e-5);
         assert!(body.continuous_cd);

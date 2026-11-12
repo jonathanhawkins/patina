@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,15 +53,15 @@ fn vram_renders_godot_header_and_table() {
     for needle in [
         "id=\"dbg-vram-header\"",
         "List of Video Memory Usage by Resource:", // vmlb (script_editor_debugger.cpp:2312)
-        "class=\"dbg-vram-notice\"",                // vmem_notice_icon (2317)
-        ">Total:<",                                 // (2337)
-        "id=\"dbg-vram-total\"",                     // vmem_total (2338)
-        "id=\"dbg-vram-refresh\"",                   // vmem_refresh (2343)
-        "id=\"dbg-vram-export\"",                    // vmem_export (2347)
+        "class=\"dbg-vram-notice\"",               // vmem_notice_icon (2317)
+        ">Total:<",                                // (2337)
+        "id=\"dbg-vram-total\"",                   // vmem_total (2338)
+        "id=\"dbg-vram-refresh\"",                 // vmem_refresh (2343)
+        "id=\"dbg-vram-export\"",                  // vmem_export (2347)
         "id=\"dbg-vram-table\"",
         "id=\"dbg-vram-head\"",
-        "Resource Path",   // column 0 (2364)
-        "vrcol-type\">Type<",   // column 1 (2367)
+        "Resource Path",          // column 0 (2364)
+        "vrcol-type\">Type<",     // column 1 (2367)
         "vrcol-format\">Format<", // column 2
         "vrcol-usage\">Usage<",   // column 3
         "id=\"dbg-vram-list\"",
@@ -76,7 +80,10 @@ fn vram_toolbar_is_wired() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in ["function setupVramTab", "setupVramTab()"] {
-        assert!(html.contains(needle), "Video RAM toolbar wiring missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "Video RAM toolbar wiring missing `{needle}`"
+        );
     }
     handle.stop();
 }

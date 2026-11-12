@@ -4,10 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 fn migration_guide() -> String {
-    fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/migration-guide.md"),
-    )
-    .expect("read migration-guide")
+    fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/migration-guide.md"))
+        .expect("read migration-guide")
 }
 
 #[test]

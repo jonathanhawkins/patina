@@ -363,13 +363,13 @@ fn resolve_accessor(class_name: &str, method: &str, has_arg: bool) -> Option<Acc
     // reports the most-derived declaration, and `class_db::get_property_getter`
     // takes `next_back()` for exactly this reason.
     if has_arg {
-        if let Some(p) = properties.iter().filter(|p| p.setter == method).next_back() {
+        if let Some(p) = properties.iter().rfind(|p| p.setter == method) {
             return Some(Accessor::Set {
                 property: p.name.clone(),
             });
         }
     }
-    if let Some(p) = properties.iter().filter(|p| p.getter == method).next_back() {
+    if let Some(p) = properties.iter().rfind(|p| p.getter == method) {
         return Some(Accessor::Get {
             property: p.name.clone(),
             default: p.default_value.clone(),
@@ -549,8 +549,7 @@ fn call_light_param_method(
     Some(if matches!(value, Variant::Nil) {
         gdobject::class_db::get_property_list(class_name)
             .iter()
-            .filter(|p| p.name == property)
-            .next_back()
+            .rfind(|p| p.name == property)
             .map(|p| p.default_value.clone())
             .unwrap_or(Variant::Nil)
     } else {
@@ -691,8 +690,7 @@ fn call_particle_param_method(
     Some(if matches!(value, Variant::Nil) {
         gdobject::class_db::get_property_list(class_name)
             .iter()
-            .filter(|p| p.name == property)
-            .next_back()
+            .rfind(|p| p.name == property)
             .map(|p| p.default_value.clone())
             .unwrap_or(Variant::Nil)
     } else {
@@ -866,8 +864,7 @@ fn joint_property_or_default(
     }
     gdobject::class_db::get_property_list(class_name)
         .iter()
-        .filter(|p| p.name == property)
-        .next_back()
+        .rfind(|p| p.name == property)
         .map(|p| p.default_value.clone())
         .unwrap_or(Variant::Nil)
 }

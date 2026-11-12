@@ -196,8 +196,8 @@ fn editor_capabilities_matches_live_routes() {
         !add_resp.contains("missing class_name"),
         "POST /api/node/add must accept the documented `class_name` field, got:\n{add_resp}"
     );
-    let added: serde_json::Value = serde_json::from_str(extract_body(&add_resp))
-        .expect("node/add response should be JSON");
+    let added: serde_json::Value =
+        serde_json::from_str(extract_body(&add_resp)).expect("node/add response should be JSON");
     let new_id = added["id"]
         .as_u64()
         .expect("node/add should return the new node id");

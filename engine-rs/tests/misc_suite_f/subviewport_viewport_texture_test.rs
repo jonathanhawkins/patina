@@ -47,10 +47,7 @@ fn classdb_subviewport_viewport_texture_registered() {
     assert!(is_parent_class("ViewportTexture", "Texture2D"));
 
     let chain = inheritance_chain("SubViewport");
-    assert!(
-        chain.iter().any(|c| c == "Viewport"),
-        "chain={chain:?}"
-    );
+    assert!(chain.iter().any(|c| c == "Viewport"), "chain={chain:?}");
     assert!(chain.iter().any(|c| c == "Node"));
 
     let info = get_class_info("SubViewport").expect("SubViewport ClassInfo");
@@ -82,8 +79,14 @@ fn classdb_subviewport_viewport_texture_registered() {
     assert_eq!(*update, Variant::Int(2)); // UPDATE_WHEN_VISIBLE
 
     let obj = instantiate("SubViewport").expect("instantiate SubViewport");
-    assert_eq!(obj.get_property("render_target_update_mode"), Variant::Int(2));
-    assert_eq!(obj.get_property("render_target_clear_mode"), Variant::Int(0));
+    assert_eq!(
+        obj.get_property("render_target_update_mode"),
+        Variant::Int(2)
+    );
+    assert_eq!(
+        obj.get_property("render_target_clear_mode"),
+        Variant::Int(0)
+    );
 }
 
 #[test]

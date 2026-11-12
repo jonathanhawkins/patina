@@ -18,10 +18,12 @@ use std::time::Duration;
 fn http(port: u16, request: &str) -> String {
     let mut stream = (0..40)
         .find_map(|_| {
-            TcpStream::connect(format!("127.0.0.1:{port}")).ok().or_else(|| {
-                thread::sleep(Duration::from_millis(50));
-                None
-            })
+            TcpStream::connect(format!("127.0.0.1:{port}"))
+                .ok()
+                .or_else(|| {
+                    thread::sleep(Duration::from_millis(50));
+                    None
+                })
         })
         .expect("connect");
     stream.write_all(request.as_bytes()).unwrap();
@@ -91,7 +93,11 @@ fn play_randomizes_the_rng_and_a_seed_pins_it() {
 
     // Unseeded: three runs, not all the same (a collision of all three on a
     // 63-bit draw would be astronomically unlikely).
-    let runs = [play_once(port, "{}"), play_once(port, "{}"), play_once(port, "{}")];
+    let runs = [
+        play_once(port, "{}"),
+        play_once(port, "{}"),
+        play_once(port, "{}"),
+    ];
     assert!(
         runs[0] != runs[1] || runs[1] != runs[2],
         "every unseeded Play drew the same number: {runs:?}"

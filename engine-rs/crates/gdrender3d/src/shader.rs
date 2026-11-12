@@ -778,8 +778,13 @@ impl FragmentShader for LambertFragmentShader {
         let view = (uniforms.camera_position - input.world_position).normalized();
         let (ambient, env_radiance) = match uniforms.probe.as_ref() {
             Some(set) => {
-                let (a, s) =
-                    set.indirect(input.world_position, normal, view, m.roughness, uniforms.ambient);
+                let (a, s) = set.indirect(
+                    input.world_position,
+                    normal,
+                    view,
+                    m.roughness,
+                    uniforms.ambient,
+                );
                 (a, Some(s))
             }
             None => (uniforms.ambient, None),
@@ -1021,7 +1026,13 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
             LightKind::Directional => 1.0,
             LightKind::Point | LightKind::Spot => 2.0,
         };
-        let spec = d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale
+        let spec = d
+            * vis
+            * n_dot_l
+            * intensity
+            * shadow
+            * light.specular
+            * specular_type_scale
             * GODOT_LIGHT_ENERGY_SCALE;
         r += light.color.r * f[0] * spec;
         g += light.color.g * f[1] * spec;
@@ -1118,7 +1129,8 @@ pub fn env_brdf(roughness: f32, n_dot_v: f32) -> (f32, f32) {
     let (x1, y1) = ((x0 + 1).min(n - 1), (y0 + 1).min(n - 1));
     let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
     let at = |x: usize, y: usize| lut[y * n + x];
-    let lerp2 = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let lerp2 =
+        |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
     let top = lerp2(at(x0, y0), at(x1, y0), tx);
     let bot = lerp2(at(x0, y1), at(x1, y1), tx);
     let v = lerp2(top, bot, ty);
@@ -1364,7 +1376,10 @@ impl CustomFragmentShader {
         };
         let fragment_body = compiled.fragment_body.clone();
         let parameters = linearize_source_color_uniforms(&compiled, &material.parameters);
-        let textures = Arc::new(linearize_source_color_textures(&compiled, &material.textures));
+        let textures = Arc::new(linearize_source_color_textures(
+            &compiled,
+            &material.textures,
+        ));
         Self {
             compiled,
             parameters,
@@ -1576,7 +1591,10 @@ mod tests {
         // Full +X tangent tilt: (1.0,0.5,1.0) → tangent-space (1,0,1) → 45° toward +X.
         let out = apply_normal_map(n, Color::new(1.0, 0.5, 1.0, 1.0), 1.0);
         assert!(out.x > 0.5, "normal should tilt toward +X, got {out:?}");
-        assert!((out.length() - 1.0).abs() < 1e-5, "result stays unit-length");
+        assert!(
+            (out.length() - 1.0).abs() < 1e-5,
+            "result stays unit-length"
+        );
     }
 
     #[test]
@@ -1598,7 +1616,11 @@ mod tests {
         u.textures.roughness = Some(tex(1, 1, vec![Color::new(0.9, 0.25, 0.9, 1.0)]));
         u.textures.metallic = Some(tex(1, 1, vec![Color::new(0.9, 0.9, 0.5, 1.0)]));
         let m = u.sample_material([0.5, 0.5], Vector3::new(0.0, 0.0, 1.0));
-        assert!((m.roughness - 0.25).abs() < 1e-4, "roughness={}", m.roughness);
+        assert!(
+            (m.roughness - 0.25).abs() < 1e-4,
+            "roughness={}",
+            m.roughness
+        );
         assert!((m.metallic - 0.5).abs() < 1e-4, "metallic={}", m.metallic);
     }
 
@@ -2421,7 +2443,10 @@ mod tests {
         let lin = gdcore::math::srgb_to_linear_channel(0.5);
         match out.get("tint") {
             Some(gdvariant::Variant::Color(c)) => {
-                assert!((c.r - lin).abs() < 1e-5 && (c.g - 1.0).abs() < 1e-5, "{c:?}");
+                assert!(
+                    (c.r - lin).abs() < 1e-5 && (c.g - 1.0).abs() < 1e-5,
+                    "{c:?}"
+                );
                 assert!((c.a - 0.75).abs() < 1e-6, "alpha kept");
             }
             other => panic!("tint: {other:?}"),
@@ -2433,7 +2458,10 @@ mod tests {
             }
             other => panic!("base default: {other:?}"),
         }
-        assert!(out.get("raw").is_none(), "an unhinted uniform is not touched");
+        assert!(
+            out.get("raw").is_none(),
+            "an unhinted uniform is not touched"
+        );
     }
 
     #[test]

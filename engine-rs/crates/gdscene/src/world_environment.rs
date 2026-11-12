@@ -103,7 +103,10 @@ fn project_setting_string(key: &str) -> String {
     // frame asks for the default environment on EVERY frame, and reading and
     // parsing project.godot each time was a visible slice of it. A changed or
     // re-pointed file (another project) misses and is read afresh.
-    type Stamp = (Option<std::path::PathBuf>, Option<(u64, std::time::SystemTime)>);
+    type Stamp = (
+        Option<std::path::PathBuf>,
+        Option<(u64, std::time::SystemTime)>,
+    );
     thread_local! {
         static MEMO: std::cell::RefCell<Vec<(String, Stamp, String)>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -208,12 +211,12 @@ fn sky_material_from_props(
 ) -> SkyMaterial {
     let pairs = || props.iter().map(|(k, v)| (k.as_str(), v));
     match class {
-        "PhysicalSkyMaterial" => {
-            SkyMaterial::Physical(gdserver3d::sky::PhysicalSkyMaterial::from_properties(pairs()))
-        }
-        "PanoramaSkyMaterial" => {
-            SkyMaterial::Panoramic(gdserver3d::sky::PanoramicSkyMaterial::from_properties(pairs()))
-        }
+        "PhysicalSkyMaterial" => SkyMaterial::Physical(
+            gdserver3d::sky::PhysicalSkyMaterial::from_properties(pairs()),
+        ),
+        "PanoramaSkyMaterial" => SkyMaterial::Panoramic(
+            gdserver3d::sky::PanoramicSkyMaterial::from_properties(pairs()),
+        ),
         "ShaderMaterial" => {
             let code = match props.get("shader") {
                 Some(Variant::String(r)) => {
@@ -344,11 +347,12 @@ fn authoring_scene_path(tree: &SceneTree, id: NodeId) -> Option<String> {
 /// -- the official 3D platformer's `stage.tscn` -- played with the project
 /// clear colour: no sky, no fog, no AgX, no ambient colour.
 fn inline_scene_environment(tree: &SceneTree, camera: Option<NodeId>) -> Option<Environment3D> {
-    let candidates = camera.into_iter().chain(
-        tree.all_nodes_in_tree_order()
-            .into_iter()
-            .filter(|id| tree.get_node(*id).is_some_and(|n| n.is_class("WorldEnvironment"))),
-    );
+    let candidates = camera
+        .into_iter()
+        .chain(tree.all_nodes_in_tree_order().into_iter().filter(|id| {
+            tree.get_node(*id)
+                .is_some_and(|n| n.is_class("WorldEnvironment"))
+        }));
     for id in candidates {
         let Some(node) = tree.get_node(id) else {
             continue;
@@ -455,9 +459,13 @@ type InlineEnvBase = (std::collections::HashMap<String, Variant>, Option<Sky>);
 /// truck_town's `sky_day.tres`), read with that file's own ext-resource table.
 fn sky_material_from_tres(path: &str) -> Option<SkyMaterial> {
     let text = FileAccess::read_file_string(path).ok()?;
-    let res = gdresource::loader::TresLoader::new().parse_str(&text, path).ok()?;
-    let props: std::collections::HashMap<String, Variant> =
-        res.properties().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let res = gdresource::loader::TresLoader::new()
+        .parse_str(&text, path)
+        .ok()?;
+    let props: std::collections::HashMap<String, Variant> = res
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let ext = |id: &str| res.ext_resources.get(id).map(|e| e.path.clone());
     let mut material = sky_material_from_props(&res.class_name, &props, &ext, &|_| None);
     load_sky_textures(&mut material, &ext);
@@ -574,15 +582,14 @@ fn inline_env_base_from_scene_file(path: &str, env_id: &str) -> Option<InlineEnv
     };
     let ext = |id: &str| scene.ext_resources().get(id).map(|e| e.path.clone());
     let sub = |id: &str| scene.sub_resource_props(id).cloned();
-    if let Some(sky_props) = sub_id(props.get("sky")).and_then(|id| scene.sub_resource_props(&id))
-    {
+    if let Some(sky_props) = sub_id(props.get("sky")).and_then(|id| scene.sub_resource_props(&id)) {
         // `sky_material = ExtResource(..)` names a material `.tres`
         // (pat-i4jgd). It used to fall to the DEFAULT procedural sky, which
         // drew truck_town's blue day sky as Godot's grey default.
         let ext_material = match sky_props.get("sky_material") {
             Some(Variant::String(r)) => r
                 .strip_prefix("ExtResource:")
-                .and_then(|id| ext(id))
+                .and_then(&ext)
                 .and_then(|p| sky_material_from_tres(&p)),
             _ => None,
         };
@@ -591,7 +598,10 @@ fn inline_env_base_from_scene_file(path: &str, env_id: &str) -> Option<InlineEnv
             None => {
                 let mut material = match sub_id(sky_props.get("sky_material")) {
                     Some(mid) => {
-                        match (scene.sub_resource_type(&mid), scene.sub_resource_props(&mid)) {
+                        match (
+                            scene.sub_resource_type(&mid),
+                            scene.sub_resource_props(&mid),
+                        ) {
                             (Some(class), Some(mp)) => {
                                 sky_material_from_props(class, mp, &ext, &sub)
                             }

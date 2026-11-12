@@ -76,7 +76,11 @@ fn vcs_stage_moves_file_from_unstaged_to_staged() {
     std::fs::write(dir.join("game.gd"), "extends Node\n").unwrap();
     git(&dir, &["add", "game.gd"]);
     git(&dir, &["commit", "-m", "init", "--no-gpg-sign"]);
-    std::fs::write(dir.join("game.gd"), "extends Node\nfunc _ready():\n\tpass\n").unwrap();
+    std::fs::write(
+        dir.join("game.gd"),
+        "extends Node\nfunc _ready():\n\tpass\n",
+    )
+    .unwrap();
 
     // Before staging: game.gd is an unstaged modification, not staged.
     let before = query_git_status(&dir);

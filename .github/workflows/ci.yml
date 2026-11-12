@@ -93,6 +93,10 @@ jobs:
         with:
           components: clippy
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       # Separate cache keys for registry, git deps, and target dir,
       # each keyed on Cargo.lock hash + OS so they invalidate correctly.
       - name: Cache cargo registry
@@ -123,13 +127,28 @@ jobs:
         working-directory: engine-rs
         run: cargo build --workspace
 
-      - name: Test workspace
-        working-directory: engine-rs
-        run: cargo test --workspace
-
+      # Clippy first: it fails in seconds on a lint, before the long test run.
       - name: Clippy
         working-directory: engine-rs
         run: cargo clippy --workspace -- -D warnings
+
+      # nextest, not `cargo test`: the project's own gate (CLAUDE.md) is
+      # `cargo nextest run --workspace`, which runs each test in its own
+      # process. CI must measure the same thing developers and the verifier
+      # do, or tests that share process-global state pass locally and fail
+      # here. nextest does not run doctests, so they get their own step.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Test workspace
+        working-directory: engine-rs
+        run: cargo nextest run --workspace --no-fail-fast
+
+      - name: Doctests
+        working-directory: engine-rs
+        run: cargo test --workspace --doc
 
   # ── Rust: render golden tests (dedicated CI gate) ────────────────────────
   # Runs all CPU-based render pixel and golden-image tests as a separate
@@ -155,6 +174,10 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -213,6 +236,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -257,6 +284,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -300,6 +331,10 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -350,6 +385,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -393,6 +432,10 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -438,6 +481,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -482,6 +529,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -522,6 +573,10 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -564,6 +619,10 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system libraries (ALSA headers for cpal)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4

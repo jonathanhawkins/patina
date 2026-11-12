@@ -330,7 +330,6 @@ impl ENetMultiplayerPeer {
                 Err(_) => break,
             }
         }
-        drop(sock);
         for (src, data) in received {
             self.handle_datagram(src, &data);
         }

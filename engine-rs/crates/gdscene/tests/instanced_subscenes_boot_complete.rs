@@ -78,10 +78,8 @@ modulate = Color(1, 0, 0, 1)
 "#;
 
 fn project() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "patina-instanced-subscenes-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("patina-instanced-subscenes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("badge.tscn"), BADGE).unwrap();
     std::fs::write(dir.join("player.tscn"), PLAYER).unwrap();
@@ -129,7 +127,11 @@ fn children(tree: &SceneTree, id: NodeId) -> Vec<String> {
 fn assert_complete(tree: &SceneTree, main: NodeId) {
     let player_id = id_of(tree, main, "Player");
     let player = tree.get_node(player_id).unwrap();
-    assert_eq!(player.class_name(), "Area2D", "the instance takes its sub-scene's class");
+    assert_eq!(
+        player.class_name(),
+        "Area2D",
+        "the instance takes its sub-scene's class"
+    );
     assert_eq!(
         children(tree, player_id),
         ["Sprite", "Inner", "Extra"],
@@ -162,7 +164,10 @@ fn assert_complete(tree: &SceneTree, main: NodeId) {
     // Godot's ownership: inner nodes belong to the instance that declared them.
     assert_eq!(sprite.owner(), Some(player_id));
     let inner_id = id_of(tree, main, "Player/Inner");
-    assert_eq!(node(tree, main, "Player/Inner/Timer").owner(), Some(inner_id));
+    assert_eq!(
+        node(tree, main, "Player/Inner/Timer").owner(),
+        Some(inner_id)
+    );
     assert_eq!(node(tree, main, "Player/Extra").owner(), Some(main));
 
     // Each level's connections, relative to that level's own root.
@@ -251,7 +256,11 @@ fn an_unloadable_subscene_stays_a_placeholder_and_the_rest_still_boots() {
     let root = tree.root_id();
     let main = add_packed_scene_to_tree_from_res(&mut tree, root, &scene).unwrap();
     let player = node(&tree, main, "Player");
-    assert_eq!(player.class_name(), "Node", "no sub-scene to take a class from");
+    assert_eq!(
+        player.class_name(),
+        "Node",
+        "no sub-scene to take a class from"
+    );
     assert_eq!(
         player.get_property("position"),
         Variant::Vector2(gdcore::math::Vector2::new(5.0, 6.0)),

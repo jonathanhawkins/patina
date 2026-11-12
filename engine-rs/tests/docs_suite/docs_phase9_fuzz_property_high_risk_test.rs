@@ -21,10 +21,22 @@ fn repo_root() -> PathBuf {
 #[test]
 fn at_least_one_high_risk_surface_has_fuzz_or_property_coverage() {
     let candidates = [
-        ("variant serialization", "engine-rs/crates/gdvariant/src/fuzz_variant.rs"),
-        ("resource loading", "engine-rs/crates/gdresource/src/fuzz_res.rs"),
-        ("GDScript parsing", "engine-rs/crates/gdscript-interop/src/fuzz_gdscript.rs"),
-        ("math property testing", "engine-rs/crates/gdcore/src/property_testing.rs"),
+        (
+            "variant serialization",
+            "engine-rs/crates/gdvariant/src/fuzz_variant.rs",
+        ),
+        (
+            "resource loading",
+            "engine-rs/crates/gdresource/src/fuzz_res.rs",
+        ),
+        (
+            "GDScript parsing",
+            "engine-rs/crates/gdscript-interop/src/fuzz_gdscript.rs",
+        ),
+        (
+            "math property testing",
+            "engine-rs/crates/gdcore/src/property_testing.rs",
+        ),
     ];
     let covered: Vec<&str> = candidates
         .iter()
@@ -41,8 +53,12 @@ fn at_least_one_high_risk_surface_has_fuzz_or_property_coverage() {
 #[test]
 fn fuzz_property_suite_wired_to_ci_command() {
     let ci = repo_root().join(".github/workflows/ci.yml");
-    let body = std::fs::read_to_string(&ci)
-        .unwrap_or_else(|e| panic!(".github/workflows/ci.yml must exist at {}: {e}", ci.display()));
+    let body = std::fs::read_to_string(&ci).unwrap_or_else(|e| {
+        panic!(
+            ".github/workflows/ci.yml must exist at {}: {e}",
+            ci.display()
+        )
+    });
     assert!(
         body.contains("Fuzz / property tests"),
         "CI must declare a 'Fuzz / property tests' lane"

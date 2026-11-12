@@ -42,9 +42,8 @@ use std::process;
 
 use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
-use gdscene::scripting::GDScriptNodeInstance;
 use gdscene::trace::TraceEventType;
-use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
+use gdscene::{LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
 use patina_runner::project_boot;
 use patina_runner::render3d::SceneRenderer3D;
@@ -417,19 +416,16 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
 // Script attachment
 // ---------------------------------------------------------------------------
 
-/// Attaches each node's `_script_path` GDScript.
-///
-/// Delegates to [`project_boot::attach_scripts`], the single implementation
-/// (pat-mgixk.414). This path used to carry its own copy while the
-/// project-directory boot carried none at all, which is how a booted project
-/// ran every main-scene node with no script attached.
-fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
-    project_boot::attach_scripts(tree, project_dir);
-}
+// Script attachment lives in [`project_boot::attach_scripts`], the single
+// implementation (pat-mgixk.414). This path used to carry its own copy while
+// the project-directory boot carried none at all, which is how a booted
+// project ran every main-scene node with no script attached.
 
 /// Resolves a `res://` path to an absolute filesystem path.
 ///
-/// Delegates to [`project_boot::resolve_res_path`]; see the note above.
+/// Delegates to [`project_boot::resolve_res_path`]; kept for the tests that
+/// pin the runner's res:// resolution.
+#[cfg(test)]
 fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
     project_boot::resolve_res_path(project_dir, res_path)
 }
@@ -814,10 +810,12 @@ fn main() {
     // Read and parse the scene file: text `.tscn` or binary `.scn`
     // (pat-33wmr — a binary scene used to die here with "stream did not
     // contain valid UTF-8").
-    let source = match fs::read(&args.scene_path).map_err(|e| e.to_string()).and_then(|bytes| {
-        gdscene::binary_scene::scene_source_from_bytes(&bytes, &args.scene_path)
-            .map_err(|e| e.to_string())
-    }) {
+    let source = match fs::read(&args.scene_path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            gdscene::binary_scene::scene_source_from_bytes(&bytes, &args.scene_path)
+                .map_err(|e| e.to_string())
+        }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error reading '{}': {e}", args.scene_path);
@@ -1018,6 +1016,7 @@ fn main() {
 mod tests {
     use super::*;
     use gdscene::node::Node;
+    use gdscene::scripting::GDScriptNodeInstance;
 
     /// dump_tree_json includes script_vars for nodes with scripts.
     #[test]

@@ -8,8 +8,7 @@
 //! and undo/redo compat all behave as the Godot API specifies.
 
 use gdeditor::editor_compat::{
-    EditorInterfaceCompat, EditorPropertyInfo, EditorSelection, PropertyUsageFlags,
-    UndoRedoCompat,
+    EditorInterfaceCompat, EditorPropertyInfo, EditorSelection, PropertyUsageFlags, UndoRedoCompat,
 };
 use gdeditor::{Editor, EditorCommand};
 use gdscene::node::Node;
@@ -70,11 +69,14 @@ fn editor_property_info_default_usage() {
 
 #[test]
 fn editor_property_info_read_only_not_writable() {
-    let info =
-        EditorPropertyInfo::new("internal_id", VariantType::Int).with_usage(PropertyUsageFlags::ReadOnly);
+    let info = EditorPropertyInfo::new("internal_id", VariantType::Int)
+        .with_usage(PropertyUsageFlags::ReadOnly);
     assert!(!info.usage.is_editor_visible());
     let editor = info.to_custom_editor();
-    assert!(editor.read_only, "ReadOnly usage must produce a read-only editor");
+    assert!(
+        editor.read_only,
+        "ReadOnly usage must produce a read-only editor"
+    );
 }
 
 #[test]
@@ -83,7 +85,10 @@ fn editor_property_info_no_editor_hidden() {
         .with_usage(PropertyUsageFlags::NoEditor);
     assert!(!info.usage.is_editor_visible());
     let editor = info.to_custom_editor();
-    assert!(editor.read_only, "NoEditor usage must produce a read-only editor");
+    assert!(
+        editor.read_only,
+        "NoEditor usage must produce a read-only editor"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@
 
 #![warn(clippy::all)]
 
+pub mod agent_mcp;
 pub mod anim_interpolation;
 pub mod anim_keyframes;
 pub mod anim_playback;
@@ -54,7 +55,6 @@ pub mod editor_interface;
 pub mod editor_menu;
 pub mod editor_menu_commands;
 pub mod editor_plugin;
-pub mod agent_mcp;
 pub mod editor_server;
 pub mod editor_settings_dialog;
 pub mod editor_settings_store;
@@ -64,8 +64,8 @@ pub mod export_dialog;
 pub mod export_groups;
 pub mod export_layout;
 pub mod export_presets;
-pub mod filesystem;
 pub mod feature_profile;
+pub mod filesystem;
 pub mod find_in_files;
 pub mod find_replace;
 pub mod fs_file_ops;
@@ -282,9 +282,10 @@ pub type EditorResult<T> = Result<T, EditorError>;
 
 /// The active editor workspace mode. Mirrors Godot's top-bar mode buttons:
 /// 2D, 3D, Script, Game, AssetLib.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EditorMode {
     /// 2D canvas editor.
+    #[default]
     Canvas2D,
     /// 3D spatial editor.
     Spatial3D,
@@ -294,12 +295,6 @@ pub enum EditorMode {
     Game,
     /// Asset library browser.
     AssetLib,
-}
-
-impl Default for EditorMode {
-    fn default() -> Self {
-        Self::Canvas2D
-    }
 }
 
 impl EditorMode {
@@ -354,20 +349,15 @@ impl EditorMode {
 // ---------------------------------------------------------------------------
 
 /// The current play state of the editor's run controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PlayState {
     /// No scene is running.
+    #[default]
     Stopped,
     /// A scene is running.
     Playing,
     /// A scene is running but paused.
     Paused,
-}
-
-impl Default for PlayState {
-    fn default() -> Self {
-        Self::Stopped
-    }
 }
 
 /// Which scene to run.
@@ -1093,7 +1083,8 @@ impl EditorCommand {
                 // player.tscn, whose `Robot` lives inside player.glb — failed
                 // with "parent path not found". A scene whose sub-scenes cannot
                 // be read still instances, as placeholders.
-                let scene_root = match add_packed_scene_to_tree_from_res(tree, *parent_id, &packed) {
+                let scene_root = match add_packed_scene_to_tree_from_res(tree, *parent_id, &packed)
+                {
                     Ok(root) => {
                         if let Some(node) = tree.get_node_mut(root) {
                             node.set_property(INSTANCE_EXPANDED_KEY, Variant::Bool(true));
@@ -1101,7 +1092,9 @@ impl EditorCommand {
                         root
                     }
                     Err(e) => {
-                        tracing::warn!("InstanceScene: expanding failed ({e}); instancing placeholders");
+                        tracing::warn!(
+                            "InstanceScene: expanding failed ({e}); instancing placeholders"
+                        );
                         add_packed_scene_to_tree(tree, *parent_id, &packed)?
                     }
                 };

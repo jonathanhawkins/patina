@@ -254,7 +254,14 @@ impl VehicleController3D {
         exclude.insert(self.chassis);
         let mut grounds: Vec<Option<Ground>> = Vec::with_capacity(self.wheels.len());
         for w in &mut self.wheels {
-            grounds.push(Self::ray_cast(w, &s, &chassis, world, &exclude, self.collision_mask));
+            grounds.push(Self::ray_cast(
+                w,
+                &s,
+                &chassis,
+                world,
+                &exclude,
+                self.collision_mask,
+            ));
         }
 
         self.update_suspension();
@@ -297,7 +304,11 @@ impl VehicleController3D {
 
     /// The wheel's pose relative to the chassis, as Godot's non-interpolated
     /// path writes it: `chassis.inverse() * m_worldTransform`.
-    pub fn wheel_local_transform(&self, index: usize, chassis: &Transform3D) -> Option<Transform3D> {
+    pub fn wheel_local_transform(
+        &self,
+        index: usize,
+        chassis: &Transform3D,
+    ) -> Option<Transform3D> {
         let w = self.wheels.get(index)?;
         Some(chassis.inverse() * w.world_transform)
     }
@@ -318,7 +329,11 @@ impl VehicleController3D {
         let steering = axis_angle(up, w.steering);
         let rotating = axis_angle(right, w.rotation);
         // Basis(right[0], up[0], fwd[0], ...) is row-major: columns right, up, fwd.
-        let basis2 = Basis { x: right, y: up, z: fwd };
+        let basis2 = Basis {
+            x: right,
+            y: up,
+            z: fwd,
+        };
         w.world_transform = Transform3D {
             basis: steering * rotating * basis2,
             origin,
@@ -372,7 +387,8 @@ impl VehicleController3D {
         w.contact_point = hit.point;
 
         let denominator = w.contact_normal.dot(w.direction_ws);
-        let chassis_velocity = s.linear_velocity + s.angular_velocity.cross(w.contact_point - s.position);
+        let chassis_velocity =
+            s.linear_velocity + s.angular_velocity.cross(w.contact_point - s.position);
         let proj_vel = w.contact_normal.dot(chassis_velocity);
         if denominator >= -0.1 {
             w.suspension_relative_velocity = 0.0;
@@ -400,9 +416,14 @@ impl VehicleController3D {
                 continue;
             }
             let length_diff = w.suspension_rest_length - w.suspension_length;
-            let mut force = w.suspension_stiffness * length_diff * w.clipped_inv_contact_dot_suspension;
+            let mut force =
+                w.suspension_stiffness * length_diff * w.clipped_inv_contact_dot_suspension;
             let rel_vel = w.suspension_relative_velocity;
-            let damping = if rel_vel < 0.0 { w.damping_compression } else { w.damping_relaxation };
+            let damping = if rel_vel < 0.0 {
+                w.damping_compression
+            } else {
+                w.damping_relaxation
+            };
             force -= damping * rel_vel;
             w.suspension_force = (force * mass).max(0.0);
         }
@@ -455,7 +476,13 @@ impl VehicleController3D {
     }
 
     /// `_update_friction`.
-    fn update_friction(&mut self, s: &mut PhysicsBody3D, chassis: &Transform3D, grounds: &[Option<Ground>], dt: f32) {
+    fn update_friction(
+        &mut self,
+        s: &mut PhysicsBody3D,
+        chassis: &Transform3D,
+        grounds: &[Option<Ground>],
+        dt: f32,
+    ) {
         let n = self.wheels.len();
         if n == 0 {
             return;
@@ -475,8 +502,14 @@ impl VehicleController3D {
             a = (a - normal * a.dot(normal)).normalized();
             axle[i] = a;
             forward_ws[i] = normal.cross(a).normalized();
-            side_impulse[i] =
-                self.resolve_single_bilateral(s, w.contact_point, grounds[i], a, w.roll_influence, dt);
+            side_impulse[i] = self.resolve_single_bilateral(
+                s,
+                w.contact_point,
+                grounds[i],
+                a,
+                w.roll_influence,
+                dt,
+            );
         }
 
         let side_factor = 1.0f32;
@@ -491,8 +524,13 @@ impl VehicleController3D {
                         rolling_friction = -w.engine_force * dt;
                     } else {
                         let max_impulse = if w.brake != 0.0 { w.brake } else { 0.0 };
-                        rolling_friction =
-                            Self::calc_rolling_friction(s, grounds[i], w.contact_point, forward_ws[i], max_impulse);
+                        rolling_friction = Self::calc_rolling_friction(
+                            s,
+                            grounds[i],
+                            w.contact_point,
+                            forward_ws[i],
+                            max_impulse,
+                        );
                     }
                 }
             }
@@ -528,11 +566,15 @@ impl VehicleController3D {
             let w = &self.wheels[i];
             let mut rel_pos = w.contact_point - s.position;
             if forward_impulse[i] != 0.0 {
-                s.apply_impulse_at_position(forward_ws[i] * forward_impulse[i], s.position + rel_pos);
+                s.apply_impulse_at_position(
+                    forward_ws[i] * forward_impulse[i],
+                    s.position + rel_pos,
+                );
             }
             if side_impulse[i] != 0.0 {
                 let side = axle[i] * side_impulse[i];
-                rel_pos = rel_pos - chassis_up * (chassis_up.dot(rel_pos) * (1.0 - w.roll_influence));
+                rel_pos =
+                    rel_pos - chassis_up * (chassis_up.dot(rel_pos) * (1.0 - w.roll_influence));
                 s.apply_impulse_at_position(side, s.position + rel_pos);
             }
         }
@@ -568,7 +610,9 @@ mod tests {
             BodyId3D(0),
             BodyType3D::Static,
             Vector3::new(0.0, -1.0, 0.0),
-            Shape3D::BoxShape { half_extents: Vector3::new(50.0, 1.0, 50.0) },
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(50.0, 1.0, 50.0),
+            },
             0.0,
         );
         world.add_body(floor);
@@ -576,7 +620,9 @@ mod tests {
             BodyId3D(0),
             BodyType3D::Rigid,
             Vector3::new(0.0, 0.5, 0.0),
-            Shape3D::BoxShape { half_extents: Vector3::new(0.5, 0.2, 1.0) },
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(0.5, 0.2, 1.0),
+            },
             40.0,
         );
         chassis.shape_offset = Vector3::new(0.0, 0.4, 0.0);
@@ -608,7 +654,10 @@ mod tests {
             / 4.0;
         assert!((mean - 9.8 / 160.0).abs() < 1e-3, "mean compression {mean}");
         let av = world.get_body(c.chassis).unwrap().angular_velocity;
-        assert!(av.length() < 1e-4, "the chassis must come to rest, spinning at {av:?}");
+        assert!(
+            av.length() < 1e-4,
+            "the chassis must come to rest, spinning at {av:?}"
+        );
     }
 
     /// Positive engine force drives along +Z (Godot's vehicle convention), and
@@ -659,6 +708,9 @@ mod tests {
         c.set_steering(0.4);
         c.update(&mut world, 1.0 / 120.0);
         let x = c.wheels[0].world_transform.basis.x;
-        assert!((x.x - 0.4f32.cos()).abs() < 1e-4 && (x.z + 0.4f32.sin()).abs() < 1e-4, "axle {x:?}");
+        assert!(
+            (x.x - 0.4f32.cos()).abs() < 1e-4 && (x.z + 0.4f32.sin()).abs() < 1e-4,
+            "axle {x:?}"
+        );
     }
 }

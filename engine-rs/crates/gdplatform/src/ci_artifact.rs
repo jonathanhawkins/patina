@@ -12,7 +12,7 @@
 //!    needed for CI upload (e.g. GitHub Actions `actions/upload-artifact`).
 
 use crate::export::{BuildProfile, ExportConfig, ExportTemplate};
-use crate::platform_targets::{Architecture, DesktopTarget, DESKTOP_TARGETS};
+use crate::platform_targets::{DesktopTarget, DESKTOP_TARGETS};
 
 // ---------------------------------------------------------------------------
 // CiArtifact
@@ -59,11 +59,7 @@ impl CiArtifact {
 
     /// Returns the GitHub Actions compatible artifact name (no special chars).
     pub fn actions_safe_name(&self) -> String {
-        self.name
-            .replace('/', "-")
-            .replace(' ', "-")
-            .replace('(', "")
-            .replace(')', "")
+        self.name.replace(['/', ' '], "-").replace(['(', ')'], "")
     }
 
     /// Sets the checksum and size after build completion.
@@ -399,6 +395,7 @@ pub fn validate_default_cross_platform_plan(app_name: &str) -> CrossPlatformRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform_targets::Architecture;
 
     #[test]
     fn plan_new_defaults() {

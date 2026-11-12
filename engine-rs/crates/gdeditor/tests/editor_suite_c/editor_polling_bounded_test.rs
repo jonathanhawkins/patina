@@ -52,7 +52,8 @@ fn timed_get(port: u16, path: &str, timeout: Duration) -> Option<Duration> {
     stream.set_write_timeout(Some(timeout)).ok()?;
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .ok()?;
     let mut buf = Vec::new();
@@ -67,7 +68,10 @@ fn http_get_body(port: u16, path: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .unwrap();
     let mut buf = Vec::new();
     let _ = stream.read_to_end(&mut buf);

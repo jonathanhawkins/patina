@@ -1987,8 +1987,14 @@ fn reparent_instanced_node_fires_lifecycle_notifications() {
     let has_enter = log.iter().any(|n| *n == NOTIFICATION_ENTER_TREE);
     let has_ready = log.iter().any(|n| *n == NOTIFICATION_READY);
     assert!(has_enter, "Reparent must fire ENTER_TREE on the moved node");
-    assert!(!has_ready, "Reparent must not ready the moved node a second time");
-    assert!(tree.get_node(player).unwrap().is_ready(), "it is still ready");
+    assert!(
+        !has_ready,
+        "Reparent must not ready the moved node a second time"
+    );
+    assert!(
+        tree.get_node(player).unwrap().is_ready(),
+        "it is still ready"
+    );
 }
 
 // ---------------------------------------------------------------------------

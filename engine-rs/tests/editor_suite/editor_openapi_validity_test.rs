@@ -49,11 +49,7 @@ fn http_get_body(port: u16, path: &str) -> String {
     stream.write_all(req.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).ok();
-    response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string()
+    response.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
 #[test]
@@ -63,8 +59,8 @@ fn openapi_yaml_is_valid_openapi3_and_covers_capabilities() {
         .unwrap_or_else(|e| panic!("must read {}: {e}", spec_path.display()));
 
     // (1) Parse as OpenAPI 3 using the openapiv3 crate.
-    let spec: openapiv3::OpenAPI = serde_yaml::from_str(&yaml)
-        .expect("prd/editor_openapi.yaml must parse with openapiv3");
+    let spec: openapiv3::OpenAPI =
+        serde_yaml::from_str(&yaml).expect("prd/editor_openapi.yaml must parse with openapiv3");
     assert!(
         spec.openapi.starts_with("3."),
         "spec must declare OpenAPI 3.x, got {}",

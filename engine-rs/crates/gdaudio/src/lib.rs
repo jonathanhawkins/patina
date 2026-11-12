@@ -34,13 +34,15 @@ pub use effects::{
     EffectChain, FilterMode,
 };
 pub use mixer::AudioMixer;
-pub use output::{mix_and_write, mix_and_write_gain, CaptureAudioOutput, DeviceAudioStats, SharedRing};
 /// The cpal device backend only exists off wasm32. Re-exporting it
 /// unconditionally is what actually kept this crate from compiling for the web
 /// even after `cpal` itself was target-gated — the `use` resolved to nothing and
 /// failed the build before any browser code was reached (pat-u3l8c.112).
 #[cfg(not(target_arch = "wasm32"))]
 pub use output::{live_device_capture, live_device_stats, PlatformAudioError, PlatformAudioOutput};
+pub use output::{
+    mix_and_write, mix_and_write_gain, CaptureAudioOutput, DeviceAudioStats, SharedRing,
+};
 pub use player::AudioStreamPlayer;
 pub use sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout, NullAudioOutput};
 pub use server::{AudioServer, PlaybackId};

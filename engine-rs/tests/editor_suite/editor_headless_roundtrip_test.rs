@@ -91,7 +91,9 @@ fn editor_headless_roundtrip_script_drives_editor_end_to_end() {
         return;
     }
 
-    let script = repo_root().join("scripts").join("editor_headless_roundtrip.sh");
+    let script = repo_root()
+        .join("scripts")
+        .join("editor_headless_roundtrip.sh");
     assert!(
         script.exists(),
         "headless roundtrip script missing at {}",

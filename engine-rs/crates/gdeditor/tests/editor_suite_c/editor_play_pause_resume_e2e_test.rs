@@ -139,7 +139,9 @@ fn editor_play_pause_resume_reflects_runtime_state() {
 
     // Paused: the auto-driver is frozen, so the frame count is now a stable
     // baseline and each manual step advances it by exactly one.
-    let base = s["frame_count"].as_u64().expect("paused frame_count is a number");
+    let base = s["frame_count"]
+        .as_u64()
+        .expect("paused frame_count is a number");
     for i in 1..=3u64 {
         let step = http_post(port, "/api/runtime/step", "");
         assert!(step.contains("200 OK"), "step {i} ok: {step}");

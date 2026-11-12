@@ -18,7 +18,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,18 +54,18 @@ fn profiler_renders_editorprofiler_toolbar() {
     let html = editor_html(port);
     for needle in [
         "id=\"profiler-toolbar\"",
-        "id=\"profiler-activate\"",   // activate Start/Stop (editor_profiler.cpp:680)
+        "id=\"profiler-activate\"", // activate Start/Stop (editor_profiler.cpp:680)
         ">Start<",
-        "id=\"profiler-clear\"",      // Clear (687)
-        "id=\"profiler-autostart\"",  // Autostart checkbox (693)
-        "id=\"profiler-measure\"",    // display_mode OptionButton (705)
-        "Frame Time (ms)",            // its first item (707)
-        "Average Time (ms)",          // (708)
-        "Physics Frame %",            // (710)
-        "id=\"profiler-time\"",       // display_time OptionButton (721)
-        ">Inclusive<",                // (724)
-        ">Self<",                     // (726)
-        "id=\"profiler-frame\"",      // cursor_metric_edit "Frame #:" (744)
+        "id=\"profiler-clear\"",     // Clear (687)
+        "id=\"profiler-autostart\"", // Autostart checkbox (693)
+        "id=\"profiler-measure\"",   // display_mode OptionButton (705)
+        "Frame Time (ms)",           // its first item (707)
+        "Average Time (ms)",         // (708)
+        "Physics Frame %",           // (710)
+        "id=\"profiler-time\"",      // display_time OptionButton (721)
+        ">Inclusive<",               // (724)
+        ">Self<",                    // (726)
+        "id=\"profiler-frame\"",     // cursor_metric_edit "Frame #:" (744)
         "Frame #:",
     ] {
         assert!(
@@ -81,9 +85,9 @@ fn profiler_renders_tree_columns_and_graph() {
         "id=\"profiler-split\"",
         "id=\"profiler-tree\"",
         "id=\"profiler-tree-head\"",
-        ">Name<",                       // variables column 0 (editor_profiler.cpp:763)
-        ">Time<",                       // column 1 (767)
-        ">Calls<",                      // column 2 (771)
+        ">Name<",                         // variables column 0 (editor_profiler.cpp:763)
+        ">Time<",                         // column 1 (767)
+        ">Calls<",                        // column 2 (771)
         "id=\"profiler-func-breakdown\"", // the rows body (kept id)
         "id=\"profiler-graph-canvas\"",   // the graph (kept id)
         "function setupProfilerToolbar",  // wired

@@ -383,7 +383,10 @@ fn high_use_runtime_classes_registered() {
     gdobject::class_db::register_networking_classes();
 
     assert!(class_exists("XROrigin3D"), "XROrigin3D must be registered");
-    assert!(is_parent_class("XROrigin3D", "Node3D"), "XROrigin3D derives from Node3D");
+    assert!(
+        is_parent_class("XROrigin3D", "Node3D"),
+        "XROrigin3D derives from Node3D"
+    );
 
     assert!(
         class_exists("VideoStreamPlayer"),
@@ -406,7 +409,9 @@ fn high_use_runtime_classes_registered() {
     // Registered with defaults (not bare name-only stubs).
     let vsp = get_class_info("VideoStreamPlayer").expect("VideoStreamPlayer info");
     assert!(
-        vsp.properties.iter().any(|p| p.name.as_str() == "volume_db"),
+        vsp.properties
+            .iter()
+            .any(|p| p.name.as_str() == "volume_db"),
         "VideoStreamPlayer exposes a volume_db default"
     );
 }

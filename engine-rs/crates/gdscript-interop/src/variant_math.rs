@@ -138,7 +138,7 @@ fn gd_num_scientific(value: f64) -> String {
     }
     const P: i32 = 6;
     let exp = value.abs().log10().floor() as i32;
-    let mut out = if exp < -4 || exp >= P {
+    let mut out = if !(-4..P).contains(&exp) {
         // `%e` carries P-1 fractional digits; normalise the exponent to C's
         // at-least-two-digit form.
         let mantissa_decimals = (P - 1) as usize;
@@ -2267,9 +2267,7 @@ pub(crate) fn packed_contains(container: &Variant, needle: &Variant) -> Option<b
         Variant::PackedFloat32Array(items) => {
             Some(number.is_some_and(|n| items.iter().any(|v| f64::from(*v) == n)))
         }
-        Variant::PackedFloat64Array(items) => {
-            Some(number.is_some_and(|n| items.iter().any(|v| *v == n)))
-        }
+        Variant::PackedFloat64Array(items) => Some(number.is_some_and(|n| items.contains(&n))),
         // String and StringName are both registered against
         // PackedStringArray, and compare by text.
         Variant::PackedStringArray(items) => {
@@ -2278,7 +2276,7 @@ pub(crate) fn packed_contains(container: &Variant, needle: &Variant) -> Option<b
                 Variant::StringName(s) => Some(s.to_string()),
                 _ => None,
             };
-            Some(text.is_some_and(|t| items.iter().any(|v| *v == t)))
+            Some(text.is_some_and(|t| items.contains(&t)))
         }
         Variant::PackedVector2Array(items) => Some(matches!(needle, Variant::Vector2(n)
             if items.iter().any(|v| v.x == n.x && v.y == n.y))),
@@ -3504,7 +3502,7 @@ pub(crate) fn vector_static_call(
         }
         ("Color", "from_rgbe9995") => {
             let ctx = "Color.from_rgbe9995()";
-            Some((|| match args.first() {
+            Some(match args.first() {
                 Some(Variant::Int(v)) if (0..=u32::MAX as i64).contains(v) => {
                     Ok(Variant::Color(Color::from_rgbe9995(*v as u32)))
                 }
@@ -3515,7 +3513,7 @@ pub(crate) fn vector_static_call(
                     "{ctx} expects an int, got {}",
                     describe(other)
                 ))),
-            })())
+            })
         }
         ("Color", "from_rgba8") => {
             let ctx = "Color.from_rgba8()";

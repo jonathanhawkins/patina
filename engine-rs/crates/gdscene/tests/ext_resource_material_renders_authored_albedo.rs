@@ -123,7 +123,11 @@ fn ext_resource_material_renders_authored_albedo() {
     let mut cache = MaterialTextureCache::default();
     let mat = material3d_for_node(&tree, mesh, &mut cache)
         .expect("the flattened bag must resolve to a material");
-    assert_close(mat.albedo, Color::new(0.0, 1.0, 0.0, 1.0), "rock.tres albedo");
+    assert_close(
+        mat.albedo,
+        Color::new(0.0, 1.0, 0.0, 1.0),
+        "rock.tres albedo",
+    );
     assert!(
         (mat.roughness - 0.3).abs() < 0.02,
         "roughness must come from the file too, not just albedo; got {}",

@@ -21,7 +21,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -97,7 +101,9 @@ fn bottom_panel_toggle_and_lock_behaviour_present() {
     let html = editor_html(port);
 
     assert!(
-        html.contains("this.classList.contains('active') && !panel.classList.contains('collapsed')"),
+        html.contains(
+            "this.classList.contains('active') && !panel.classList.contains('collapsed')"
+        ),
         "clicking the open tab must collapse the panel (deselect-enabled parity)"
     );
     // Programmatic (auto) opens route through a lock-aware helper so the Pin
@@ -121,8 +127,14 @@ fn bottom_panel_strip_has_version_pin_and_expand() {
     let (handle, port) = make_server();
     let html = editor_html(port);
 
-    assert!(html.contains(r#"id="bottom-strip-right""#), "strip must have a right-side cluster");
-    assert!(html.contains(r#"id="bottom-version""#), "strip must have a version label");
+    assert!(
+        html.contains(r#"id="bottom-strip-right""#),
+        "strip must have a right-side cluster"
+    );
+    assert!(
+        html.contains(r#"id="bottom-version""#),
+        "strip must have a version label"
+    );
     assert!(
         html.contains(r#"id="bottom-pin""#) && html.contains("Pin Bottom Panel Switching"),
         "strip must have a Pin button"

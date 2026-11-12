@@ -461,10 +461,7 @@ impl WebSocketMultiplayerPeer {
             let Some(conn) = self.conns.get_mut(&pid) else {
                 continue;
             };
-            let mut drop_conn = match read_available(&conn.stream, &mut conn.in_buf) {
-                Ok(eof) => eof,
-                Err(_) => true,
-            };
+            let mut drop_conn = read_available(&conn.stream, &mut conn.in_buf).unwrap_or(true);
             loop {
                 match decode_frame(&conn.in_buf) {
                     Ok(Some((frame, consumed))) => {

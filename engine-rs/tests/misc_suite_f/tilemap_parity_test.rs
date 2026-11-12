@@ -56,15 +56,51 @@ fn build_store() -> (TileMapStore, NodeId) {
     let node = NodeId::next();
     store.insert(node, data);
 
-    set_cell(&mut store, node, ground_idx, Vector2i::new(0, 0), TileData::new(1));
-    set_cell(&mut store, node, ground_idx, Vector2i::new(1, 0), TileData::new(2));
-    set_cell(&mut store, node, ground_idx, Vector2i::new(0, 1), TileData::new(1));
+    set_cell(
+        &mut store,
+        node,
+        ground_idx,
+        Vector2i::new(0, 0),
+        TileData::new(1),
+    );
+    set_cell(
+        &mut store,
+        node,
+        ground_idx,
+        Vector2i::new(1, 0),
+        TileData::new(2),
+    );
+    set_cell(
+        &mut store,
+        node,
+        ground_idx,
+        Vector2i::new(0, 1),
+        TileData::new(1),
+    );
     // Unknown source_id must be dropped by the renderer.
-    set_cell(&mut store, node, ground_idx, Vector2i::new(2, 2), TileData::new(99));
+    set_cell(
+        &mut store,
+        node,
+        ground_idx,
+        Vector2i::new(2, 2),
+        TileData::new(99),
+    );
 
-    set_cell(&mut store, node, overlay_idx, Vector2i::new(0, 0), TileData::new(2));
+    set_cell(
+        &mut store,
+        node,
+        overlay_idx,
+        Vector2i::new(0, 0),
+        TileData::new(2),
+    );
 
-    set_cell(&mut store, node, hidden_idx, Vector2i::new(5, 5), TileData::new(1));
+    set_cell(
+        &mut store,
+        node,
+        hidden_idx,
+        Vector2i::new(5, 5),
+        TileData::new(1),
+    );
 
     (store, node)
 }

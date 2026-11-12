@@ -10,8 +10,7 @@
 
 use std::fs;
 
-const COMPAT_MATRIX_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
+const COMPAT_MATRIX_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
 
 fn read_compat_matrix() -> String {
     fs::read_to_string(COMPAT_MATRIX_PATH)
@@ -79,7 +78,12 @@ fn tooling_rows_use_approved_classifications() {
     let matrix = read_compat_matrix();
     let section = tooling_section(&matrix);
 
-    let approved = ["Measured", "Implemented, not yet measured", "Deferred", "Missing"];
+    let approved = [
+        "Measured",
+        "Implemented, not yet measured",
+        "Deferred",
+        "Missing",
+    ];
 
     let rows: Vec<&str> = section
         .lines()
@@ -98,7 +102,11 @@ fn tooling_rows_use_approved_classifications() {
     );
 
     for row in &rows {
-        let cols: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+        let cols: Vec<&str> = row
+            .split('|')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
         if cols.len() >= 2 {
             let classification = cols[1];
             assert!(

@@ -668,7 +668,10 @@ impl Parser {
                 if !matches!(self.peek(), Token::Eof) {
                     return self.parse_stmt();
                 }
-                if annotations.iter().all(|a| matches!(a.name.as_str(), "icon" | "static_unload")) {
+                if annotations
+                    .iter()
+                    .all(|a| matches!(a.name.as_str(), "icon" | "static_unload"))
+                {
                     return Ok(Stmt::AnnotationStmt { annotations });
                 }
                 let ts = self.tokens.get(self.pos);
@@ -3152,7 +3155,10 @@ mod tests {
         };
         assert!(matches!(value(0), Some(Expr::GetNode(ref p)) if p == "%CoinCount"));
         assert!(matches!(value(1), Some(Expr::GetNode(ref p)) if p == "%CoinCount/Parallax"));
-        assert!(!matches!(value(2), Some(Expr::GetNode(_))), "`7 % 3` stays a modulo");
+        assert!(
+            !matches!(value(2), Some(Expr::GetNode(_))),
+            "`7 % 3` stays a modulo"
+        );
     }
 
     /// The statement form from the official 3D platformer's player.gd.

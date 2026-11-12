@@ -210,7 +210,8 @@ fn ws_echo_connection(mut stream: TcpStream) {
                             let _ = stream.write_all(&pong);
                         }
                         Opcode::Close => {
-                            let close = encode_frame(&Frame::new(Opcode::Close, frame.payload), None);
+                            let close =
+                                encode_frame(&Frame::new(Opcode::Close, frame.payload), None);
                             let _ = stream.write_all(&close);
                             let _ = stream.flush();
                             let _ = stream.shutdown(Shutdown::Both);
@@ -260,7 +261,11 @@ fn http_request_get_against_local_server() {
         "request should complete"
     );
 
-    let rc = seen.lock().unwrap().clone().expect("request_completed fired");
+    let rc = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request_completed fired");
     assert_eq!(rc.result, HttpResultCode::Success.as_godot_result_code());
     assert_eq!(rc.result, 0);
     assert_eq!(rc.response_code, 200);
@@ -332,8 +337,15 @@ fn http_request_connection_refused_is_cant_connect() {
     });
     assert!(drive_http(&req, Duration::from_secs(5)));
 
-    let rc = seen.lock().unwrap().clone().expect("request_completed fired");
-    assert_eq!(rc.result, HttpResultCode::CantConnect.as_godot_result_code());
+    let rc = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request_completed fired");
+    assert_eq!(
+        rc.result,
+        HttpResultCode::CantConnect.as_godot_result_code()
+    );
     assert_eq!(rc.result, 2); // Godot RESULT_CANT_CONNECT
     assert_eq!(rc.response_code, 0);
 }
@@ -532,7 +544,10 @@ fn websocket_peer_rejects_wss_without_tls() {
     let mut peer = WebSocketPeer::new();
     let err = peer.connect_to_url("wss://example.com/").unwrap_err();
     assert!(
-        matches!(err, gdplatform::websocket_peer::WebSocketError::TlsUnsupported),
+        matches!(
+            err,
+            gdplatform::websocket_peer::WebSocketError::TlsUnsupported
+        ),
         "wss:// must be rejected when no TLS backend is present"
     );
 }
@@ -551,7 +566,10 @@ fn websocket_peer_registered_in_classdb() {
         class_db::inheritance_chain("WebSocketPeer"),
         vec!["WebSocketPeer", "PacketPeer", "RefCounted", "Object"]
     );
-    assert!(class_db::class_has_method("WebSocketPeer", "connect_to_url"));
+    assert!(class_db::class_has_method(
+        "WebSocketPeer",
+        "connect_to_url"
+    ));
     assert!(class_db::class_has_method("WebSocketPeer", "send_text"));
     assert!(class_db::class_has_method("WebSocketPeer", "get_packet"));
 }
@@ -690,10 +708,22 @@ fn multiplayer_tcp_registered_in_classdb() {
     assert!(class_db::class_exists("TcpMultiplayerPeer"));
     assert!(class_db::class_exists("MultiplayerPeer"));
     assert!(class_db::class_exists("MultiplayerAPI"));
-    assert!(class_db::is_parent_class("TcpMultiplayerPeer", "MultiplayerPeer"));
-    assert!(class_db::is_parent_class("TcpMultiplayerPeer", "PacketPeer"));
-    assert!(class_db::class_has_method("TcpMultiplayerPeer", "create_server"));
-    assert!(class_db::class_has_method("TcpMultiplayerPeer", "create_client"));
+    assert!(class_db::is_parent_class(
+        "TcpMultiplayerPeer",
+        "MultiplayerPeer"
+    ));
+    assert!(class_db::is_parent_class(
+        "TcpMultiplayerPeer",
+        "PacketPeer"
+    ));
+    assert!(class_db::class_has_method(
+        "TcpMultiplayerPeer",
+        "create_server"
+    ));
+    assert!(class_db::class_has_method(
+        "TcpMultiplayerPeer",
+        "create_client"
+    ));
 }
 
 // ===========================================================================
@@ -868,10 +898,22 @@ fn multiplayer_enet_registered_in_classdb() {
 
     assert!(class_db::class_exists("ENetMultiplayerPeer"));
     assert!(class_db::class_exists("MultiplayerPeer"));
-    assert!(class_db::is_parent_class("ENetMultiplayerPeer", "MultiplayerPeer"));
-    assert!(class_db::is_parent_class("ENetMultiplayerPeer", "PacketPeer"));
-    assert!(class_db::class_has_method("ENetMultiplayerPeer", "create_server"));
-    assert!(class_db::class_has_method("ENetMultiplayerPeer", "create_client"));
+    assert!(class_db::is_parent_class(
+        "ENetMultiplayerPeer",
+        "MultiplayerPeer"
+    ));
+    assert!(class_db::is_parent_class(
+        "ENetMultiplayerPeer",
+        "PacketPeer"
+    ));
+    assert!(class_db::class_has_method(
+        "ENetMultiplayerPeer",
+        "create_server"
+    ));
+    assert!(class_db::class_has_method(
+        "ENetMultiplayerPeer",
+        "create_client"
+    ));
     assert!(class_db::class_has_method("ENetMultiplayerPeer", "poll"));
     assert!(class_db::class_has_method("ENetMultiplayerPeer", "close"));
 }
@@ -1018,8 +1060,14 @@ fn multiplayer_spawner_synchronizer_registered_in_classdb() {
         "MultiplayerSpawner",
         "get_spawnable_scene_count"
     ));
-    assert!(class_db::class_has_property("MultiplayerSpawner", "spawn_path"));
-    assert!(class_db::class_has_property("MultiplayerSpawner", "spawn_limit"));
+    assert!(class_db::class_has_property(
+        "MultiplayerSpawner",
+        "spawn_path"
+    ));
+    assert!(class_db::class_has_property(
+        "MultiplayerSpawner",
+        "spawn_limit"
+    ));
 
     assert!(class_db::class_has_method(
         "MultiplayerSynchronizer",
@@ -1109,6 +1157,9 @@ fn packet_stream_peers_registered_in_classdb() {
     assert!(class_db::is_parent_class("StreamPeerTCP", "StreamPeer"));
     assert!(class_db::class_has_method("PacketPeerUDP", "bind"));
     assert!(class_db::class_has_method("PacketPeerUDP", "put_packet"));
-    assert!(class_db::class_has_method("StreamPeerTCP", "connect_to_host"));
+    assert!(class_db::class_has_method(
+        "StreamPeerTCP",
+        "connect_to_host"
+    ));
     assert!(class_db::class_has_method("StreamPeerTCP", "get_status"));
 }

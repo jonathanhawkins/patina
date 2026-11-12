@@ -145,9 +145,6 @@ fn voxelgi_lightmap_scene_render_does_not_leak_into_other_effect_lists() {
         fx.occluders.len()
     );
     assert!(fx.decals.is_empty(), "nor become a decal");
-    assert!(
-        fx.reflection_probes.is_empty(),
-        "nor a reflection probe"
-    );
+    assert!(fx.reflection_probes.is_empty(), "nor a reflection probe");
     assert!(fx.fog_volumes.is_empty(), "nor a fog volume");
 }

@@ -179,6 +179,7 @@ pub fn tilemap_to_physics_merged(
     let q = quadrant_size.max(1);
     let floor_div = |v: i32| v.div_euclid(q);
     // (quadrant x, quadrant y, row, one_way) -> [(left, top, right, bottom)]
+    #[allow(clippy::type_complexity)]
     let mut groups: BTreeMap<(i32, i32, i32, bool), Vec<(f32, f32, f32, f32)>> = BTreeMap::new();
     let mut singles: Vec<TileCollisionInfo> = Vec::new();
     for tile in tiles {

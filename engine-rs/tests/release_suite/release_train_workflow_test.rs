@@ -430,7 +430,8 @@ fn integration_test_directory_has_tests() {
     let tests_dir = workspace_root().join("tests");
     assert!(tests_dir.exists(), "engine-rs/tests/ must exist");
 
-    let test_count = walk_test_entries(&tests_dir).into_iter()
+    let test_count = walk_test_entries(&tests_dir)
+        .into_iter()
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
 
@@ -454,11 +455,10 @@ fn parity_tests_cover_key_subsystems() {
     ];
 
     for pattern in &subsystem_patterns {
-        let has_test = walk_test_entries(&tests_dir).into_iter()
-            .any(|e| {
-                let name = e.file_name().to_string_lossy().to_lowercase();
-                name.contains(pattern) && name.ends_with("_test.rs")
-            });
+        let has_test = walk_test_entries(&tests_dir).into_iter().any(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            name.contains(pattern) && name.ends_with("_test.rs")
+        });
         assert!(
             has_test,
             "must have at least one parity test covering subsystem: {pattern}"
@@ -698,7 +698,8 @@ fn fixture_resources_and_scenes_present() {
 #[test]
 fn integration_test_count_floor() {
     let tests_dir = workspace_root().join("tests");
-    let test_count = walk_test_entries(&tests_dir).into_iter()
+    let test_count = walk_test_entries(&tests_dir)
+        .into_iter()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             name.ends_with("_test.rs")
@@ -751,11 +752,15 @@ fn walk_test_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.file_name().map_or(false, |n| n != "support" && n != "fixtures") {
+                if p.file_name()
+                    .map_or(false, |n| n != "support" && n != "fixtures")
+                {
                     stack.push(p);
                 }
             } else {

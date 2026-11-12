@@ -887,16 +887,30 @@ fn outline_with_budget(
     budget: usize,
 ) -> String {
     fn count(tree: &SceneTree, id: NodeId, depth: usize, max_depth: usize) -> usize {
-        let children = tree.get_node(id).map(|n| n.children().to_vec()).unwrap_or_default();
+        let children = tree
+            .get_node(id)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default();
         1 + if depth >= max_depth {
             0
         } else {
-            children.iter().map(|&c| count(tree, c, depth + 1, max_depth)).sum()
+            children
+                .iter()
+                .map(|&c| count(tree, c, depth + 1, max_depth))
+                .sum()
         }
     }
     let mut out = String::new();
     let mut remaining = budget;
-    format_tree(tree, root, 0, max_depth, with_props, &mut remaining, &mut out);
+    format_tree(
+        tree,
+        root,
+        0,
+        max_depth,
+        with_props,
+        &mut remaining,
+        &mut out,
+    );
     let printed = budget - remaining;
     let total = count(tree, root, 0, max_depth);
     if printed < total {
@@ -1112,7 +1126,9 @@ fn tool_tree(ctx: &Ctx, args: &Value) -> Result<Output, String> {
     let budget = arg_u64(args, "budget")
         .map(|b| (b as usize).clamp(1, TREE_NODE_BUDGET_MAX))
         .unwrap_or(TREE_NODE_BUDGET);
-    Ok(Output::text(outline_with_budget(tree, start, depth, with_props, budget)))
+    Ok(Output::text(outline_with_budget(
+        tree, start, depth, with_props, budget,
+    )))
 }
 
 fn tool_inspect(ctx: &Ctx, args: &Value) -> Result<Output, String> {
@@ -1695,7 +1711,7 @@ fn tool_scene(ctx: &Ctx, args: &Value) -> Result<Output, String> {
 }
 
 fn pascal_case(stem: &str) -> String {
-    stem.split(|c: char| c == '_' || c == '-' || c == ' ')
+    stem.split(['_', '-', ' '])
         .filter(|w| !w.is_empty())
         .map(|w| {
             let mut chars = w.chars();
@@ -1804,7 +1820,7 @@ impl Probe {
         self.at == Some(frame)
             || self
                 .every
-                .is_some_and(|n| n > 0 && frame > 0 && frame % n == 0)
+                .is_some_and(|n| n > 0 && frame > 0 && frame.is_multiple_of(n))
     }
 }
 
@@ -2365,7 +2381,9 @@ fn tool_play(ctx: &Ctx, args: &Value) -> Result<Output, String> {
 
 fn tool_audio(ctx: &Ctx, args: &Value) -> Result<Output, String> {
     let secs = args.get("secs").and_then(Value::as_f64).unwrap_or(5.0);
-    let v = ctx.api.call("GET", &format!("/api/runtime/audio?secs={secs}"), None)?;
+    let v = ctx
+        .api
+        .call("GET", &format!("/api/runtime/audio?secs={secs}"), None)?;
     if v["device"].is_null() {
         return Err(v["error"]
             .as_str()
@@ -2385,10 +2403,18 @@ fn tool_audio(ctx: &Ctx, args: &Value) -> Result<Output, String> {
         n(&a["gap_count"]), n(&a["clipped_samples"]),
     );
     for c in a["clicks"].as_array().into_iter().flatten().take(12) {
-        text.push_str(&format!("  click at {:.3}s ({:.0}x local curvature)\n", n(&c["t"]), n(&c["severity"])));
+        text.push_str(&format!(
+            "  click at {:.3}s ({:.0}x local curvature)\n",
+            n(&c["t"]),
+            n(&c["severity"])
+        ));
     }
     for g in a["gaps"].as_array().into_iter().flatten().take(12) {
-        text.push_str(&format!("  gap at {:.3}s ({} frames silent)\n", n(&g["t"]), n(&g["frames"])));
+        text.push_str(&format!(
+            "  gap at {:.3}s ({} frames silent)\n",
+            n(&g["t"]),
+            n(&g["frames"])
+        ));
     }
     // Findings, so the numbers read as a diagnosis.
     if n(&d["underruns"]) > 0.0 {
@@ -2414,7 +2440,11 @@ fn tool_audio(ctx: &Ctx, args: &Value) -> Result<Output, String> {
         text.push_str("note: only soft clicks (<200x) — consistent with the music's own transients; compare against the source with gdaudio::diagnostics::analyze\n");
     }
     if let Some(path) = arg_str(args, "save") {
-        let (status, wav) = ctx.api.request("GET", &format!("/api/runtime/audio?secs={secs}&wav=1"), None)?;
+        let (status, wav) = ctx.api.request(
+            "GET",
+            &format!("/api/runtime/audio?secs={secs}&wav=1"),
+            None,
+        )?;
         if status != 200 {
             return Err(format!("capture failed: HTTP {status}"));
         }
@@ -2729,6 +2759,7 @@ fn take_flush_probes(s: &mut EditorState, slot: FlushProbes) -> Option<Vec<Strin
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture(
     s: &mut EditorState,
     frame: u64,
@@ -2810,7 +2841,7 @@ fn press(ctx: &Ctx, input: &TimedInput, down: bool) -> Result<(), String> {
                             .xform(gdcore::math::Vector2::new(*x as f32, *y as f32));
                         (p.x as f64, p.y as f64)
                     }
-                    None => (*x as f64, *y as f64),
+                    None => ((*x), (*y)),
                 }
             };
             ctx.api

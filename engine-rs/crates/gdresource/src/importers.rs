@@ -391,7 +391,12 @@ pub fn import_jpeg_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>
         .map_err(|e| EngineError::Parse(format!("JPEG decode failed: {e}")))?
         .to_rgba8();
     let (w, h) = rgba.dimensions();
-    Ok(rgba8_texture_resource(w as usize, h as usize, rgba.as_raw(), path))
+    Ok(rgba8_texture_resource(
+        w as usize,
+        h as usize,
+        rgba.as_raw(),
+        path,
+    ))
 }
 
 /// Loads a `.gltf`/`.glb` through the existing parser (pat-s3rrv.51).
@@ -453,7 +458,8 @@ pub fn load_color_texture_linear(
     };
     let pixels: Vec<gdcore::math::Color> = match res.get_property("pixels") {
         Some(Variant::Array(arr)) => arr
-            .to_vec().iter()
+            .to_vec()
+            .iter()
             .map(|v| match v {
                 // Decoders store normalized sRGB; linearize for source_color use.
                 Variant::Color(c) => c.srgb_to_linear(),
@@ -768,7 +774,8 @@ pub fn apply_texture_params(res: &Resource, params: &ImportParams) -> Resource {
     };
     let mut pixels: Vec<gdcore::math::Color> = match out.get_property("pixels") {
         Some(Variant::Array(a)) => a
-            .to_vec().iter()
+            .to_vec()
+            .iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),
                 _ => None,
@@ -983,11 +990,7 @@ pub fn import_wav(path: &Path) -> EngineResult<Arc<Resource>> {
 
     let bytes_per_sample = (bits_per_sample as u32).max(1) / 8;
     let frame_size = (num_channels as u32) * bytes_per_sample;
-    let total_frames = if frame_size > 0 {
-        data_size / frame_size
-    } else {
-        0
-    };
+    let total_frames = data_size.checked_div(frame_size).unwrap_or(0);
     let length_seconds = if sample_rate > 0 {
         total_frames as f64 / sample_rate as f64
     } else {
@@ -1611,9 +1614,7 @@ fn format_ini_value(value: &str) -> String {
         Some((head, _)) => {
             v.ends_with(')')
                 && !head.is_empty()
-                && head
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         }
         None => false,
     };
@@ -2827,7 +2828,10 @@ antialiased=true
         )
         .unwrap();
         let res = import_image(&png).expect("the source loads when the artifact is absent");
-        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
+        assert_eq!(
+            res.get_property("has_pixel_data"),
+            Some(&Variant::Bool(true))
+        );
 
         // With an undecodable source as well, it is still an error — about the
         // source, since that is what was read.

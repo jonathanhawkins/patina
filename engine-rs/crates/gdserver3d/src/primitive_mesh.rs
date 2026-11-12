@@ -269,20 +269,15 @@ impl CylinderMesh {
 /// Godot numbers these FACE_X 0 / FACE_Y 1 / FACE_Z 2 (`PlaneMesh.xml:30-36`),
 /// so `#[derive(Default)]` — which would take declaration order — is wrong here
 /// and would silently face the plane along the wrong axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaneOrientation {
     /// Faces +X; the plane lies in the ZY plane.
     FaceX,
     /// Faces +Y; the plane lies in the XZ plane. Godot's default.
+    #[default]
     FaceY,
     /// Faces +Z; the plane lies in the XY plane. What `QuadMesh` uses.
     FaceZ,
-}
-
-impl Default for PlaneOrientation {
-    fn default() -> Self {
-        Self::FaceY
-    }
 }
 
 impl PlaneOrientation {

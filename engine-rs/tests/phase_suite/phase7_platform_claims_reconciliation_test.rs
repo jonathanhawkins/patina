@@ -14,12 +14,15 @@
 
 use std::fs;
 
-const COMPAT_MATRIX_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
-const AUDIT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../prd/PHASE7_PLATFORM_PARITY_AUDIT.md");
-const STABLE_LAYER_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/PLATFORM_STABLE_LAYER.md");
+const COMPAT_MATRIX_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../COMPAT_MATRIX.md");
+const AUDIT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../prd/PHASE7_PLATFORM_PARITY_AUDIT.md"
+);
+const STABLE_LAYER_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/PLATFORM_STABLE_LAYER.md"
+);
 const MIGRATION_GUIDE_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/migration-guide.md");
 
@@ -54,9 +57,7 @@ fn compat_matrix_platform_rows_use_approved_statuses() {
     let bounded = &section[..end];
 
     // Also stop at thematic break (--- on its own line) if it comes earlier
-    let break_end = bounded
-        .find("\n---\n")
-        .unwrap_or(bounded.len());
+    let break_end = bounded.find("\n---\n").unwrap_or(bounded.len());
     let bounded = &bounded[..break_end];
 
     // Find table rows: must start with '|', skip header (contains "Platform")
@@ -67,10 +68,14 @@ fn compat_matrix_platform_rows_use_approved_statuses() {
         .collect();
 
     for row in &rows {
-        let cols: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+        let cols: Vec<&str> = row
+            .split('|')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
         if cols.len() >= 2 {
             let status = cols[1].replace("**", ""); // strip bold markers
-            // Check it's one of the approved statuses
+                                                    // Check it's one of the approved statuses
             assert!(
                 APPROVED_STATUSES.iter().any(|s| status.contains(s)),
                 "platform row '{}' uses non-approved status '{}'. \
@@ -262,7 +267,11 @@ fn compat_matrix_per_os_tables_use_approved_classifications() {
     );
 
     for row in &rows {
-        let cols: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+        let cols: Vec<&str> = row
+            .split('|')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
         if cols.len() >= 2 {
             let classification = cols[1];
             assert!(
@@ -397,8 +406,7 @@ fn stable_layer_per_os_does_not_conflate_headless_with_native() {
 
     // The section must explicitly state that all tests are headless/model
     assert!(
-        section.contains("headless/model behavior only")
-            || section.contains("headless/model"),
+        section.contains("headless/model behavior only") || section.contains("headless/model"),
         "per-OS section must explicitly state tests are headless/model"
     );
 

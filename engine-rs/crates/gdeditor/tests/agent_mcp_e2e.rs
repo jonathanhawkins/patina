@@ -579,7 +579,11 @@ current = true
         None,
     );
     assert!(!report.error, "{}", report.text);
-    assert!(!report.text.contains("screenshot failed"), "{}", report.text);
+    assert!(
+        !report.text.contains("screenshot failed"),
+        "{}",
+        report.text
+    );
     assert_eq!(report.images.len(), 1, "{}", report.text);
     let (w, h, px) = png_rgba(&report.images[0]);
     assert_eq!((w, h), (64, 48));
@@ -1306,7 +1310,11 @@ fn godot_key_names_press_and_unknown_key_names_are_rejected() {
         }),
         None,
     );
-    assert!(report.text.contains("lefts=5"), "`Left` holds the left arrow:\n{}", report.text);
+    assert!(
+        report.text.contains("lefts=5"),
+        "`Left` holds the left arrow:\n{}",
+        report.text
+    );
 
     let bad = tool(
         &server,
@@ -1325,10 +1333,23 @@ fn godot_key_names_press_and_unknown_key_names_are_rejected() {
 fn audio_without_a_device_is_reported_not_faked() {
     let _guard = serial();
     let server = boot(None);
-    let (status, body) = http(server.port(), "GET", "/api/runtime/audio?secs=2", "", None, None);
+    let (status, body) = http(
+        server.port(),
+        "GET",
+        "/api/runtime/audio?secs=2",
+        "",
+        None,
+        None,
+    );
     assert_eq!(status, 200, "the route exists even with no device: {body}");
-    assert!(body.contains("\"device\":null"), "no device is reported as null: {body}");
-    assert!(body.contains("audio: true"), "and says how to get one: {body}");
+    assert!(
+        body.contains("\"device\":null"),
+        "no device is reported as null: {body}"
+    );
+    assert!(
+        body.contains("audio: true"),
+        "and says how to get one: {body}"
+    );
     let r = tool(&server, "audio", json!({"secs": 2}), None);
     assert!(r.error, "the MCP tool surfaces the same error: {}", r.text);
     assert!(r.text.contains("no audio device"), "{}", r.text);

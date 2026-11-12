@@ -83,7 +83,11 @@ res.get(\"adjustment_brightness\"), res.get(\"sky_name\"), res.get_class()]
         Variant::Float(0.75),
         "load() must return the .tres float property, not null",
     );
-    assert_eq!(got.to_vec()[1], Variant::Bool(true), "bool property must parse");
+    assert_eq!(
+        got.to_vec()[1],
+        Variant::Bool(true),
+        "bool property must parse"
+    );
     assert_eq!(got.to_vec()[2], Variant::Int(2), "int property must parse");
     assert_eq!(
         got.to_vec()[3],
@@ -157,7 +161,11 @@ func check() -> Array:
         Variant::Array(items) => items,
         other => panic!("expected Array, got {other:?}"),
     };
-    assert_eq!(got.to_vec()[0], Variant::Nil, "malformed .tres must not yield values");
+    assert_eq!(
+        got.to_vec()[0],
+        Variant::Nil,
+        "malformed .tres must not yield values"
+    );
     assert_eq!(
         got.to_vec()[1],
         Variant::String("res://bad.tres".to_string()),

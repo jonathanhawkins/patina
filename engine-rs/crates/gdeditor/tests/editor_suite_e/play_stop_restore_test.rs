@@ -127,7 +127,10 @@ fn editor_stop_restores_editable() {
     let resp = http_post(port, "/api/runtime/stop", "");
     assert!(resp.contains("200 OK"), "stop should succeed: {resp}");
     let body: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-    assert_eq!(body["running"], false, "stop response should report stopped");
+    assert_eq!(
+        body["running"], false,
+        "stop response should report stopped"
+    );
 
     // Status reflects the restored, editable, idle editor.
     let st = status_json(port);

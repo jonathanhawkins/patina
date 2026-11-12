@@ -19,9 +19,19 @@ fn editor_signals_edit_disconnect_flags() {
     dlg.add_bind("42");
     dlg.add_bind("\"hi\"");
     let conn = dlg.build();
-    assert!(conn.flags.deferred, "deferred flag persists onto the connection");
-    assert!(conn.flags.one_shot, "one-shot flag persists onto the connection");
-    assert_eq!(conn.binds, vec!["42", "\"hi\""], "bound args persist in order");
+    assert!(
+        conn.flags.deferred,
+        "deferred flag persists onto the connection"
+    );
+    assert!(
+        conn.flags.one_shot,
+        "one-shot flag persists onto the connection"
+    );
+    assert_eq!(
+        conn.binds,
+        vec!["42", "\"hi\""],
+        "bound args persist in order"
+    );
 
     // Persist it plus a second, plain connection.
     let mut list = ConnectionList::new();
@@ -32,9 +42,19 @@ fn editor_signals_edit_disconnect_flags() {
     // Edit... the first connection: change the method and drop the flags.
     let edited = AdvancedConnectDialog::new("pressed", "/root/Main", "_on_pressed_v2").build();
     assert!(list.edit(0, edited));
-    assert_eq!(list.all()[0].method, "_on_pressed_v2", "edit replaces the method");
-    assert!(!list.all()[0].flags.deferred, "edit cleared the deferred flag");
-    assert!(list.all()[0].binds.is_empty(), "edit cleared the bound args");
+    assert_eq!(
+        list.all()[0].method,
+        "_on_pressed_v2",
+        "edit replaces the method"
+    );
+    assert!(
+        !list.all()[0].flags.deferred,
+        "edit cleared the deferred flag"
+    );
+    assert!(
+        list.all()[0].binds.is_empty(),
+        "edit cleared the bound args"
+    );
 
     // Disconnect the second connection by index.
     assert!(list.disconnect(1));

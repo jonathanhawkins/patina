@@ -134,11 +134,11 @@ fn filesystem_dock_filter_matches_all_search_tokens() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "fsFilterTokens",                     // the tokenized filter state
-        "function fsMatchesAllSearchTokens",  // Godot's all-tokens predicate
-        "fsMatchesAllSearchTokens(e.name)",   // honored by the per-entry matcher
-        "fsFilter.split(",                    // the filter box tokenizes on input
-        "!fsFilterTokens.length",             // an empty filter still shows everything
+        "fsFilterTokens",                    // the tokenized filter state
+        "function fsMatchesAllSearchTokens", // Godot's all-tokens predicate
+        "fsMatchesAllSearchTokens(e.name)",  // honored by the per-entry matcher
+        "fsFilter.split(",                   // the filter box tokenizes on input
+        "!fsFilterTokens.length",            // an empty filter still shows everything
     ] {
         assert!(
             html.contains(needle),

@@ -84,18 +84,28 @@ func _physics_process(delta):\n\
     let out = ml.tree_mut().drain_script_output();
     assert!(out.errors.is_empty(), "{:?}", out.errors);
     assert_eq!(
-        ml.tree().get_script(body_id).and_then(|s| s.get_property("g")),
+        ml.tree()
+            .get_script(body_id)
+            .and_then(|s| s.get_property("g")),
         Some(Variant::Vector2(Vector2::new(0.0, 980.0))),
         "Godot's default 2D gravity, (0, 980)"
     );
-    let pos = match ml.tree().get_node(body_id).unwrap().get_property("position") {
+    let pos = match ml
+        .tree()
+        .get_node(body_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         other => panic!("{other:?}"),
     };
     assert!(pos.y > 100.0, "the body falls under get_gravity(): {pos:?}");
 
     // Area2D.get_gravity() is its float `gravity` property, not a vector.
-    let g = ml.tree().get_script(area_id).and_then(|s| s.get_property("ag"));
+    let g = ml
+        .tree()
+        .get_script(area_id)
+        .and_then(|s| s.get_property("ag"));
     assert!(
         matches!(g, Some(Variant::Float(_)) | Some(Variant::Int(_))),
         "Area2D keeps its float gravity getter: {g:?}"
@@ -113,8 +123,12 @@ fn an_onready_initializer_sees_the_onready_vars_declared_before_it() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let player = tree.add_child(root, Node::new("Player", "Node2D")).unwrap();
-    let sprite = tree.add_child(player, Node::new("Sprite2D", "Sprite2D")).unwrap();
-    let gun = tree.add_child(sprite, Node::new("Gun", "Marker2D")).unwrap();
+    let sprite = tree
+        .add_child(player, Node::new("Sprite2D", "Sprite2D"))
+        .unwrap();
+    let gun = tree
+        .add_child(sprite, Node::new("Gun", "Marker2D"))
+        .unwrap();
     let src = "extends Node2D\n\
 @onready var sprite := $Sprite2D as Sprite2D\n\
 @onready var gun = sprite.get_node(^\"Gun\")\n\
@@ -124,7 +138,11 @@ fn an_onready_initializer_sees_the_onready_vars_declared_before_it() {
     gdscene::LifecycleManager::enter_tree(&mut tree, player);
     let get = |k: &str| tree.get_script(player).and_then(|s| s.get_property(k));
     assert_eq!(get("gun"), Some(Variant::ObjectId(gun.object_id())));
-    assert_eq!(get("gun_name"), Some(Variant::String("Gun".into())), "a chain of three");
+    assert_eq!(
+        get("gun_name"),
+        Some(Variant::String("Gun".into())),
+        "a chain of three"
+    );
 }
 
 /// 4. An action named by a StringName literal (`&"toggle_fullscreen"`, as the
@@ -159,10 +177,15 @@ fn is_and_as_understand_script_class_names() {
     gdobject::class_db::register_all_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let hero = tree.add_child(root, Node::new("Hero", "CharacterBody2D")).unwrap();
+    let hero = tree
+        .add_child(root, Node::new("Hero", "CharacterBody2D"))
+        .unwrap();
     let checker = tree.add_child(root, Node::new("Checker", "Node")).unwrap();
     let hero_src = "class_name Hero\nextends CharacterBody2D\nsignal coin_collected\n";
-    tree.attach_script(hero, Box::new(GDScriptNodeInstance::from_source(hero_src, hero).unwrap()));
+    tree.attach_script(
+        hero,
+        Box::new(GDScriptNodeInstance::from_source(hero_src, hero).unwrap()),
+    );
     let src = "class_name Checker\nextends Node\n\
 var is_hero = null\nvar cast_ok = null\nvar native_still = null\nvar self_is = null\nvar wrong = null\n\
 func _ready():\n\
@@ -172,12 +195,31 @@ func _ready():\n\
 \tnative_still = h is CharacterBody2D\n\
 \tself_is = self is Checker\n\
 \twrong = h is Checker\n";
-    tree.attach_script(checker, Box::new(GDScriptNodeInstance::from_source(src, checker).unwrap()));
+    tree.attach_script(
+        checker,
+        Box::new(GDScriptNodeInstance::from_source(src, checker).unwrap()),
+    );
     gdscene::LifecycleManager::enter_tree(&mut tree, checker);
     let get = |k: &str| tree.get_script(checker).and_then(|s| s.get_property(k));
     assert_eq!(get("is_hero"), Some(Variant::Bool(true)), "h is Hero");
-    assert_eq!(get("cast_ok"), Some(Variant::Bool(true)), "h as Hero is not null");
-    assert_eq!(get("native_still"), Some(Variant::Bool(true)), "native classes still match");
-    assert_eq!(get("self_is"), Some(Variant::Bool(true)), "a running script knows its own class");
-    assert_eq!(get("wrong"), Some(Variant::Bool(false)), "a different class_name does not match");
+    assert_eq!(
+        get("cast_ok"),
+        Some(Variant::Bool(true)),
+        "h as Hero is not null"
+    );
+    assert_eq!(
+        get("native_still"),
+        Some(Variant::Bool(true)),
+        "native classes still match"
+    );
+    assert_eq!(
+        get("self_is"),
+        Some(Variant::Bool(true)),
+        "a running script knows its own class"
+    );
+    assert_eq!(
+        get("wrong"),
+        Some(Variant::Bool(false)),
+        "a different class_name does not match"
+    );
 }

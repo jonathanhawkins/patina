@@ -81,7 +81,10 @@ fn str_to_var_of_a_transform3d_reads_rows() {
     let v = call(
         "    var t = str_to_var(\"Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)\")\n    return t * Vector3(1, 0, 0)",
     );
-    assert_eq!(v, Variant::Vector3(gdcore::math::Vector3::new(11.0, 15.0, 19.0)));
+    assert_eq!(
+        v,
+        Variant::Vector3(gdcore::math::Vector3::new(11.0, 15.0, 19.0))
+    );
 }
 
 /// Projection is the exception: Godot writes its cells COLUMN-major.

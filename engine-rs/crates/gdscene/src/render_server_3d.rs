@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gdcore::math::Color;
-use gdcore::math::{Rect2, Vector2, Vector2i, Vector3};
+use gdcore::math::{Vector2i, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender3d::{compare_framebuffers_3d, DiffResult3D, FrameBuffer3D, SoftwareRenderer3D};
 use gdserver3d::instance::{
@@ -883,6 +883,8 @@ impl RenderServer3DAdapter {
                 }
 
                 // Update each expanded instance (mesh + transform + material).
+                // `i` is also the multimesh instance index passed below.
+                #[allow(clippy::needless_range_loop)]
                 for i in 0..instance_count {
                     let inst_id = inst_ids[i];
 
@@ -1586,10 +1588,7 @@ impl RenderServer3DAdapter {
             if let Some(marker) = path.strip_prefix("primitive:") {
                 // Strip any encoded property suffix (`|a,b` positional or
                 // `?k=v` named) so only the class name is matched.
-                let class = marker
-                    .split(|c| c == '|' || c == '?')
-                    .next()
-                    .unwrap_or(marker);
+                let class = marker.split(['|', '?']).next().unwrap_or(marker);
                 let authored = |key: &str| Self::authored_mesh_prop(tree, nid, key);
                 let authored_str = |key: &str| Self::authored_mesh_str(tree, nid, key);
                 if let Some(mesh) = gdserver3d::primitive_mesh::build_primitive_with_text(
@@ -1700,9 +1699,10 @@ impl RenderServer3DAdapter {
         // 6. Check legacy albedo color property.
         if let Some(node) = tree.get_node(nid) {
             if let gdvariant::Variant::Color(c) = node.get_property("albedo") {
-                let mut mat = Material3D::default();
-                mat.albedo = c;
-                return mat;
+                return Material3D {
+                    albedo: c,
+                    ..Default::default()
+                };
             }
         }
 
@@ -2153,7 +2153,7 @@ pub fn mesh3d_from_gltf_resource_for_mesh(
         None => {
             let mut all: Vec<_> = resource.subresources.iter().collect();
             // Sort by key for deterministic ordering (mesh_0, mesh_0_prim_0, etc.).
-            all.sort_by_key(|(k, _)| k.clone());
+            all.sort_by_key(|(k, _)| (*k).clone());
             all
         }
     };
@@ -2238,7 +2238,6 @@ pub fn mesh3d_from_gltf_resource_for_mesh(
         bone_indices: if rigged { bone_indices } else { Vec::new() },
         bone_weights: if rigged { bone_weights } else { Vec::new() },
         blend_shapes,
-        ..Default::default()
     };
 
     // Additional sub-resources become extra surfaces.
@@ -2302,8 +2301,9 @@ pub fn mesh3d_from_gltf_resource_for_mesh(
 /// `material_from_gltf_resource` (first primitive only, raw factor) predates
 /// this and is left for its callers.
 pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Material3D> {
+    type MaterialCache = HashMap<(String, Option<i64>), Vec<Material3D>>;
     thread_local! {
-        static CACHE: std::cell::RefCell<HashMap<(String, Option<i64>), Vec<Material3D>>> =
+        static CACHE: std::cell::RefCell<MaterialCache> =
             std::cell::RefCell::new(HashMap::new());
     }
     let key = (path.to_string(), mesh_index);
@@ -2483,7 +2483,9 @@ fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
         if !tail[..open].trim().starts_with(':') {
             break;
         }
-        let Some(close) = tail[open..].find('}') else { break };
+        let Some(close) = tail[open..].find('}') else {
+            break;
+        };
         let entry = &tail[open + 1..open + close];
         let enabled = entry.contains("\"use_external/enabled\": true");
         let fallback = entry
@@ -2506,9 +2508,14 @@ fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
 
 /// A material `.tres` as a [`Material3D`], its `ExtResource` textures resolved
 /// through the file's own ext table. `None` when unreadable.
-fn material3d_from_tres_file(path: &str, textures: &mut MaterialTextureCache) -> Option<Material3D> {
+fn material3d_from_tres_file(
+    path: &str,
+    textures: &mut MaterialTextureCache,
+) -> Option<Material3D> {
     let src = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
-    let res = gdresource::loader::TresLoader::new().parse_str(&src, path).ok()?;
+    let res = gdresource::loader::TresLoader::new()
+        .parse_str(&src, path)
+        .ok()?;
     let props: HashMap<String, Variant> = res
         .properties()
         .map(|(k, v)| {
@@ -2541,7 +2548,9 @@ fn gltf_extracted_material_dir(gltf_path: &str) -> Option<String> {
         gdcore::file_access::FileAccess::read_file_string(&format!("{gltf_path}.import")).ok()?;
     let file = gdresource::importers::parse_import_file(&text).ok()?;
     let params = file.other_sections.get("params")?;
-    let extract = params.get("materials/extract").and_then(|v| v.trim().parse::<i64>().ok());
+    let extract = params
+        .get("materials/extract")
+        .and_then(|v| v.trim().parse::<i64>().ok());
     if extract.unwrap_or(0) == 0 {
         return None;
     }
@@ -2552,7 +2561,10 @@ fn gltf_extracted_material_dir(gltf_path: &str) -> Option<String> {
     {
         return None;
     }
-    match params.get("materials/extract_path").map(|v| v.trim().trim_matches('"')) {
+    match params
+        .get("materials/extract_path")
+        .map(|v| v.trim().trim_matches('"'))
+    {
         Some(p) if !p.is_empty() => Some(p.trim_end_matches('/').to_string()),
         _ => gltf_path.rsplit_once('/').map(|(dir, _)| dir.to_string()),
     }
@@ -3019,17 +3031,17 @@ pub fn geometry_instance_settings_for_node(
 pub fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     use gdvariant::Variant;
 
-    /// Reads a numeric light property as `f32`, accepting either numeric kind.
-    ///
-    /// Matching only the float kind silently DROPS the value when a script
-    /// writes it, because GDScript types a bare `3000` or `1` as an **Int** —
-    /// `light.light_temperature = 3000` and `light.shadow_opacity = 1` are the
-    /// natural spellings and both were ignored, leaving the property at its
-    /// default with no error. `.tscn` files happen to write `3000.0`, which is
-    /// why every scene-loaded test missed it (pat-s3rrv.90).
-    ///
-    /// Same shape as the readers already used for `pixel_size` and `font_scale`
-    /// in this file.
+    // Reads a numeric light property as `f32`, accepting either numeric kind.
+    //
+    // Matching only the float kind silently DROPS the value when a script
+    // writes it, because GDScript types a bare `3000` or `1` as an **Int** —
+    // `light.light_temperature = 3000` and `light.shadow_opacity = 1` are the
+    // natural spellings and both were ignored, leaving the property at its
+    // default with no error. `.tscn` files happen to write `3000.0`, which is
+    // why every scene-loaded test missed it (pat-s3rrv.90).
+    //
+    // Same shape as the readers already used for `pixel_size` and `font_scale`
+    // in this file.
     let num = |key: &str| -> Option<f32> {
         match node.get_property(key) {
             Variant::Float(f) => Some(f as f32),
@@ -3420,7 +3432,8 @@ impl MaterialTextureCache {
         }
         let loaded = Self::load(res_path);
         self.entries.insert(res_path.to_string(), loaded.clone());
-        self.stamps.insert(res_path.to_string(), Self::stamp(res_path));
+        self.stamps
+            .insert(res_path.to_string(), Self::stamp(res_path));
         loaded
     }
 
@@ -3467,7 +3480,8 @@ impl MaterialTextureCache {
             fresh
         });
         let entries = &self.entries;
-        self.channels.retain(|(path, _), _| entries.contains_key(path));
+        self.channels
+            .retain(|(path, _), _| entries.contains_key(path));
     }
 
     fn resolve(res_path: &str) -> Option<std::path::PathBuf> {
@@ -5268,10 +5282,16 @@ mod standard_material_props_tests {
             ("texture_filter", Variant::Int(4)),
             ("texture_repeat", Variant::Bool(false)),
         ]));
-        assert_eq!(m.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+        assert_eq!(
+            m.texture_filter,
+            TextureFilter::NearestWithMipmapsAnisotropic
+        );
         assert!(!m.texture_repeat);
         let r = m.to_material3d();
-        assert_eq!(r.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+        assert_eq!(
+            r.texture_filter,
+            TextureFilter::NearestWithMipmapsAnisotropic
+        );
         assert!(!r.texture_repeat);
     }
 

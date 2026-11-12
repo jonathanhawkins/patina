@@ -103,7 +103,10 @@ fn http_request(port: u16, request: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http_request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+    http_request(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -144,7 +147,10 @@ fn change_type_mutates_scene_tree_class() {
         "/api/node/change_type",
         &format!(r#"{{"node_id":{sub_id},"class_name":"Sprite2D"}}"#),
     );
-    assert!(resp.contains("200 OK"), "change_type should return 200: {resp}");
+    assert!(
+        resp.contains("200 OK"),
+        "change_type should return 200: {resp}"
+    );
 
     // /api/node/<id> now reflects the new class_name.
     let scene: serde_json::Value =

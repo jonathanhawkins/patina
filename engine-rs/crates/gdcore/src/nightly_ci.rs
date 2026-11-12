@@ -384,7 +384,7 @@ impl NightlyRunner {
         self.config
             .platforms
             .iter()
-            .all(|p| self.build_results.get(p).map_or(false, |r| r.success))
+            .all(|p| self.build_results.get(p).is_some_and(|r| r.success))
     }
 
     /// Returns true if all test suites passed.
@@ -392,7 +392,7 @@ impl NightlyRunner {
         self.config
             .suites
             .iter()
-            .all(|s| self.test_results.get(s).map_or(false, |r| r.success))
+            .all(|s| self.test_results.get(s).is_some_and(|r| r.success))
     }
 
     /// Returns true if the entire nightly is green (all builds + all tests).
@@ -470,7 +470,7 @@ impl NightlyRunner {
                 let status = if result.success { "PASS" } else { "FAIL" };
                 let artifact = result
                     .artifact_bytes
-                    .map(|b| format_bytes(b))
+                    .map(format_bytes)
                     .unwrap_or_else(|| "-".to_string());
                 out.push_str(&format!(
                     "{:<20} {:>10} {:>10.1}s {:>10}\n",

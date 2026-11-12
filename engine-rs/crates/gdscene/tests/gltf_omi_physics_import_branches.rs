@@ -29,14 +29,24 @@ fn import(json: &str) -> (SceneTree, NodeId) {
     let scene = gdscene::gltf_scene::packed_scene_from_gltf(&doc).expect("scene");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let id = gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(&mut tree, root, &scene, &|_| None)
-        .expect("instances");
+    let id = gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(
+        &mut tree,
+        root,
+        &scene,
+        &|_| None,
+    )
+    .expect("instances");
     (tree, id)
 }
 
 fn describe(tree: &SceneTree, id: NodeId, depth: usize, out: &mut Vec<String>) {
     let node = tree.get_node(id).unwrap();
-    let mut line = format!("{}{} [{}]", "  ".repeat(depth), node.name(), node.class_name());
+    let mut line = format!(
+        "{}{} [{}]",
+        "  ".repeat(depth),
+        node.name(),
+        node.class_name()
+    );
     if let Variant::String(s) = node.get_property("__shape__class") {
         line += &format!(" {s}");
     }
@@ -115,7 +125,10 @@ OmiTest [Node3D]
     let crate_id = find(&tree, root, "Crate");
     let crate_node = tree.get_node(crate_id).unwrap();
     assert_eq!(crate_node.get_property("mass"), Variant::Float(4.5));
-    assert_eq!(crate_node.get_property("center_of_mass_mode"), Variant::Int(1));
+    assert_eq!(
+        crate_node.get_property("center_of_mass_mode"),
+        Variant::Int(1)
+    );
     let col = tree.get_node(find(&tree, root, "CrateCol")).unwrap();
     match col.get_property("__shape__size") {
         Variant::Vector3(v) => assert_eq!((v.x, v.y, v.z), (2.0, 3.0, 4.0)),

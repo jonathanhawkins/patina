@@ -29,17 +29,26 @@ fn viewport_zoom() {
     // Wheel zoom out (negative delta) decreases the zoom.
     let zoomed_in = cam.zoom_level();
     cam.zoom_at(-1.0, cursor, viewport);
-    assert!(cam.zoom_level() < zoomed_in, "wheel zoom out decreases zoom");
+    assert!(
+        cam.zoom_level() < zoomed_in,
+        "wheel zoom out decreases zoom"
+    );
 
     // Zoom stays within the valid [min, max] range no matter how far it scrolls.
     for _ in 0..400 {
         cam.zoom_at(1.0, cursor, viewport);
     }
-    assert!(cam.zoom_level() <= cam.zoom_max, "zoom clamps to the maximum");
+    assert!(
+        cam.zoom_level() <= cam.zoom_max,
+        "zoom clamps to the maximum"
+    );
     for _ in 0..800 {
         cam.zoom_at(-1.0, cursor, viewport);
     }
-    assert!(cam.zoom_level() >= cam.zoom_min, "zoom clamps to the minimum");
+    assert!(
+        cam.zoom_level() >= cam.zoom_min,
+        "zoom clamps to the minimum"
+    );
 
     // The zoom buttons step in and out by one increment.
     cam.reset();

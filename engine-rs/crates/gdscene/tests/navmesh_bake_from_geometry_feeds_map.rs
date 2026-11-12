@@ -61,7 +61,11 @@ fn navmesh_bake_from_geometry_feeds_map() {
     add_floor_quad(&mut src, 8.0, 12.0, 0.0, 4.0, 0.0);
 
     let baked = bake_navigation_mesh(&corridor_params(), &src);
-    assert_eq!(baked.polygon_count(), 6, "all six flat triangles are walkable");
+    assert_eq!(
+        baked.polygon_count(),
+        6,
+        "all six flat triangles are walkable"
+    );
 
     // The bake emits no connectivity; that is the gap this bead closes.
     let adjacency = baked.compute_adjacency();
@@ -79,8 +83,16 @@ fn navmesh_bake_from_geometry_feeds_map() {
         !path.is_empty(),
         "a baked, connected floor must yield a path end to end"
     );
-    assert_eq!(path.first().copied(), Some(v(0.5, 0.0, 2.0)), "path starts at the origin");
-    assert_eq!(path.last().copied(), Some(v(11.5, 0.0, 2.0)), "path ends at the destination");
+    assert_eq!(
+        path.first().copied(),
+        Some(v(0.5, 0.0, 2.0)),
+        "path starts at the origin"
+    );
+    assert_eq!(
+        path.last().copied(),
+        Some(v(11.5, 0.0, 2.0)),
+        "path ends at the destination"
+    );
     assert!(
         path.len() >= 2,
         "a path across three quads is more than a straight teleport: {path:?}"

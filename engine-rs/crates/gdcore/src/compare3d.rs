@@ -813,7 +813,7 @@ impl AggregateParityReport3D {
         }
 
         let (pass, partial, fail, skipped) = self.verdict_counts();
-        out.push_str(&format!("\n--- Summary ---\n"));
+        out.push_str("\n--- Summary ---\n");
         out.push_str(&format!("Total fixtures: {}\n", self.fixtures.len()));
         out.push_str(&format!("  Pass:    {}\n", pass));
         out.push_str(&format!("  Partial: {}\n", partial));

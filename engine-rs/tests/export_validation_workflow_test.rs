@@ -16,8 +16,8 @@
 //! 7. `validate_artifact_structure` rejects mismatched artifacts.
 
 use gdplatform::ci_artifact::{
-    expected_artifact_extension, validate_artifact_structure,
-    validate_default_cross_platform_plan, validate_plan_cross_platform, CiArtifact, CiArtifactPlan,
+    expected_artifact_extension, validate_artifact_structure, validate_default_cross_platform_plan,
+    validate_plan_cross_platform, CiArtifact, CiArtifactPlan,
 };
 use gdplatform::export::BuildProfile;
 
@@ -40,10 +40,7 @@ fn export_validation_workflow_exists() {
 #[test]
 fn export_validation_workflow_covers_all_three_os() {
     let yaml = read_export_validation_yaml();
-    assert!(
-        yaml.contains("ubuntu-latest"),
-        "workflow must run on Linux"
-    );
+    assert!(yaml.contains("ubuntu-latest"), "workflow must run on Linux");
     assert!(yaml.contains("macos-latest"), "workflow must run on macOS");
     assert!(
         yaml.contains("windows-latest"),

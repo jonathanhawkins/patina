@@ -494,9 +494,16 @@ fn debugger_panel_has_two_column_layout() {
         EDITOR_HTML.matches("class=\"debug-col\"").count() >= 2,
         "the split must have at least two columns (frames | variables)"
     );
-    let frames = EDITOR_HTML.find("id=\"debug-stack-frames\"").expect("stack frames column");
-    let vars = EDITOR_HTML.find("id=\"debug-variables\"").expect("variables column");
-    assert!(frames < vars, "Stack Frames is the LEFT column, as in Godot");
+    let frames = EDITOR_HTML
+        .find("id=\"debug-stack-frames\"")
+        .expect("stack frames column");
+    let vars = EDITOR_HTML
+        .find("id=\"debug-variables\"")
+        .expect("variables column");
+    assert!(
+        frames < vars,
+        "Stack Frames is the LEFT column, as in Godot"
+    );
 }
 
 #[test]

@@ -66,7 +66,10 @@ fn mobs(tree: &SceneTree, main: NodeId) -> Vec<NodeId> {
         .map(|n| n.children().to_vec())
         .unwrap_or_default()
         .into_iter()
-        .filter(|&c| tree.get_node(c).is_some_and(|n| n.class_name() == "RigidBody2D"))
+        .filter(|&c| {
+            tree.get_node(c)
+                .is_some_and(|n| n.class_name() == "RigidBody2D")
+        })
         .collect()
 }
 
@@ -104,13 +107,23 @@ fn seeded_play_spawns_the_first_three_mobs_at_godots_points() {
         let spawned: Vec<NodeId> = after.into_iter().filter(|m| !before.contains(m)).collect();
         assert_eq!(spawned.len(), 1, "spawn #{i}: one mob per timeout");
 
-        let r = float(played.get_node(follow).unwrap().get_property("progress_ratio"));
+        let r = float(
+            played
+                .get_node(follow)
+                .unwrap()
+                .get_property("progress_ratio"),
+        );
         assert!(
             (r - ratio).abs() < 1e-6,
             "spawn #{i}: progress_ratio = randf() must be Godot's {ratio}, got {r} \
              (a different number = the stream, or the constructor draws before it, differ)"
         );
-        let (x, y) = vec2(played.get_node(spawned[0]).unwrap().get_property("position"));
+        let (x, y) = vec2(
+            played
+                .get_node(spawned[0])
+                .unwrap()
+                .get_property("position"),
+        );
         assert!(
             (x - gx).abs() < 1e-3 && (y - gy).abs() < 1e-3,
             "spawn #{i}: the mob must start where Godot's did, ({gx}, {gy}), got ({x}, {y}) — \

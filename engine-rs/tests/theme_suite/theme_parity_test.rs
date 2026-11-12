@@ -194,12 +194,7 @@ fn theme_resource_item_category_type_is_discriminant() {
     // An item stored under ThemePropertyType::Font must not be visible
     // through a lookup under ThemePropertyType::Stylebox.
     let mut theme = Theme::new("discriminant");
-    theme.set_item(
-        ThemePropertyType::Font,
-        "Label",
-        "shared",
-        Variant::Int(1),
-    );
+    theme.set_item(ThemePropertyType::Font, "Label", "shared", Variant::Int(1));
     assert!(theme.has_item(ThemePropertyType::Font, "Label", "shared"));
     assert!(!theme.has_item(ThemePropertyType::Stylebox, "Label", "shared"));
 }

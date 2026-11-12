@@ -44,11 +44,7 @@ fn http_get_body(port: u16, path: &str) -> String {
     stream.write_all(req.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).ok();
-    response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string()
+    response.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
 #[test]
@@ -66,7 +62,11 @@ fn capabilities_returns_well_formed_deterministic_schema() {
 
     let v: serde_json::Value =
         serde_json::from_str(&body1).expect("capabilities body must be valid JSON");
-    assert_eq!(v["version"], serde_json::json!(1), "schema version must be 1");
+    assert_eq!(
+        v["version"],
+        serde_json::json!(1),
+        "schema version must be 1"
+    );
     let routes = v["routes"]
         .as_array()
         .expect("`routes` must be a JSON array");

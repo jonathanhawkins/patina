@@ -491,7 +491,10 @@ mod tests {
         // had somewhere to be reported — 0.5 s at 10 fps steps 0->1->2->3, wraps to
         // 0 and lands on 1 — and nothing checked the new field. Without this, the
         // struct's whole reason for existing is untested.
-        assert!(finished.looped, "a looping clip that wrapped must report it");
+        assert!(
+            finished.looped,
+            "a looping clip that wrapped must report it"
+        );
         assert!(pb.playing, "looping animation keeps playing");
         assert_eq!(pb.frame, 1);
     }

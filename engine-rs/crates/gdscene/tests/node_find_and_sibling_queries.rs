@@ -36,7 +36,8 @@ fn node_find_and_sibling_queries() {
 
     // The type filter excludes non-matching classes.
     assert!(
-        tree.find_children(root, "*", Some("Camera3D"), true).is_empty(),
+        tree.find_children(root, "*", Some("Camera3D"), true)
+            .is_empty(),
         "no Camera3D descendants"
     );
 

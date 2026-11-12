@@ -162,7 +162,10 @@ fn normalize_golden(snapshot_json: &serde_json::Value) -> Option<DomNode> {
     // `minimal_3d.json` is one. Read the nodes from inside it.
     let (arr, flat) = match snapshot_json.get("nodes") {
         Some(n) => (n.as_array()?.clone(), false),
-        None => (snapshot_json.get("data")?.get("nodes")?.as_array()?.clone(), true),
+        None => (
+            snapshot_json.get("data")?.get("nodes")?.as_array()?.clone(),
+            true,
+        ),
     };
     let arr = if flat { nest_flat_golden(&arr) } else { arr };
     let scene_root = arr.first()?;
@@ -240,8 +243,7 @@ fn editor_scene_tree_dom_parity_across_five_reference_scenes() {
         );
 
         // Load the scene into the editor.
-        let body =
-            serde_json::json!({ "path": scene_path.to_string_lossy() }).to_string();
+        let body = serde_json::json!({ "path": scene_path.to_string_lossy() }).to_string();
         let load_resp = http_post(port, "/api/scene/load", &body);
         let load_status = status_code(&load_resp);
         if load_status != 200 {

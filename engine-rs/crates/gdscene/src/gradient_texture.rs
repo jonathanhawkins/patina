@@ -52,7 +52,7 @@ pub fn descriptor(
     let (offsets, colors, interp) = match gradient {
         Some(g) => {
             let offsets: Vec<f32> = match g.get("offsets") {
-                Some(Variant::PackedFloat32Array(o)) => o.iter().copied().collect(),
+                Some(Variant::PackedFloat32Array(o)) => o.to_vec(),
                 _ => vec![0.0, 1.0],
             };
             let colors: Vec<f32> = match g.get("colors") {
@@ -61,9 +61,17 @@ pub fn descriptor(
                 }
                 _ => vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             };
-            (offsets, colors, num(g.get("interpolation_mode"), 0.0) as i64)
+            (
+                offsets,
+                colors,
+                num(g.get("interpolation_mode"), 0.0) as i64,
+            )
         }
-        None => (vec![0.0, 1.0], vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0], 0),
+        None => (
+            vec![0.0, 1.0],
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            0,
+        ),
     };
     let join = |v: &[f32]| {
         v.iter()
@@ -102,7 +110,10 @@ fn gradient_at(offsets: &[f32], colors: &[Color], interp: i64, t: f32) -> Color 
     if t >= offsets[last] {
         return colors[last];
     }
-    let i = offsets.windows(2).position(|w| t >= w[0] && t < w[1]).unwrap_or(0);
+    let i = offsets
+        .windows(2)
+        .position(|w| t >= w[0] && t < w[1])
+        .unwrap_or(0);
     let span = (offsets[i + 1] - offsets[i]).max(1e-6);
     let f = (t - offsets[i]) / span;
     match interp {
@@ -149,7 +160,11 @@ pub fn generate(descriptor: &str) -> Option<(u32, u32, Vec<Color>)> {
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return None;
     }
-    let (fill, repeat, interp) = (one("fill")? as i64, one("repeat")? as i64, one("interp")? as i64);
+    let (fill, repeat, interp) = (
+        one("fill")? as i64,
+        one("repeat")? as i64,
+        one("interp")? as i64,
+    );
     let (from, to) = (nums("from"), nums("to"));
     let (from, to) = (
         Vector2::new(*from.first()?, *from.get(1)?),

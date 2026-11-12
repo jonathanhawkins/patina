@@ -30,12 +30,18 @@ fn a_tone_minutes_in_is_as_smooth_as_at_the_start() {
     let src_rate = 44_100u32;
     let secs = 240usize;
     let samples: Vec<f32> = (0..src_rate as usize * secs)
-        .map(|i| (std::f64::consts::TAU * 440.0 * i as f64 / f64::from(src_rate)).sin() as f32 * 0.5)
+        .map(|i| {
+            (std::f64::consts::TAU * 440.0 * i as f64 / f64::from(src_rate)).sin() as f32 * 0.5
+        })
         .collect();
     let mut server = AudioServer::new();
     server.set_output_sample_rate(48_000);
     server.set_output_channels(1);
-    server.play(AudioBuffer { samples, sample_rate: src_rate, channels: 1 });
+    server.play(AudioBuffer {
+        samples,
+        sample_rate: src_rate,
+        channels: 1,
+    });
 
     // The game's own block size: one 60 Hz frame at 48 kHz.
     let mut out = Vec::new();
@@ -73,8 +79,14 @@ fn a_jittery_sixty_hz_producer_never_starves_the_device() {
             consumed += 512.0 / f64::from(rate);
         }
     }
-    assert_eq!(ring.underruns, 0, "a steady producer must never leave a gap");
-    assert!(ring.frames_consumed > 48_000 * 19, "the device actually played");
+    assert_eq!(
+        ring.underruns, 0,
+        "a steady producer must never leave a gap"
+    );
+    assert!(
+        ring.frames_consumed > 48_000 * 19,
+        "the device actually played"
+    );
 }
 
 #[test]
@@ -82,13 +94,23 @@ fn the_backlog_is_bounded_and_whole_frames_are_dropped() {
     let (rate, ch) = (48_000u32, 2u16);
     let mut ring = SharedRing::default();
     // Interleaved L=1, R=-1, so a channel swap would be visible.
-    let block: Vec<f32> = (0..2000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    let block: Vec<f32> = (0..2000)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
     for _ in 0..100 {
         ring.push(&block, rate, ch);
     }
     let cap = (gdaudio::output::MAX_BACKLOG_SECS * rate as f32) as usize * ch as usize;
-    assert!(ring.samples.len() <= cap, "queued {} > cap {cap}", ring.samples.len());
-    assert_eq!(ring.samples.front(), Some(&1.0), "the queue still starts on a LEFT sample");
+    assert!(
+        ring.samples.len() <= cap,
+        "queued {} > cap {cap}",
+        ring.samples.len()
+    );
+    assert_eq!(
+        ring.samples.front(),
+        Some(&1.0),
+        "the queue still starts on a LEFT sample"
+    );
 }
 
 #[test]

@@ -11,10 +11,14 @@
 
 use std::fs;
 
-const AUDIT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../prd/PHASE6_3D_PARITY_AUDIT.md");
-const PARITY_REPORT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/3D_DEMO_PARITY_REPORT.md");
+const AUDIT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../prd/PHASE6_3D_PARITY_AUDIT.md"
+);
+const PARITY_REPORT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/3D_DEMO_PARITY_REPORT.md"
+);
 const MIGRATION_GUIDE_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/migration-guide.md");
 
@@ -23,7 +27,9 @@ fn read_file(path: &str) -> String {
 }
 
 fn extract_matrix_section(doc: &str, header: &str) -> String {
-    let start = doc.find(header).unwrap_or_else(|| panic!("section '{header}' must exist"));
+    let start = doc
+        .find(header)
+        .unwrap_or_else(|| panic!("section '{header}' must exist"));
     let rest = &doc[start + header.len()..];
     let end = rest
         .find("\n### ")
@@ -82,8 +88,14 @@ fn query_params_and_cast_nodes_are_separate_rows() {
     let raycast = find_matrix_row(&section, "RayCast3D");
     let shapecast = find_matrix_row(&section, "ShapeCast3D");
 
-    assert!(ray_query.is_some(), "PhysicsRayQueryParameters3D must have its own row");
-    assert!(shape_query.is_some(), "PhysicsShapeQueryParameters3D must have its own row");
+    assert!(
+        ray_query.is_some(),
+        "PhysicsRayQueryParameters3D must have its own row"
+    );
+    assert!(
+        shape_query.is_some(),
+        "PhysicsShapeQueryParameters3D must have its own row"
+    );
     assert!(raycast.is_some(), "RayCast3D must have its own row");
     assert!(shapecast.is_some(), "ShapeCast3D must have its own row");
 }

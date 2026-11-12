@@ -631,8 +631,18 @@ fn godot_default_styleboxes(theme: &mut Theme) {
         theme.set_stylebox(class, name, sb);
     };
     // Panel / PanelContainer: `make_flat_stylebox(style_normal_color, 0, 0, 0, 0)`.
-    set(theme, "Panel", "panel", flat(normal, 0.0, DEFAULT_CORNER_RADIUS));
-    set(theme, "PanelContainer", "panel", flat(normal, 0.0, DEFAULT_CORNER_RADIUS));
+    set(
+        theme,
+        "Panel",
+        "panel",
+        flat(normal, 0.0, DEFAULT_CORNER_RADIUS),
+    );
+    set(
+        theme,
+        "PanelContainer",
+        "panel",
+        flat(normal, 0.0, DEFAULT_CORNER_RADIUS),
+    );
     // Button: `make_flat_stylebox(<state colour>)`, margins 4.
     for (name, bg) in [
         ("normal", normal),
@@ -640,7 +650,12 @@ fn godot_default_styleboxes(theme: &mut Theme) {
         ("pressed", pressed),
         ("disabled", disabled),
     ] {
-        set(theme, "Button", name, flat(bg, DEFAULT_CONTENT_MARGIN, DEFAULT_CORNER_RADIUS));
+        set(
+            theme,
+            "Button",
+            name,
+            flat(bg, DEFAULT_CONTENT_MARGIN, DEFAULT_CORNER_RADIUS),
+        );
     }
     // Button focus: no fill, a 2px `style_focus_color` border, expanded 2px
     // so it sits flush OUTSIDE the button (`focus->set_expand_margin_all(2)`).
@@ -672,13 +687,22 @@ fn godot_default_styleboxes(theme: &mut Theme) {
         );
     }
     theme.set_constant("CheckBox", "h_separation", 4);
-    theme.set_color("CheckBox", "font_color", Color::new(0.875, 0.875, 0.875, 1.0));
+    theme.set_color(
+        "CheckBox",
+        "font_color",
+        Color::new(0.875, 0.875, 0.875, 1.0),
+    );
     theme.set_color("CheckBox", "font_pressed_color", Color::WHITE);
     // Sliders: `make_flat_stylebox(colour, 4, 4, 4, 4, 4)`.
     for class in ["HSlider", "VSlider"] {
         set(theme, class, "slider", flat(normal, 4.0, 4.0));
         set(theme, class, "grabber_area", flat(progress, 4.0, 4.0));
-        set(theme, class, "grabber_area_highlight", flat(focus, 4.0, 4.0));
+        set(
+            theme,
+            class,
+            "grabber_area_highlight",
+            flat(focus, 4.0, 4.0),
+        );
     }
 }
 

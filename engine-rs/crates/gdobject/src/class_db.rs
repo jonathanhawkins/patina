@@ -895,8 +895,7 @@ pub fn property_can_revert(class_name: &str, property: &str) -> bool {
 pub fn property_get_revert(class_name: &str, property: &str) -> Option<Variant> {
     get_property_list(class_name)
         .into_iter()
-        .filter(|p| p.name == property)
-        .next_back()
+        .rfind(|p| p.name == property)
         .map(|p| p.default_value)
 }
 
@@ -1109,8 +1108,7 @@ pub fn get_property_getter(class_name: &str, property: &str) -> String {
     // answer with the base's accessor whenever a subclass overrides one.
     get_property_list(class_name)
         .into_iter()
-        .filter(|p| p.name == property)
-        .next_back()
+        .rfind(|p| p.name == property)
         .map(|p| p.getter)
         .unwrap_or_default()
 }
@@ -1121,8 +1119,7 @@ pub fn get_property_setter(class_name: &str, property: &str) -> String {
     // Most-derived declaration wins; see [`get_property_getter`].
     get_property_list(class_name)
         .into_iter()
-        .filter(|p| p.name == property)
-        .next_back()
+        .rfind(|p| p.name == property)
         .map(|p| p.setter)
         .unwrap_or_default()
 }
@@ -1861,6 +1858,12 @@ fn register_joint_3d_classes() {
     }
     register_class(g6dof);
 }
+
+/// Godot's `floor_max_angle` default exactly as its docs print it (45 degrees,
+/// rounded to six places) — deliberately NOT `FRAC_PI_4`, so the declared
+/// default stays byte-identical to the reference.
+#[allow(clippy::approx_constant)]
+const FLOOR_MAX_ANGLE_DEFAULT: f64 = 0.785398;
 
 pub fn register_3d_classes() {
     use gdcore::math::Vector3;
@@ -3401,7 +3404,7 @@ pub fn register_3d_classes() {
                     .with_accessors("get_velocity", "set_velocity"),
             )
             .property(
-                PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))
+                PropertyInfo::new("floor_max_angle", Variant::Float(FLOOR_MAX_ANGLE_DEFAULT))
                     .with_accessors("get_floor_max_angle", "set_floor_max_angle"),
             )
             .property(
@@ -10546,7 +10549,8 @@ pub fn register_3d_classes() {
             // Godot's one member (doc/classes/ShaderMaterial.xml), backed by
             // the interpreter's `set_shader` / `get_shader` resource arms.
             .property(
-                PropertyInfo::new("shader", Variant::Nil).with_accessors("get_shader", "set_shader"),
+                PropertyInfo::new("shader", Variant::Nil)
+                    .with_accessors("get_shader", "set_shader"),
             )
             .method(MethodInfo::new("set_shader", 1))
             .method(MethodInfo::new("get_shader", 0))
@@ -19674,9 +19678,12 @@ pub fn register_2d_classes() {
                         )])
                         .returns(Variant::Bool(false)),
                 )
-                .method(MethodInfo::new("grab_focus", 1).with_arguments(vec![
-                    PropertyInfo::new("hide_focus", Variant::Bool(false)),
-                ]))
+                .method(
+                    MethodInfo::new("grab_focus", 1).with_arguments(vec![PropertyInfo::new(
+                        "hide_focus",
+                        Variant::Bool(false),
+                    )]),
+                )
                 .method(MethodInfo::new("release_focus", 0))
                 // Godot's 11 Control virtuals (`doc/classes/Control.xml`).
                 // `_gui_input` is the one every UI script overrides and ClassDB
@@ -21441,7 +21448,7 @@ pub fn register_2d_classes() {
                         .with_accessors("get_velocity", "set_velocity"),
                 )
                 .property(
-                    PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))
+                    PropertyInfo::new("floor_max_angle", Variant::Float(FLOOR_MAX_ANGLE_DEFAULT))
                         .with_accessors("get_floor_max_angle", "set_floor_max_angle"),
                 )
                 // pat-s3rrv.25 — motion_mode alone switches move_and_slide between grounded and floating, so a .tscn authoring it was silently ignored.
@@ -35153,8 +35160,22 @@ mod tests {
     fn parent_class_mask_agrees_with_is_parent_class() {
         let _g = setup();
         register_3d_classes();
-        let parents = ["Node3D", "Decal", "VisualInstance3D", "Node", "Control", "NoSuchClass"];
-        for child in ["Decal", "MeshInstance3D", "Node3D", "ReflectionProbe", "Label", "NoSuchClass"] {
+        let parents = [
+            "Node3D",
+            "Decal",
+            "VisualInstance3D",
+            "Node",
+            "Control",
+            "NoSuchClass",
+        ];
+        for child in [
+            "Decal",
+            "MeshInstance3D",
+            "Node3D",
+            "ReflectionProbe",
+            "Label",
+            "NoSuchClass",
+        ] {
             let mask = parent_class_mask(child, &parents);
             for (i, p) in parents.iter().enumerate() {
                 assert_eq!(
@@ -35165,7 +35186,11 @@ mod tests {
             }
         }
         assert_eq!(parent_class_mask("Decal", &["Decal", "Node3D"]), 0b11);
-        assert_eq!(parent_class_mask("NoSuchClass", &["NoSuchClass"]), 0, "an unregistered class has no chain");
+        assert_eq!(
+            parent_class_mask("NoSuchClass", &["NoSuchClass"]),
+            0,
+            "an unregistered class has no chain"
+        );
     }
 
     /// pat-rzs4o: NavigationAgent2D/3D must be registered for scene load / create dialog.

@@ -89,7 +89,10 @@ fn dialog_response(port: u16, body: &str) -> serde_json::Value {
 }
 
 /// Finds a node by class name in the serialized Matches tree.
-fn find_in_tree<'a>(node: &'a serde_json::Value, class_name: &str) -> Option<&'a serde_json::Value> {
+fn find_in_tree<'a>(
+    node: &'a serde_json::Value,
+    class_name: &str,
+) -> Option<&'a serde_json::Value> {
     if node["class_name"] == class_name {
         return Some(node);
     }
@@ -123,7 +126,12 @@ fn abstract_classes_greyed_and_not_creatable() {
     let tree = &v["tree"];
     // Abstract bases render greyed (instantiable=false) like Godot's
     // font_disabled_color rows.
-    for abstract_class in ["CanvasItem", "PhysicsBody2D", "CollisionObject3D", "Light3D"] {
+    for abstract_class in [
+        "CanvasItem",
+        "PhysicsBody2D",
+        "CollisionObject3D",
+        "Light3D",
+    ] {
         let node = find_in_tree(tree, abstract_class)
             .unwrap_or_else(|| panic!("{abstract_class} must appear in tree"));
         assert_eq!(
@@ -134,7 +142,10 @@ fn abstract_classes_greyed_and_not_creatable() {
     // Concrete classes are creatable.
     for concrete in ["Node", "Sprite2D", "StaticBody2D", "DirectionalLight3D"] {
         let node = find_in_tree(tree, concrete).expect("concrete class in tree");
-        assert_eq!(node["instantiable"], true, "{concrete} must be instantiable");
+        assert_eq!(
+            node["instantiable"], true,
+            "{concrete} must be instantiable"
+        );
     }
     // Abstract classes never appear in the flat candidate list.
     let classes = v["classes"].as_array().unwrap();
@@ -173,7 +184,10 @@ fn search_mesh_matches_and_auto_selects_meshinstance3d() {
     // no preference MeshInstance2D legitimately wins; a 3D scene (preferred
     // Node3D) is what makes MeshInstance3D the auto-selection.
     let v2d = dialog_response(port, r#"{"search":"mesh","base_class":"Node"}"#);
-    assert_eq!(v2d["best_match"], "MeshInstance2D", "tie breaks alphabetically");
+    assert_eq!(
+        v2d["best_match"], "MeshInstance2D",
+        "tie breaks alphabetically"
+    );
 
     let v = dialog_response(
         port,
@@ -213,7 +227,10 @@ fn search_light_keeps_abstract_parent_as_grey_ancestor() {
     let light = find_in_tree(tree, "Light3D").expect("Light3D ancestor retained");
     // Light3D itself matches the text but is abstract → shown only as a
     // non-matching, non-instantiable ancestor.
-    assert_eq!(light["matched"], false, "abstract Light3D is not a candidate");
+    assert_eq!(
+        light["matched"], false,
+        "abstract Light3D is not a candidate"
+    );
     assert_eq!(light["instantiable"], false);
     let dir = find_in_tree(tree, "DirectionalLight3D").expect("DirectionalLight3D");
     assert_eq!(dir["matched"], true);
@@ -297,11 +314,19 @@ fn favorite_toggle_roundtrip() {
     )))
     .unwrap();
     assert_eq!(v["is_favorite"], true);
-    assert!(v["favorites"].as_array().unwrap().iter().any(|f| f == "Camera2D"));
+    assert!(v["favorites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f == "Camera2D"));
 
     // Dialog reflects the new favorite.
     let v = dialog_response(port, r#"{"search":"","base_class":"Node"}"#);
-    assert!(v["favorites"].as_array().unwrap().iter().any(|f| f == "Camera2D"));
+    assert!(v["favorites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f == "Camera2D"));
 
     // Toggling again removes it.
     let v: serde_json::Value = serde_json::from_str(extract_body(&http_post(
@@ -311,7 +336,11 @@ fn favorite_toggle_roundtrip() {
     )))
     .unwrap();
     assert_eq!(v["is_favorite"], false);
-    assert!(!v["favorites"].as_array().unwrap().iter().any(|f| f == "Camera2D"));
+    assert!(!v["favorites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f == "Camera2D"));
     handle.stop();
 }
 
@@ -350,7 +379,10 @@ fn node_add_records_recent_like_godot_confirm() {
 
     let v = dialog_response(port, r#"{"search":"","base_class":"Node"}"#);
     let recent = v["recent"].as_array().unwrap();
-    assert!(!recent.is_empty(), "recent must not be empty after a create");
+    assert!(
+        !recent.is_empty(),
+        "recent must not be empty after a create"
+    );
     assert_eq!(
         recent[0]["class_name"], "Camera2D",
         "most recent create must be first"
@@ -376,8 +408,17 @@ fn editor_html_has_godot_dialog_structure() {
     ] {
         assert!(html.contains(id), "EDITOR_HTML missing {id}");
     }
-    for label in ["Favorites:", "Recent:", "Search:", "Matches:", "Description:"] {
-        assert!(html.contains(label), "EDITOR_HTML missing pane label {label}");
+    for label in [
+        "Favorites:",
+        "Recent:",
+        "Search:",
+        "Matches:",
+        "Description:",
+    ] {
+        assert!(
+            html.contains(label),
+            "EDITOR_HTML missing pane label {label}"
+        );
     }
     assert!(html.contains("Create New Node"));
 }

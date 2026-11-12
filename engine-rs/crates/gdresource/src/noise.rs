@@ -613,7 +613,9 @@ fn single_perlin_2d(seed: i32, x: f32, y: f32) -> f32 {
 
     // Gradients have length 1 or √2; the interpolated dot stays within ~±0.71,
     // so scale up to fill [-1, 1] (final clamp guards the rare extreme).
-    lerp(xf0, xf1, ys) * 1.4142135
+    #[allow(clippy::approx_constant)] // the literal FastNoiseLite uses; kept bit-exact
+    let scale = 1.4142135;
+    lerp(xf0, xf1, ys) * scale
 }
 
 fn single_perlin_3d(seed: i32, x: f32, y: f32, z: f32) -> f32 {

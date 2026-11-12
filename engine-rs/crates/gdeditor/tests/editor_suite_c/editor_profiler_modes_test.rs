@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,7 +54,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -78,29 +85,56 @@ fn profiler_modes_and_capture() {
     assert_eq!(prof["capturing"], serde_json::json!(true));
     assert_eq!(prof["count"], serde_json::json!(1));
     let frame = &prof["frames"][0];
-    assert_eq!(frame["physics_ms"], serde_json::json!(4.0), "physics time captured for Physics Frame %");
+    assert_eq!(
+        frame["physics_ms"],
+        serde_json::json!(4.0),
+        "physics time captured for Physics Frame %"
+    );
     let func = &frame["functions"][0];
     assert_eq!(func["name"], serde_json::json!("physics_step"));
     assert_eq!(func["time_ms"], serde_json::json!(5.0), "inclusive time");
-    assert_eq!(func["self_ms"], serde_json::json!(3.0), "self time (Time: Self mode)");
-    assert_eq!(func["calls"], serde_json::json!(2), "call count (Calls column)");
+    assert_eq!(
+        func["self_ms"],
+        serde_json::json!(3.0),
+        "self time (Time: Self mode)"
+    );
+    assert_eq!(
+        func["calls"],
+        serde_json::json!(2),
+        "call count (Calls column)"
+    );
 
     // Clear empties the captured frames.
     assert!(http_post(port, "/api/profiler/clear", "{}").contains("200 OK"));
-    assert_eq!(body_json(&http_get(port, "/api/profiler"))["count"], serde_json::json!(0));
+    assert_eq!(
+        body_json(&http_get(port, "/api/profiler"))["count"],
+        serde_json::json!(0)
+    );
 
     // Stop ends capture.
-    assert_eq!(body_json(&http_post(port, "/api/profiler/stop", "{}"))["capturing"], serde_json::json!(false));
-    assert_eq!(body_json(&http_get(port, "/api/profiler"))["capturing"], serde_json::json!(false));
+    assert_eq!(
+        body_json(&http_post(port, "/api/profiler/stop", "{}"))["capturing"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        body_json(&http_get(port, "/api/profiler"))["capturing"],
+        serde_json::json!(false)
+    );
 
     // The served panel wires the measure/time modes + frame scrub.
     let html = http_get(port, "/editor");
     for needle in [
-        "id=\"profiler-measure\"", "Average Time (ms)", "Frame %", "Physics Frame %",
-        "id=\"profiler-time\"", ">Inclusive<", ">Self<",
+        "id=\"profiler-measure\"",
+        "Average Time (ms)",
+        "Frame %",
+        "Physics Frame %",
+        "id=\"profiler-time\"",
+        ">Inclusive<",
+        ">Self<",
         "id=\"profiler-frame\"",
         "function renderProfilerTree", // recompute from cached capture
-        "/api/profiler/start", "/api/profiler/clear",
+        "/api/profiler/start",
+        "/api/profiler/clear",
     ] {
         assert!(html.contains(needle), "profiler panel missing `{needle}`");
     }

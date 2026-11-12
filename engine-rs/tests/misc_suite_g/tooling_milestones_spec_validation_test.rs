@@ -21,12 +21,14 @@ fn workspace_root() -> PathBuf {
 
 fn read_spec() -> String {
     let path = workspace_root().join("../prd/TOOLING_MILESTONES_SPEC.md");
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("prd/TOOLING_MILESTONES_SPEC.md must exist: {e}"))
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("prd/TOOLING_MILESTONES_SPEC.md must exist: {e}"))
 }
 
 fn read_audit() -> String {
     let path = workspace_root().join("../prd/PHASE8_EDITOR_PARITY_AUDIT.md");
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("prd/PHASE8_EDITOR_PARITY_AUDIT.md must exist: {e}"))
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("prd/PHASE8_EDITOR_PARITY_AUDIT.md must exist: {e}"))
 }
 
 // ===========================================================================
@@ -108,9 +110,9 @@ fn each_milestone_cites_exit_evidence() {
 
     for i in 1..=16 {
         let heading = format!("### Milestone {i}:");
-        let start = spec.find(&heading).unwrap_or_else(|| {
-            panic!("spec must contain {heading}")
-        });
+        let start = spec
+            .find(&heading)
+            .unwrap_or_else(|| panic!("spec must contain {heading}"));
 
         // Find the section for this milestone (up to the next ### or ## heading)
         let section_start = start;

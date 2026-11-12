@@ -68,13 +68,19 @@ fn a_material_texture_is_decoded_once_and_again_only_when_its_file_changes() {
         Arc::ptr_eq(&first, &second),
         "the second frame must reuse the decoded texture, not decode the file again"
     );
-    assert!(first.pixels[0].r > 0.9 && first.pixels[0].g < 0.1, "fixture: red texture");
+    assert!(
+        first.pixels[0].r > 0.9 && first.pixels[0].g < 0.1,
+        "fixture: red texture"
+    );
 
     // Rewrite the file (with a different mtime): the next frame decodes it.
     std::thread::sleep(std::time::Duration::from_millis(20));
     write_png(&png, [0, 0, 255]);
     let third = albedo_texture(&vp.build_render_list(&tree));
-    assert!(!Arc::ptr_eq(&first, &third), "a changed file must be decoded again");
+    assert!(
+        !Arc::ptr_eq(&first, &third),
+        "a changed file must be decoded again"
+    );
     assert!(
         third.pixels[0].b > 0.9 && third.pixels[0].r < 0.1,
         "the re-decoded texture must have the new pixels: {:?}",
@@ -94,21 +100,42 @@ fn label3d_text_is_rasterized_once_per_distinct_label() {
     let id = tree
         .all_nodes_in_tree_order()
         .into_iter()
-        .find(|&n| tree.get_node(n).map(|x| x.name() == "Label").unwrap_or(false))
+        .find(|&n| {
+            tree.get_node(n)
+                .map(|x| x.name() == "Label")
+                .unwrap_or(false)
+        })
         .unwrap();
-    let a = gdeditor::sprite3d_render::label3d_geometry(&tree, id).unwrap().1;
-    let b = gdeditor::sprite3d_render::label3d_geometry(&tree, id).unwrap().1;
+    let a = gdeditor::sprite3d_render::label3d_geometry(&tree, id)
+        .unwrap()
+        .1;
+    let b = gdeditor::sprite3d_render::label3d_geometry(&tree, id)
+        .unwrap()
+        .1;
     let (ta, tb) = (a.albedo_texture.unwrap(), b.albedo_texture.unwrap());
-    assert!(Arc::ptr_eq(&ta, &tb), "an unchanged Label3D must reuse its text texture");
+    assert!(
+        Arc::ptr_eq(&ta, &tb),
+        "an unchanged Label3D must reuse its text texture"
+    );
 
     let other = load(&scene("Different"));
     let oid = other
         .all_nodes_in_tree_order()
         .into_iter()
-        .find(|&n| other.get_node(n).map(|x| x.name() == "Label").unwrap_or(false))
+        .find(|&n| {
+            other
+                .get_node(n)
+                .map(|x| x.name() == "Label")
+                .unwrap_or(false)
+        })
         .unwrap();
-    let c = gdeditor::sprite3d_render::label3d_geometry(&other, oid).unwrap().1;
+    let c = gdeditor::sprite3d_render::label3d_geometry(&other, oid)
+        .unwrap()
+        .1;
     let tc = c.albedo_texture.unwrap();
-    assert!(!Arc::ptr_eq(&ta, &tc), "different text must rasterize its own texture");
+    assert!(
+        !Arc::ptr_eq(&ta, &tc),
+        "different text must rasterize its own texture"
+    );
     assert_ne!((ta.width, ta.height), (tc.width, tc.height));
 }

@@ -58,7 +58,13 @@ fn stylebox_flat_draws_borders_and_corners() {
 
     let mut renderer = SoftwareRenderer::new();
     let mut vp = Viewport::new(100, 100, Color::BLACK);
-    render_control_tree(&mut tree, panel, &theme, &mut vp, Vector2::new(100.0, 100.0));
+    render_control_tree(
+        &mut tree,
+        panel,
+        &theme,
+        &mut vp,
+        Vector2::new(100.0, 100.0),
+    );
     let fb = capture_frame(&mut renderer, &vp);
 
     // Fill color shows through the interior.
@@ -110,7 +116,10 @@ fn stylebox_texture_button_nine_patch() {
     let mut renderer = SoftwareRenderer::new();
     // 16x16 texture so the nine-patch center source region (16-4-4=8px) is
     // non-empty with 4px margins.
-    renderer.register_texture("btn.png", Texture2D::solid(16, 16, Color::rgb(0.0, 0.8, 0.2)));
+    renderer.register_texture(
+        "btn.png",
+        Texture2D::solid(16, 16, Color::rgb(0.0, 0.8, 0.2)),
+    );
     let mut vp = Viewport::new(64, 64, Color::BLACK);
     render_control_tree(&mut tree, button, &theme, &mut vp, Vector2::new(64.0, 64.0));
     let fb = capture_frame(&mut renderer, &vp);

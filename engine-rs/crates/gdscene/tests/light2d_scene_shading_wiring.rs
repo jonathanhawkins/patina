@@ -68,12 +68,18 @@ fn light2d_scene_shading_wiring() {
         shadowed.r
     );
     // Before the tint the lit pixel still carries green/blue (white × light).
-    assert!(lit.g > 0.05 && lit.b > 0.05, "pre-tint lit pixel keeps g/b, got {lit:?}");
+    assert!(
+        lit.g > 0.05 && lit.b > 0.05,
+        "pre-tint lit pixel keeps g/b, got {lit:?}"
+    );
 
     // (b) CanvasModulate red is collected and multiplies the whole canvas,
     // zeroing green/blue while preserving the (lit) red channel.
     let modulate = collect_canvas_modulate(&tree).expect("CanvasModulate color collected");
-    assert!(modulate.r > 0.9 && modulate.g < 0.1 && modulate.b < 0.1, "collected red modulate");
+    assert!(
+        modulate.r > 0.9 && modulate.g < 0.1 && modulate.b < 0.1,
+        "collected red modulate"
+    );
     apply_canvas_modulate(&mut fb, modulate);
 
     let tinted = fb.get_pixel(50, 30);

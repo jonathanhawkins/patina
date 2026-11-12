@@ -13,17 +13,17 @@ use gdrender3d::test_adapter::{
     count_visible_pixels, frame_data_to_buffer_3d, save_ppm_3d,
 };
 use gdrender3d::SoftwareRenderer3D;
-use gdserver3d::material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
-use gdvariant::Variant;
 use gdserver3d::environment::{BackgroundMode, Environment3D};
+use gdserver3d::material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
 use gdserver3d::mesh::Mesh3D;
-use gdserver3d::server::RenderingServer3D;
-use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, Sky, SkyMaterial};
 use gdserver3d::reflection_probe::{
     ReflectionProbe, ReflectionProbeAmbientMode, ReflectionProbeId,
 };
+use gdserver3d::server::RenderingServer3D;
+use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, Sky, SkyMaterial};
 use gdserver3d::sprite3d::{BillboardMode3D, Sprite3D};
 use gdserver3d::viewport::Viewport3D;
+use gdvariant::Variant;
 
 const W: u32 = 64;
 const H: u32 = 64;
@@ -346,15 +346,25 @@ fn sprite3d_approx_eq(a: f32, b: f32) -> bool {
 }
 
 fn sprite3d_v3_approx_eq(a: Vector3, b: Vector3) -> bool {
-    sprite3d_approx_eq(a.x, b.x)
-        && sprite3d_approx_eq(a.y, b.y)
-        && sprite3d_approx_eq(a.z, b.z)
+    sprite3d_approx_eq(a.x, b.x) && sprite3d_approx_eq(a.y, b.y) && sprite3d_approx_eq(a.z, b.z)
 }
 
 fn assert_basis_orthonormal(b: Basis) {
-    assert!(sprite3d_approx_eq(b.x.length(), 1.0), "x not unit: {:?}", b.x);
-    assert!(sprite3d_approx_eq(b.y.length(), 1.0), "y not unit: {:?}", b.y);
-    assert!(sprite3d_approx_eq(b.z.length(), 1.0), "z not unit: {:?}", b.z);
+    assert!(
+        sprite3d_approx_eq(b.x.length(), 1.0),
+        "x not unit: {:?}",
+        b.x
+    );
+    assert!(
+        sprite3d_approx_eq(b.y.length(), 1.0),
+        "y not unit: {:?}",
+        b.y
+    );
+    assert!(
+        sprite3d_approx_eq(b.z.length(), 1.0),
+        "z not unit: {:?}",
+        b.z
+    );
     assert!(sprite3d_approx_eq(b.x.dot(b.y), 0.0), "x·y != 0");
     assert!(sprite3d_approx_eq(b.x.dot(b.z), 0.0), "x·z != 0");
     assert!(sprite3d_approx_eq(b.y.dot(b.z), 0.0), "y·z != 0");
@@ -787,11 +797,7 @@ fn world_environment_sky_physical_produces_non_black() {
     renderer.add_light(sun.id);
     renderer.update_light(&sun);
     let fb = capture_frame_3d(&mut renderer, &vp);
-    let nonzero = fb
-        .pixels
-        .iter()
-        .filter(|p| p.r + p.g + p.b > 1e-3)
-        .count();
+    let nonzero = fb.pixels.iter().filter(|p| p.r + p.g + p.b > 1e-3).count();
     assert!(
         nonzero > (W * H) as usize / 4,
         "physical sky should fill a substantial portion of pixels, got {nonzero}"
@@ -945,11 +951,7 @@ fn cube_with_std_material(
     );
 }
 
-fn cube_with_material(
-    renderer: &mut SoftwareRenderer3D,
-    pos: Vector3,
-    mat: Material3D,
-) {
+fn cube_with_material(renderer: &mut SoftwareRenderer3D, pos: Vector3, mat: Material3D) {
     let id = renderer.create_instance();
     renderer.set_mesh(id, Mesh3D::cube(1.0));
     renderer.set_material(id, mat);
@@ -1260,10 +1262,19 @@ fn sprite3d_to_mesh_independent_of_billboard_mode() {
         let mut s = baseline.clone();
         s.billboard = mode;
         let m = s.to_mesh();
-        assert_eq!(m.vertices, baseline_mesh.vertices, "verts differ for {mode:?}");
-        assert_eq!(m.normals, baseline_mesh.normals, "normals differ for {mode:?}");
+        assert_eq!(
+            m.vertices, baseline_mesh.vertices,
+            "verts differ for {mode:?}"
+        );
+        assert_eq!(
+            m.normals, baseline_mesh.normals,
+            "normals differ for {mode:?}"
+        );
         assert_eq!(m.uvs, baseline_mesh.uvs, "uvs differ for {mode:?}");
-        assert_eq!(m.indices, baseline_mesh.indices, "indices differ for {mode:?}");
+        assert_eq!(
+            m.indices, baseline_mesh.indices,
+            "indices differ for {mode:?}"
+        );
     }
 }
 
@@ -1555,10 +1566,7 @@ fn voxel_gi_sample_outside_aabb_returns_black() {
     let mut gi = make_voxel_gi_at(Vector3::ZERO, Vector3::new(20.0, 20.0, 20.0));
     let light = make_directional_light(1.0, Color::new(1.0, 1.0, 1.0, 1.0));
     gi.bake(&[light]);
-    assert_eq!(
-        gi.sample(Vector3::new(100.0, 0.0, 0.0)),
-        Color::BLACK,
-    );
+    assert_eq!(gi.sample(Vector3::new(100.0, 0.0, 0.0)), Color::BLACK,);
 }
 
 /// Oracle: `interior=true` excludes directional (sky) lights from the bake,
@@ -1589,8 +1597,16 @@ fn voxel_gi_propagation_scales_contribution() {
 
     let low_sample = low.sample(Vector3::ZERO);
     let high_sample = high.sample(Vector3::ZERO);
-    assert!(approx_color(low_sample, Color::new(0.5, 0.5, 0.5, 1.0), 1e-5));
-    assert!(approx_color(high_sample, Color::new(1.0, 1.0, 1.0, 1.0), 1e-5));
+    assert!(approx_color(
+        low_sample,
+        Color::new(0.5, 0.5, 0.5, 1.0),
+        1e-5
+    ));
+    assert!(approx_color(
+        high_sample,
+        Color::new(1.0, 1.0, 1.0, 1.0),
+        1e-5
+    ));
 }
 
 /// Oracle: `energy` scales the sample at read time, layered on top of the
@@ -1639,7 +1655,11 @@ fn multimesh_flatten_buffer_default_colors_white() {
     mm.set_instance_transform(2, translate(4.0));
 
     let buf = mm.flatten_instance_data(Transform3D::IDENTITY);
-    assert_eq!(buf.len(), 3, "one row per instance, no per-instance expansion");
+    assert_eq!(
+        buf.len(),
+        3,
+        "one row per instance, no per-instance expansion"
+    );
     for row in &buf {
         assert_eq!(row.color, Color::WHITE);
     }

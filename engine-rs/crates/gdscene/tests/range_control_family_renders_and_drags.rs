@@ -158,8 +158,12 @@ fn each_range_control_renders_against_the_theme() {
     assert!(
         cmds.iter().any(|c| match c {
             DrawCommand::DrawPolygon { points, colors } => {
-                let (lo, hi) = points.iter().fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p.x), h.max(p.x)));
-                colors.first() == Some(&track_color) && lo.abs() < 0.001 && (hi - 100.0).abs() < 0.001
+                let (lo, hi) = points
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p.x), h.max(p.x)));
+                colors.first() == Some(&track_color)
+                    && lo.abs() < 0.001
+                    && (hi - 100.0).abs() < 0.001
             }
             _ => false,
         }),

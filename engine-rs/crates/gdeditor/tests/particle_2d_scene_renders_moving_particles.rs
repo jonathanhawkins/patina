@@ -16,8 +16,8 @@
 //! and (b) a `one_shot` emitter drains to zero and then produces no draws.
 
 use gdcore::math::Color;
-use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdeditor::viewport_2d_render::{build_runtime_render_list, rasterize_render_list};
+use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
 use gdscene::MainLoop;
 

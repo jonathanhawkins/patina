@@ -19,7 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -62,10 +66,10 @@ fn script_toolbar_renders_menu_and_help_buttons() {
         "Online Docs",
         "id=\"script-search-help\"", // help_search "Search Help"
         "Search Help",
-        "id=\"script-back\"",        // history previous arrow
-        "id=\"script-forward\"",     // history next arrow
+        "id=\"script-back\"",          // history previous arrow
+        "id=\"script-forward\"",       // history next arrow
         "id=\"script-make-floating\"", // make-floating toggle
-        "id=\"script-name-label\"",  // centered script name label
+        "id=\"script-name-label\"",    // centered script name label
     ] {
         assert!(
             html.contains(needle),

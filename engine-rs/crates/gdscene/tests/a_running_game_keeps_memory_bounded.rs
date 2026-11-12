@@ -20,8 +20,16 @@ fn a_nodes_notification_log_is_bounded_and_keeps_the_newest_entries() {
         node.receive_notification(Notification::new(i as i32));
     }
     let log = node.notification_log();
-    assert!(log.len() <= NOTIFICATION_LOG_CAP, "log grew to {}", log.len());
-    assert!(log.len() >= NOTIFICATION_LOG_CAP / 2, "too little history kept: {}", log.len());
+    assert!(
+        log.len() <= NOTIFICATION_LOG_CAP,
+        "log grew to {}",
+        log.len()
+    );
+    assert!(
+        log.len() >= NOTIFICATION_LOG_CAP / 2,
+        "too little history kept: {}",
+        log.len()
+    );
     // The newest entries survive, in order.
     let tail: Vec<i32> = log.iter().rev().take(3).map(|x| x.code()).collect();
     assert_eq!(tail, vec![n as i32 - 1, n as i32 - 2, n as i32 - 3]);
@@ -39,7 +47,10 @@ fn a_short_run_still_records_every_notification_from_the_start() {
     // Nothing from the start is lost: the first entry is still the first one
     // the node ever got, and every one of the 100 follows.
     assert_eq!(codes.len(), before + 100);
-    assert!(codes.ends_with(&(0..100).collect::<Vec<_>>()), "the full short history is kept");
+    assert!(
+        codes.ends_with(&(0..100).collect::<Vec<_>>()),
+        "the full short history is kept"
+    );
 }
 
 #[test]
@@ -74,5 +85,8 @@ fn ten_thousand_frames_of_a_processing_scene_keep_every_log_under_the_cap() {
         "after 10k frames a node holds {longest} notifications (cap {NOTIFICATION_LOG_CAP})"
     );
     // Not vacuous: the frames really delivered more than the cap would hold.
-    assert!(longest >= NOTIFICATION_LOG_CAP / 2, "frames delivered only {longest} notifications");
+    assert!(
+        longest >= NOTIFICATION_LOG_CAP / 2,
+        "frames delivered only {longest} notifications"
+    );
 }

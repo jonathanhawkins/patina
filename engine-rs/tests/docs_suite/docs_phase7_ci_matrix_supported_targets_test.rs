@@ -16,8 +16,12 @@ fn repo_root() -> PathBuf {
 
 fn read_ci_yaml() -> String {
     let p = repo_root().join(".github/workflows/ci.yml");
-    std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!(".github/workflows/ci.yml must exist at {}: {e}", p.display()))
+    std::fs::read_to_string(&p).unwrap_or_else(|e| {
+        panic!(
+            ".github/workflows/ci.yml must exist at {}: {e}",
+            p.display()
+        )
+    })
 }
 
 #[test]
@@ -49,7 +53,9 @@ fn phase7_audit_documents_ci_matrix() {
         .unwrap_or_else(|e| panic!("Phase-7 audit must exist at {}: {e}", p.display()));
     let lower = body.to_lowercase();
     assert!(
-        lower.contains("ci matrix") || lower.contains("ci build matrix") || lower.contains("desktop_targets"),
+        lower.contains("ci matrix")
+            || lower.contains("ci build matrix")
+            || lower.contains("desktop_targets"),
         "Phase-7 audit must document the CI build matrix or DESKTOP_TARGETS"
     );
 }

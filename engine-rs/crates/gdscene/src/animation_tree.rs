@@ -1314,10 +1314,7 @@ fn node_play_position(node: &AnimationNode) -> Option<f64> {
             node_play_position(child)
         }
         AnimationNode::Blend2 { a, .. } | AnimationNode::Blend3 { a, .. } => node_play_position(a),
-        AnimationNode::StateMachine(sm) => sm
-            .states
-            .get(&sm.current)
-            .and_then(|n| node_play_position(n)),
+        AnimationNode::StateMachine(sm) => sm.states.get(&sm.current).and_then(node_play_position),
         _ => None,
     }
 }
@@ -1840,11 +1837,7 @@ impl AnimationTree {
     /// `None` reproduces the behaviour this bead replaced — every expression edge
     /// skipped — which is what keeps hand-built trees and this module's own tests
     /// unaffected.
-    pub fn advance_with_expressions(
-        &mut self,
-        delta: f64,
-        expr: Option<&dyn Fn(&str) -> Option<bool>>,
-    ) {
+    pub fn advance_with_expressions(&mut self, delta: f64, expr: Option<ExprResolver<'_>>) {
         if !self.active || delta == 0.0 {
             return;
         }
@@ -2079,8 +2072,12 @@ struct EvalParams<'a> {
     ///
     /// A shared reference, so this struct stays `Copy` and keeps threading
     /// through the `advance_*` family by value.
-    expr: Option<&'a dyn Fn(&str) -> Option<bool>>,
+    expr: Option<ExprResolver<'a>>,
 }
+
+/// Resolves an `advance_expression` / condition by name to a truth value, or
+/// `None` when the resolver has no opinion.
+type ExprResolver<'a> = &'a dyn Fn(&str) -> Option<bool>;
 
 impl EvalParams<'_> {
     /// Resolves a transition condition / one-shot trigger by name. Godot stores a
@@ -2608,17 +2605,11 @@ fn advance_state_machine(
     // so an `AtEnd` edge can fire on the next frame: a looping clip's playhead
     // drops back toward zero, a non-looping one arrives at its end and holds
     // (`crossed_clip_end`).
-    let before = sm
-        .states
-        .get(&sm.current)
-        .and_then(|n| node_play_position(n));
+    let before = sm.states.get(&sm.current).and_then(node_play_position);
     if let Some(node) = sm.states.get_mut(&sm.current) {
         advance_node(node, delta, library, params);
     }
-    let after = sm
-        .states
-        .get(&sm.current)
-        .and_then(|n| node_play_position(n));
+    let after = sm.states.get(&sm.current).and_then(node_play_position);
     let end = sm
         .states
         .get(&sm.current)
@@ -3445,7 +3436,10 @@ fn sample_clip_targeted(anim: &Animation, time: f64) -> Vec<(TrackKey, Variant)>
     anim.sample_all_typed(time)
         .into_iter()
         .map(|(node_path, prop, ty, value)| {
-            ((node_path, prop, crate::animation::value_channel(ty)), value)
+            (
+                (node_path, prop, crate::animation::value_channel(ty)),
+                value,
+            )
         })
         .collect()
 }

@@ -134,16 +134,25 @@ mod gpu_tests {
         three.mesh = Some(small_quad());
         three.set_instance_transform(
             0,
-            Transform3D { basis: Basis::IDENTITY, origin: Vector3::new(-0.9, 0.0, 0.0) },
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(-0.9, 0.0, 0.0),
+            },
         );
         three.set_instance_transform(
             2,
-            Transform3D { basis: Basis::IDENTITY, origin: Vector3::new(0.9, 0.0, 0.0) },
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.9, 0.0, 0.0),
+            },
         );
         renderer.set_multimesh(id3, three);
         let red_three = count_red(&renderer.render_frame(&vp));
 
-        assert!(red_one > 10, "single multimesh instance should render ({red_one})");
+        assert!(
+            red_one > 10,
+            "single multimesh instance should render ({red_one})"
+        );
         assert!(
             red_three > red_one,
             "3 spread multimesh instances must render more red than 1 (one={red_one}, three={red_three})"
@@ -187,7 +196,10 @@ mod gpu_tests {
             ShaderType3D::Spatial,
             "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;",
         ));
-        sm.set_shader_parameter("albedo_color", Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)));
+        sm.set_shader_parameter(
+            "albedo_color",
+            Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)),
+        );
         renderer.set_shader_material(id, sm);
 
         let frame = renderer.render_frame(&vp);
@@ -227,7 +239,15 @@ mod gpu_tests {
 
         let gpu_frame = gpu.render_frame(&vp);
         let sw_frame = SoftwareRenderer3D::new().render_frame(&vp);
-        for (x, y) in [(32u32, 2u32), (32, 16), (32, 32), (32, 48), (32, 62), (2, 32), (62, 32)] {
+        for (x, y) in [
+            (32u32, 2u32),
+            (32, 16),
+            (32, 32),
+            (32, 48),
+            (32, 62),
+            (2, 32),
+            (62, 32),
+        ] {
             let i = (y * 64 + x) as usize;
             let g = &gpu_frame.pixels[i];
             let s = &sw_frame.pixels[i];
@@ -270,12 +290,19 @@ mod gpu_tests {
         assert!(
             g.r > 0.3,
             "GPU custom-color background must not be black, got ({:.3},{:.3},{:.3})",
-            g.r, g.g, g.b
+            g.r,
+            g.g,
+            g.b
         );
         assert!(
             (g.r - s.r).abs() < 0.02 && (g.g - s.g).abs() < 0.02 && (g.b - s.b).abs() < 0.02,
             "custom-color background mismatch: gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-            g.r, g.g, g.b, s.r, s.g, s.b
+            g.r,
+            g.g,
+            g.b,
+            s.r,
+            s.g,
+            s.b
         );
     }
 
@@ -323,7 +350,15 @@ mod gpu_tests {
             "software physical sky should vary across the dome"
         );
 
-        for (x, y) in [(32u32, 2u32), (32, 16), (32, 32), (32, 48), (32, 62), (2, 32), (62, 32)] {
+        for (x, y) in [
+            (32u32, 2u32),
+            (32, 16),
+            (32, 32),
+            (32, 48),
+            (32, 62),
+            (2, 32),
+            (62, 32),
+        ] {
             let i = (y * 64 + x) as usize;
             let g = &gpu_frame.pixels[i];
             let s = &sw_frame.pixels[i];
@@ -406,7 +441,12 @@ mod gpu_tests {
                         && (g.g - s.g).abs() < 0.03
                         && (g.b - s.b).abs() < 0.03,
                     "fog mismatch at ({gx},{gy}): gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-                    g.r, g.g, g.b, s.r, s.g, s.b
+                    g.r,
+                    g.g,
+                    g.b,
+                    s.r,
+                    s.g,
+                    s.b
                 );
             }
         }
@@ -451,11 +491,20 @@ mod gpu_tests {
 
         let g = &gpu_frame.pixels[center];
         let s = &sw_frame.pixels[center];
-        assert!(s.r > 0.5, "software reference should be brightly lit, got {:.3}", s.r);
+        assert!(
+            s.r > 0.5,
+            "software reference should be brightly lit, got {:.3}",
+            s.r
+        );
         assert!(
             (g.r - s.r).abs() < 0.03 && (g.g - s.g).abs() < 0.03 && (g.b - s.b).abs() < 0.03,
             "render_frame lit mesh mismatch: gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-            g.r, g.g, g.b, s.r, s.g, s.b
+            g.r,
+            g.g,
+            g.b,
+            s.r,
+            s.g,
+            s.b
         );
     }
 
@@ -884,7 +933,10 @@ mod gpu_tests {
         assert_eq!(frame.height, 48);
         assert_eq!(frame.pixels.len(), 48 * 48);
         // No depth is read back on the editor path (a saved GPU sync + copy).
-        assert!(frame.depth.is_empty(), "editor path must not read back depth");
+        assert!(
+            frame.depth.is_empty(),
+            "editor path must not read back depth"
+        );
         // Every pixel is the flat background (no geometry), and linear — an sRGB
         // target would lift 0.13 to ~0.40 and fail this.
         for p in &frame.pixels {
@@ -933,7 +985,10 @@ mod gpu_tests {
             })
             .count();
         assert!(red > 10, "expected red triangle pixels, found {red}");
-        assert!(background > 10, "expected surviving background pixels, found {background}");
+        assert!(
+            background > 10,
+            "expected surviving background pixels, found {background}"
+        );
     }
 
     /// The GPU editor path renders the environment's procedural sky gradient
@@ -962,14 +1017,27 @@ mod gpu_tests {
         let sw_frame = SoftwareRenderer3D::new().render_frame(&vp);
 
         // Sample points across the gradient: sky top, horizon area, ground.
-        for (x, y) in [(32u32, 2u32), (32, 16), (32, 32), (32, 48), (32, 62), (2, 32), (62, 32)] {
+        for (x, y) in [
+            (32u32, 2u32),
+            (32, 16),
+            (32, 32),
+            (32, 48),
+            (32, 62),
+            (2, 32),
+            (62, 32),
+        ] {
             let i = (y * 64 + x) as usize;
             let g = &gpu_frame.pixels[i];
             let s = &sw_frame.pixels[i];
             assert!(
                 (g.r - s.r).abs() < 0.02 && (g.g - s.g).abs() < 0.02 && (g.b - s.b).abs() < 0.02,
                 "sky mismatch at ({x},{y}): gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-                g.r, g.g, g.b, s.r, s.g, s.b
+                g.r,
+                g.g,
+                g.b,
+                s.r,
+                s.g,
+                s.b
             );
         }
 
@@ -1035,11 +1103,23 @@ mod gpu_tests {
 
         // And it matches the software reference everywhere — disc, halo
         // falloff, and untouched gradient alike.
-        for (i, (g, s)) in gpu_frame.pixels.iter().zip(sw_frame.pixels.iter()).enumerate() {
+        for (i, (g, s)) in gpu_frame
+            .pixels
+            .iter()
+            .zip(sw_frame.pixels.iter())
+            .enumerate()
+        {
             assert!(
                 (g.r - s.r).abs() < 0.02 && (g.g - s.g).abs() < 0.02 && (g.b - s.b).abs() < 0.02,
                 "sun sky mismatch at ({},{}): gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-                i % 64, i / 64, g.r, g.g, g.b, s.r, s.g, s.b
+                i % 64,
+                i / 64,
+                g.r,
+                g.g,
+                g.b,
+                s.r,
+                s.g,
+                s.b
             );
         }
     }
@@ -1067,7 +1147,9 @@ mod gpu_tests {
             assert!(
                 (p.r - 0.13).abs() < 0.02 && (p.g - 0.14).abs() < 0.02 && (p.b - 0.17).abs() < 0.02,
                 "expected the environment's custom color, got ({:.3},{:.3},{:.3})",
-                p.r, p.g, p.b
+                p.r,
+                p.g,
+                p.b
             );
         }
     }
@@ -1126,7 +1208,12 @@ mod gpu_tests {
         assert!(
             (g.r - s.r).abs() < 0.03 && (g.g - s.g).abs() < 0.03 && (g.b - s.b).abs() < 0.03,
             "lit mesh mismatch: gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-            g.r, g.g, g.b, s.r, s.g, s.b
+            g.r,
+            g.g,
+            g.b,
+            s.r,
+            s.g,
+            s.b
         );
     }
 
@@ -1184,7 +1271,12 @@ mod gpu_tests {
                         && (g.g - s.g).abs() < 0.03
                         && (g.b - s.b).abs() < 0.03,
                     "PBR mismatch at ({gx},{gy}): gpu=({:.3},{:.3},{:.3}) sw=({:.3},{:.3},{:.3})",
-                    g.r, g.g, g.b, s.r, s.g, s.b
+                    g.r,
+                    g.g,
+                    g.b,
+                    s.r,
+                    s.g,
+                    s.b
                 );
                 compared += 1;
             }
@@ -1192,7 +1284,11 @@ mod gpu_tests {
         assert!(compared > 30);
         // And the surface is actually lit (not ambient-only).
         let center = &sw_frame.pixels[(32 * 64 + 32) as usize];
-        assert!(center.r > 0.3, "software PBR quad should be lit, got {:.3}", center.r);
+        assert!(
+            center.r > 0.3,
+            "software PBR quad should be lit, got {:.3}",
+            center.r
+        );
     }
 
     /// The shadow atlas is rasterized + uploaded once for a static scene and
@@ -1216,7 +1312,11 @@ mod gpu_tests {
 
         let vp = test_viewport(32, 32);
         let _ = gpu.render_editor_color(&vp, Color::BLACK);
-        assert_eq!(gpu.shadow_atlas_rebuilds(), 1, "first frame builds the atlas");
+        assert_eq!(
+            gpu.shadow_atlas_rebuilds(),
+            1,
+            "first frame builds the atlas"
+        );
 
         let _ = gpu.render_editor_color(&vp, Color::BLACK);
         let _ = gpu.render_editor_color(&vp, Color::BLACK);
@@ -1482,7 +1582,11 @@ mod gpu_tests {
         let vp = test_viewport(64, 64);
         for i in 0..5 {
             let frame = renderer.render_editor_color(&vp, bg);
-            let red = frame.pixels.iter().filter(|p| p.r > 0.5 && p.g < 0.2).count();
+            let red = frame
+                .pixels
+                .iter()
+                .filter(|p| p.r > 0.5 && p.g < 0.2)
+                .count();
             assert!(red > 10, "frame {i}: expected red pixels, found {red}");
         }
 
@@ -1492,7 +1596,11 @@ mod gpu_tests {
         assert_eq!(frame.width, 96);
         assert_eq!(frame.height, 72);
         assert_eq!(frame.pixels.len(), 96 * 72);
-        let red = frame.pixels.iter().filter(|p| p.r > 0.5 && p.g < 0.2).count();
+        let red = frame
+            .pixels
+            .iter()
+            .filter(|p| p.r > 0.5 && p.g < 0.2)
+            .count();
         assert!(red > 10, "after resize: expected red pixels, found {red}");
     }
 
@@ -1523,6 +1631,9 @@ mod gpu_tests {
         renderer.reset_scene();
         let after = renderer.render_editor_color(&vp, bg);
         let red = after.pixels.iter().filter(|p| p.r > 0.5).count();
-        assert_eq!(red, 0, "reset_scene must clear instances, found {red} red pixels");
+        assert_eq!(
+            red, 0,
+            "reset_scene must clear instances, found {red} red pixels"
+        );
     }
 }

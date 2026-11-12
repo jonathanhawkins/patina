@@ -290,7 +290,7 @@ fn environment_sky_composition() {
             panorama_path: "res://sky.hdr".to_string(),
             filter: true,
             energy_multiplier: 1.2,
-                    texture: None,
+            texture: None,
         }),
         process_mode: SkyProcessMode::Quality,
         radiance_size: 512,

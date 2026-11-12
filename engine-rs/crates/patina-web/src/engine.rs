@@ -407,6 +407,21 @@ impl WebEngine {
             .window_to_canvas(canvas_point)
     }
 
+    /// The transform behind [`Self::canvas_to_project`], for building a
+    /// [`CanvasMapping`](crate::browser_input::CanvasMapping).
+    ///
+    /// 🔑 The browser listeners map every pointer/touch event through this, so
+    /// it must be the SAME inverse the engine applies — taken from the same
+    /// root window — or a click lands somewhere other than the node drawn
+    /// under the cursor.
+    pub fn canvas_to_project_transform(&self) -> gdcore::math::Transform2D {
+        self.main_loop
+            .tree()
+            .root_window()
+            .stretch_transform()
+            .affine_inverse()
+    }
+
     /// Mutable access to the scene, for wiring a scene up after construction.
     pub fn tree_mut(&mut self) -> &mut SceneTree {
         self.main_loop.tree_mut()

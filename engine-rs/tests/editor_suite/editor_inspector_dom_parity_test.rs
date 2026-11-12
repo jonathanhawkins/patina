@@ -123,8 +123,8 @@ fn collect_editor_inspector(port: u16) -> InspectorView {
         200,
         "GET /api/scene must succeed: {scene_resp}"
     );
-    let scene_json: serde_json::Value = serde_json::from_str(extract_body(&scene_resp))
-        .expect("scene JSON parses");
+    let scene_json: serde_json::Value =
+        serde_json::from_str(extract_body(&scene_resp)).expect("scene JSON parses");
     let mut out = InspectorView::new();
 
     fn walk(port: u16, v: &serde_json::Value, out: &mut InspectorView, skip_root: bool) {
@@ -165,7 +165,11 @@ fn collect_editor_inspector(port: u16) -> InspectorView {
             .and_then(|p| p.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .filter_map(|p| {
+                        p.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -299,8 +303,7 @@ fn editor_inspector_dom_parity_across_five_reference_scenes() {
             golden_path.display()
         );
 
-        let body =
-            serde_json::json!({ "path": scene_path.to_string_lossy() }).to_string();
+        let body = serde_json::json!({ "path": scene_path.to_string_lossy() }).to_string();
         let load_resp = http_post(port, "/api/scene/load", &body);
         if status_code(&load_resp) != 200 {
             failures.push(format!(
@@ -427,7 +430,9 @@ fn nest_flat_golden(nodes: &[serde_json::Value]) -> Vec<serde_json::Value> {
 fn editor_contains_golden_properties(editor: &[String], golden: &[String]) -> Result<(), String> {
     let editor_set: HashSet<&str> = editor.iter().map(|s| s.as_str()).collect();
     match golden.iter().find(|g| !editor_set.contains(g.as_str())) {
-        Some(missing) => Err(format!("editor is missing golden property '{missing}'; editor: {editor:?}")),
+        Some(missing) => Err(format!(
+            "editor is missing golden property '{missing}'; editor: {editor:?}"
+        )),
         None => Ok(()),
     }
 }

@@ -48,7 +48,11 @@ fn a_parse_failure_is_a_script_error_naming_the_script_and_line() {
         "config_version=5\n\n[application]\nrun/main_scene=\"res://main.tscn\"\n",
     )
     .unwrap();
-    std::fs::write(dir.join("main.gd"), "extends Node\n\nfunc _ready():\n\tvar x = = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.gd"),
+        "extends Node\n\nfunc _ready():\n\tvar x = = 1\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.tscn"),
         "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://main.gd\" id=\"1\"]\n\n[node name=\"Main\" type=\"Node\"]\nscript = ExtResource(\"1\")\n",
@@ -59,7 +63,11 @@ fn a_parse_failure_is_a_script_error_naming_the_script_and_line() {
         .iter()
         .filter(|e| e.contains("script failed to load: res://main.gd: "))
         .collect();
-    assert_eq!(hits.len(), 1, "one load failure for main.gd, got {errors:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "one load failure for main.gd, got {errors:?}"
+    );
     assert!(hits[0].contains("Main"), "names the node: {}", hits[0]);
     assert!(hits[0].contains("line 4"), "names the line: {}", hits[0]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -83,6 +91,9 @@ fn every_truck_town_vehicle_script_loads() {
             .iter()
             .filter(|e| e.contains("script failed to load") || e.contains("member initializer"))
             .collect();
-        assert!(failed.is_empty(), "{scene}: scripts must load, got {failed:?}");
+        assert!(
+            failed.is_empty(),
+            "{scene}: scripts must load, got {failed:?}"
+        );
     }
 }

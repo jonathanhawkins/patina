@@ -93,7 +93,11 @@ fn loose_webp_loads_pixels() {
 fn ctex_webp_decodes_pixels() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("icon.ctex");
-    std::fs::write(&path, build_ctex_webp(ICON_W as u32, ICON_H as u32, ICON_WEBP)).unwrap();
+    std::fs::write(
+        &path,
+        build_ctex_webp(ICON_W as u32, ICON_H as u32, ICON_WEBP),
+    )
+    .unwrap();
 
     let rfl = ResourceFormatLoader::with_defaults();
     let res = rfl.load_resource(&path).unwrap();

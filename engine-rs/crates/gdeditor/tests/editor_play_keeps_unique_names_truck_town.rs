@@ -53,7 +53,9 @@ fn play_resolves_unique_names_in_car_select() {
         Some(car_container),
         "%CarContainer must resolve in the played tree"
     );
-    let script = played.get_script(car_select).expect("car_select.gd attached");
+    let script = played
+        .get_script(car_select)
+        .expect("car_select.gd attached");
     assert_eq!(
         script.get_property("car_container"),
         Some(Variant::ObjectId(car_container.object_id())),

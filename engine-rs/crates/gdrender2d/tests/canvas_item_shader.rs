@@ -40,7 +40,10 @@ fn render_sprite(
     let mut item = CanvasItem::new(CanvasItemId(1));
     item.commands.push(DrawCommand::DrawTextureRect {
         texture_path: "tex".to_string(),
-        rect: Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(size as f32, size as f32)),
+        rect: Rect2::new(
+            Vector2::new(0.0, 0.0),
+            Vector2::new(size as f32, size as f32),
+        ),
         modulate,
     });
     item.material = mat;
@@ -88,11 +91,7 @@ fn shader_uv_builtin_drives_horizontal_gradient() {
     let left = fb.get_pixel(0, 4);
     let right = fb.get_pixel(size - 1, 4);
     // UV.x at the left column ≈ 0 → alpha ≈ 0 → stays near black.
-    assert!(
-        left.r < 0.2,
-        "left column should be dark, got r={}",
-        left.r
-    );
+    assert!(left.r < 0.2, "left column should be dark, got r={}", left.r);
     // UV.x at the right column is high → brighter than the left.
     assert!(
         right.r > left.r + 0.5,

@@ -14,8 +14,7 @@
 //! This module does NOT duplicate logic — it is purely a naming/adapter layer.
 
 use crate::inspector::{
-    self, CustomPropertyEditor, DragAdjust, EditorInspectorPlugin, InspectorPanel,
-    InspectorPluginRegistry, LinkedValues, PropertyCategory, PropertyDefaults, PropertyEditor,
+    self, CustomPropertyEditor, InspectorPanel, InspectorPluginRegistry, PropertyCategory,
     PropertyHint,
 };
 use crate::{Editor, EditorCommand, EditorError};

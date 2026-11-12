@@ -76,16 +76,16 @@ fn import_dock_renders_skeleton() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"import-dock\"",        // the dock container
-        "id=\"import-empty\"",       // empty-state placeholder
+        "id=\"import-dock\"",  // the dock container
+        "id=\"import-empty\"", // empty-state placeholder
         // pat-93pfv: Godot's `select_a_resource` prompt verbatim
         // (import_dock.cpp:829); Patina used to paraphrase it.
         "in the filesystem or in the inspector to adjust import settings",
-        "Import As:",                // import_dock.cpp:765 OptionButton label
-        "id=\"import-as\"",          // the type selector
-        "id=\"import-preset\"",      // import_dock.cpp:776 preset menu
-        "id=\"import-reimport\"",    // import_dock.cpp:798 Reimport button
-        ">Reimport<",                // verbatim label
+        "Import As:",             // import_dock.cpp:765 OptionButton label
+        "id=\"import-as\"",       // the type selector
+        "id=\"import-preset\"",   // import_dock.cpp:776 preset menu
+        "id=\"import-reimport\"", // import_dock.cpp:798 Reimport button
+        ">Reimport<",             // verbatim label
     ] {
         assert!(
             html.contains(needle),

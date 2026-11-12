@@ -365,9 +365,7 @@ fn undo_removes_the_last_added_frame() {
     assert_eq!(redone["ok"], true, "redo failed: {redone}");
     let back = json_of(&http_get(port, &format!("/api/spriteframes?node_id={raw}")));
     assert_eq!(
-        back["animations"][0]["frames"]
-            .as_array()
-            .map(|f| f.len()),
+        back["animations"][0]["frames"].as_array().map(|f| f.len()),
         Some(2),
         "redo restores the frame: {back}"
     );
@@ -414,7 +412,11 @@ fn runtime_play_advances_the_frame_over_stepped_time() {
     // outcome. Steps of 0.04 clear each boundary by 0.02 every time.
     let dt = 0.04;
 
-    let frame_of = |ml: &MainLoop| match ml.tree().get_node(sprite_id).map(|n| n.get_property("frame")) {
+    let frame_of = |ml: &MainLoop| match ml
+        .tree()
+        .get_node(sprite_id)
+        .map(|n| n.get_property("frame"))
+    {
         Some(Variant::Int(i)) => i,
         other => panic!("frame should be an Int, got {other:?}"),
     };
@@ -422,7 +424,11 @@ fn runtime_play_advances_the_frame_over_stepped_time() {
     for _ in 0..3 {
         ml.step(dt);
     }
-    assert_eq!(frame_of(&ml), 1, "the frame must advance at the animation FPS");
+    assert_eq!(
+        frame_of(&ml),
+        1,
+        "the frame must advance at the animation FPS"
+    );
 
     for _ in 0..3 {
         ml.step(dt);
@@ -434,7 +440,11 @@ fn runtime_play_advances_the_frame_over_stepped_time() {
     for _ in 0..3 {
         ml.step(dt);
     }
-    assert_eq!(frame_of(&ml), 0, "a looping animation wraps past its last frame");
+    assert_eq!(
+        frame_of(&ml),
+        0,
+        "a looping animation wraps past its last frame"
+    );
 }
 
 /// A sprite that was never started stays put — `playing` defaults to false in
@@ -495,11 +505,18 @@ fn an_unstarted_sprite_does_not_advance_but_autoplay_does() {
 
 /// Depth-first search for a node by name, so the assertion does not depend on
 /// where in the tree the reloaded scene was instanced.
-fn find_named(tree: &SceneTree, from: gdscene::node::NodeId, name: &str) -> Option<gdscene::node::NodeId> {
+fn find_named(
+    tree: &SceneTree,
+    from: gdscene::node::NodeId,
+    name: &str,
+) -> Option<gdscene::node::NodeId> {
     let mut ids = Vec::new();
     tree.collect_subtree_top_down(from, &mut ids);
-    ids.into_iter()
-        .find(|id| tree.get_node(*id).map(|n| n.name() == name).unwrap_or(false))
+    ids.into_iter().find(|id| {
+        tree.get_node(*id)
+            .map(|n| n.name() == name)
+            .unwrap_or(false)
+    })
 }
 
 /// The full loop the bead's wiring requirement describes: author in the panel →

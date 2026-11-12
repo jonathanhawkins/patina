@@ -99,7 +99,11 @@ fn boot_town() -> MainLoop {
     key(&mut ml, Key::Enter, false);
     for _ in 0..10 {
         ml.step(1.0 / 60.0);
-        if ml.tree().get_node_by_path("/root/TownScene/GameUI").is_some() {
+        if ml
+            .tree()
+            .get_node_by_path("/root/TownScene/GameUI")
+            .is_some()
+        {
             break;
         }
     }
@@ -126,7 +130,8 @@ fn assert_rects(ml: &MainLoop, rects: &[Rect]) {
     for (path, pos, size) in rects {
         let p = vec2(ml, path, "position");
         let s = vec2(ml, path, "size");
-        let close = |a: Vector2, b: [f32; 2]| (a.x - b[0]).abs() < 0.01 && (a.y - b[1]).abs() < 0.01;
+        let close =
+            |a: Vector2, b: [f32; 2]| (a.x - b[0]).abs() < 0.01 && (a.y - b[1]).abs() < 0.01;
         if !close(p, *pos) || !close(s, *size) {
             wrong.push(format!(
                 "{path}: Patina pos ({}, {}) size ({}, {}), Godot pos ({}, {}) size ({}, {})",
@@ -134,7 +139,11 @@ fn assert_rects(ml: &MainLoop, rects: &[Rect]) {
             ));
         }
     }
-    assert!(wrong.is_empty(), "rects differ from Godot 4.6.1:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "rects differ from Godot 4.6.1:\n{}",
+        wrong.join("\n")
+    );
 }
 
 const MENU: &str = "/root/CarSelect";
@@ -155,13 +164,33 @@ fn car_select_menu_rects_match_godot_without_rendering() {
         &[
             // The car strip, anchored to a 0px line across the middle, grown
             // to its buttons' 243px around it.
-            ("/root/CarSelect/CarContainer", [0.0, 178.5], [1024.0, 243.0]),
-            ("/root/CarSelect/CarContainer/MiniVan", [5.0, 0.0], [328.0, 243.0]),
-            ("/root/CarSelect/CarContainer/TrailerTruck", [347.0, 0.0], [328.0, 243.0]),
-            ("/root/CarSelect/CarContainer/TowTruck", [690.0, 0.0], [328.0, 243.0]),
+            (
+                "/root/CarSelect/CarContainer",
+                [0.0, 178.5],
+                [1024.0, 243.0],
+            ),
+            (
+                "/root/CarSelect/CarContainer/MiniVan",
+                [5.0, 0.0],
+                [328.0, 243.0],
+            ),
+            (
+                "/root/CarSelect/CarContainer/TrailerTruck",
+                [347.0, 0.0],
+                [328.0, 243.0],
+            ),
+            (
+                "/root/CarSelect/CarContainer/TowTruck",
+                [690.0, 0.0],
+                [328.0, 243.0],
+            ),
             // PanelContainer insets by 0; MarginContainer by 20/5.
             ("/root/CarSelect/MoodPanel", [187.0, 464.0], [650.0, 41.0]),
-            ("/root/CarSelect/MoodPanel/MarginContainer", [0.0, 0.0], [650.0, 41.0]),
+            (
+                "/root/CarSelect/MoodPanel/MarginContainer",
+                [0.0, 0.0],
+                [650.0, 41.0],
+            ),
             (MOOD, [20.0, 5.0], [610.0, 31.0]),
             // A default Label is one 23px font height, centred (SHRINK_CENTER).
             (mood("Label"), [0.0, 4.0], [70.0, 23.0]),
@@ -189,7 +218,10 @@ fn car_select_minimum_sizes_and_font_sizes_match_godot() {
     let mut ml = boot_menu();
     ml.step(1.0 / 60.0);
     let tree = ml.tree();
-    let id = |p: &str| tree.get_node_by_path(p).unwrap_or_else(|| panic!("no node at {p}"));
+    let id = |p: &str| {
+        tree.get_node_by_path(p)
+            .unwrap_or_else(|| panic!("no node at {p}"))
+    };
     // Godot's `get_combined_minimum_size()` for each, from the same capture.
     for (path, min) in [
         (format!("{MOOD}/Label"), [70.0, 23.0]),
@@ -204,7 +236,10 @@ fn car_select_minimum_sizes_and_font_sizes_match_godot() {
         (MOOD.to_string(), [382.0, 31.0]),
         ("/root/CarSelect/MoodPanel".to_string(), [422.0, 41.0]),
         ("/root/CarSelect/CarContainer".to_string(), [992.0, 243.0]),
-        ("/root/CarSelect/CarContainer/MiniVan".to_string(), [328.0, 243.0]),
+        (
+            "/root/CarSelect/CarContainer/MiniVan".to_string(),
+            [328.0, 243.0],
+        ),
         // Two lines of a 22px LabelSettings font: 2 * 31 + 3 of line spacing.
         (
             "/root/CarSelect/LoadingPanel/CenterContainer/Label".to_string(),
@@ -223,8 +258,16 @@ fn car_select_minimum_sizes_and_font_sizes_match_godot() {
     }
     // `get_theme_font_size("font_size")`: the default theme's 16 everywhere
     // here, and the LabelSettings' 22 for the loading label.
-    for path in [format!("{MOOD}/Label"), format!("{MOOD}/Sunrise"), format!("{OPTIONS}/SDFGI")] {
-        assert_eq!(gdscene::control::resolved_font_size(tree, id(&path)), 16.0, "{path}");
+    for path in [
+        format!("{MOOD}/Label"),
+        format!("{MOOD}/Sunrise"),
+        format!("{OPTIONS}/SDFGI"),
+    ] {
+        assert_eq!(
+            gdscene::control::resolved_font_size(tree, id(&path)),
+            16.0,
+            "{path}"
+        );
     }
     assert_eq!(
         gdscene::control::resolved_font_size(
@@ -264,11 +307,9 @@ fn car_select_menu_draws_godot_checkboxes_slider_and_mute_icon() {
     let icon = items
         .iter()
         .find_map(|i| match i {
-            ControlDrawItem::Texture { texture_path, rect, .. }
-                if texture_path.ends_with("audio_on.png") =>
-            {
-                Some(*rect)
-            }
+            ControlDrawItem::Texture {
+                texture_path, rect, ..
+            } if texture_path.ends_with("audio_on.png") => Some(*rect),
             _ => None,
         })
         .expect("the Mute button draws audio_on.png");
@@ -295,7 +336,11 @@ fn car_select_menu_draws_godot_checkboxes_slider_and_mute_icon() {
         })
         .filter(|c| c.x >= vol.x && c.x <= vol.x + 400.0 && (c.y - (vol.y + 8.0)).abs() < 0.01)
         .collect();
-    assert_eq!(grabbers.len(), 1, "one r=7 grabber disc on the volume slider's centre line");
+    assert_eq!(
+        grabbers.len(),
+        1,
+        "one r=7 grabber disc on the volume slider's centre line"
+    );
 
     // The mood CheckBoxes share a ButtonGroup, so Godot draws RADIO icons:
     // Day (pressed) is an r=7 white ring around an r=4 dark centre at
@@ -305,9 +350,12 @@ fn car_select_menu_draws_godot_checkboxes_slider_and_mute_icon() {
     let discs: Vec<(f32, f32)> = items
         .iter()
         .filter_map(|i| match i {
-            ControlDrawItem::Circle { center, radius, color, .. }
-                if (center.x - at_day.x).abs() < 0.01 && (center.y - at_day.y).abs() < 0.01 =>
-            {
+            ControlDrawItem::Circle {
+                center,
+                radius,
+                color,
+                ..
+            } if (center.x - at_day.x).abs() < 0.01 && (center.y - at_day.y).abs() < 0.01 => {
                 Some((*radius, color.a))
             }
             _ => None,
@@ -333,15 +381,26 @@ fn car_select_menu_draws_godot_checkboxes_slider_and_mute_icon() {
     let day_text = items
         .iter()
         .find_map(|i| match i {
-            ControlDrawItem::Text { text, position, font_size, .. } if text == "Day" => {
-                Some((*position, *font_size))
-            }
+            ControlDrawItem::Text {
+                text,
+                position,
+                font_size,
+                ..
+            } if text == "Day" => Some((*position, *font_size)),
             _ => None,
         })
         .expect("Day's text");
     assert_eq!(day_text.1, 16);
-    assert!((day_text.0.x - (day.x + 24.0)).abs() < 0.01, "Day text at {:?}", day_text.0);
-    assert!((day_text.0.y - (day.y + 4.0)).abs() < 0.01, "Day text at {:?}", day_text.0);
+    assert!(
+        (day_text.0.x - (day.x + 24.0)).abs() < 0.01,
+        "Day text at {:?}",
+        day_text.0
+    );
+    assert!(
+        (day_text.0.y - (day.y + 4.0)).abs() < 0.01,
+        "Day text at {:?}",
+        day_text.0
+    );
 }
 
 /// Godot draws a default 16px string with a 16px EM: Open Sans' capital H is
@@ -357,10 +416,22 @@ fn default_font_draws_at_godots_em_size() {
         h.height
     );
     assert_eq!(face.ascent(16.0), 18.0, "Godot's ascent for 16px Open Sans");
-    assert_eq!(face.descent(16.0), 5.0, "Godot's descent for 16px Open Sans");
+    assert_eq!(
+        face.descent(16.0),
+        5.0,
+        "Godot's descent for 16px Open Sans"
+    );
     assert_eq!(face.line_height(16.0), 23.0, "Godot's Label is 23px tall");
-    assert_eq!(face.line_height(30.0), 42.0, "TURBO's 30px line is 42px in Godot");
-    assert_eq!(face.line_height(22.0), 31.0, "the loading label's 22px line is 31px");
+    assert_eq!(
+        face.line_height(30.0),
+        42.0,
+        "TURBO's 30px line is 42px in Godot"
+    );
+    assert_eq!(
+        face.line_height(22.0),
+        31.0,
+        "the loading label's 22px line is 31px"
+    );
 }
 
 #[test]
@@ -369,7 +440,8 @@ fn town_hud_rects_match_godot_without_rendering() {
     let ml = boot_town();
     let tree = ml.tree();
     assert!(
-        tree.get_node_by_path("/root/TownScene/GameUI/Back").is_some(),
+        tree.get_node_by_path("/root/TownScene/GameUI/Back")
+            .is_some(),
         "Enter on the focused first car must load the town"
     );
     // GameUI sits under a Node3D, so it anchors to the 1152x648 window;
@@ -382,7 +454,11 @@ fn town_hud_rects_match_godot_without_rendering() {
             ("/root/TownScene/GameUI", [24.0, 24.0], [157.0, 82.0]),
             ("/root/TownScene/GameUI/Back", [0.0, 0.0], [58.0, 31.0]),
             // separation 20 below the 31px Back button.
-            ("/root/TownScene/GameUI/PanelContainer", [0.0, 51.0], [157.0, 31.0]),
+            (
+                "/root/TownScene/GameUI/PanelContainer",
+                [0.0, 51.0],
+                [157.0, 31.0],
+            ),
             (
                 "/root/TownScene/GameUI/PanelContainer/MarginContainer/VBoxContainer",
                 [4.0, 4.0],
@@ -395,9 +471,21 @@ fn town_hud_rects_match_godot_without_rendering() {
             ),
             ("/root/TownScene/CarUI", [724.0, 556.0], [404.0, 68.0]),
             // The 260x68 turbometer texture decides its minimum.
-            ("/root/TownScene/CarUI/Turbometer", [0.0, 0.0], [260.0, 68.0]),
-            ("/root/TownScene/CarUI/Turbometer/Label", [89.0, 9.0], [102.0, 42.0]),
-            ("/root/TownScene/CarUI/Speedometer", [264.0, 28.0], [140.0, 40.0]),
+            (
+                "/root/TownScene/CarUI/Turbometer",
+                [0.0, 0.0],
+                [260.0, 68.0],
+            ),
+            (
+                "/root/TownScene/CarUI/Turbometer/Label",
+                [89.0, 9.0],
+                [102.0, 42.0],
+            ),
+            (
+                "/root/TownScene/CarUI/Speedometer",
+                [264.0, 28.0],
+                [140.0, 40.0],
+            ),
         ],
     );
     let id = |p: &str| tree.get_node_by_path(p).unwrap();
@@ -407,10 +495,8 @@ fn town_hud_rects_match_godot_without_rendering() {
         gdscene::control::resolved_font_size(tree, id("/root/TownScene/CarUI/Turbometer/Label")),
         30.0
     );
-    let turbo = gdscene::control::combined_minimum_size(
-        tree,
-        id("/root/TownScene/CarUI/Turbometer/Label"),
-    );
+    let turbo =
+        gdscene::control::combined_minimum_size(tree, id("/root/TownScene/CarUI/Turbometer/Label"));
     assert_eq!(turbo.y, 42.0, "a 30px Open Sans line is 42px tall in Godot");
     assert_eq!(
         gdscene::control::resolved_font_size(
@@ -451,17 +537,18 @@ fn town_turbometer_progress_sits_at_its_offset() {
         &theme,
         Vector2::new(1152.0, 648.0),
     );
-    let id = ml.tree().get_node_by_path("/root/TownScene/CarUI/Turbometer").unwrap();
+    let id = ml
+        .tree()
+        .get_node_by_path("/root/TownScene/CarUI/Turbometer")
+        .unwrap();
     let origin = gdscene::control::get_global_position(ml.tree(), id);
     let tex = |name: &str| {
         items
             .iter()
             .find_map(|i| match i {
-                ControlDrawItem::Texture { texture_path, rect, .. }
-                    if texture_path.ends_with(name) =>
-                {
-                    Some(*rect)
-                }
+                ControlDrawItem::Texture {
+                    texture_path, rect, ..
+                } if texture_path.ends_with(name) => Some(*rect),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the turbometer draws {name}"))

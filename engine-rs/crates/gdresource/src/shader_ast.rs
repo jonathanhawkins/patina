@@ -481,9 +481,7 @@ impl Parser {
                                 None
                             };
                             match parsed {
-                                Some(init)
-                                    if matches!(self.peek(), ShaderToken::Semicolon) =>
-                                {
+                                Some(init) if matches!(self.peek(), ShaderToken::Semicolon) => {
                                     program.consts.push((name, ty, init));
                                 }
                                 _ => self.pos = save,
@@ -980,10 +978,10 @@ impl Parser {
 /// Wrapped in a newtype rather than exposed as a bare `Arc<dyn Fn>` so
 /// [`StageContext`] keeps its `Debug` and `Clone` derives; a closure is neither.
 #[derive(Clone)]
-pub struct Sampler(
-    Arc<dyn Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync>,
-    Option<CubeSampleFn>,
-);
+pub struct Sampler(Sample2dFn, Option<CubeSampleFn>);
+
+/// A 2D `sampler2D` lookup: sampler name + UV -> RGBA.
+type Sample2dFn = Arc<dyn Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync>;
 
 /// A `samplerCube` lookup: sampler name + DIRECTION -> RGBA (pat-cezo4).
 type CubeSampleFn = Arc<dyn Fn(&str, [f32; 3]) -> Option<[f32; 4]> + Send + Sync>;
@@ -1275,7 +1273,7 @@ fn exec_stmt(
 
 /// Writes `value` through an assignment target — a name, or a swizzle on one.
 fn assign_to(
-    program: &ShaderProgram,
+    _program: &ShaderProgram,
     target: &Expr,
     value: ShaderValue,
     ctx: &mut StageContext,

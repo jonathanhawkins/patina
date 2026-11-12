@@ -51,7 +51,7 @@ pub fn decode_bmp(data: &[u8]) -> Option<DecodedImage> {
     let height = height_raw.unsigned_abs() as usize;
     let bpx = (bpp / 8) as usize;
     // Each row is padded up to a 4-byte boundary.
-    let row_size = ((bpp as usize * width + 31) / 32) * 4;
+    let row_size = (bpp as usize * width).div_ceil(32) * 4;
     if data.len() < pixel_offset + row_size * height {
         return None;
     }

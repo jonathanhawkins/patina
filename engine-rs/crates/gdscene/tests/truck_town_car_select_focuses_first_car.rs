@@ -128,12 +128,19 @@ fn load_scene_awaits_frame_post_draw_and_reads_the_towns_enum() {
         ml.step(1.0 / 60.0);
     }
     let out = ml.tree_mut().drain_script_output();
-    assert!(out.errors.is_empty(), "no script errors, got {:?}", out.errors);
+    assert!(
+        out.errors.is_empty(),
+        "no script errors, got {:?}",
+        out.errors
+    );
     let town = ml
         .tree()
         .get_node_by_path("/root/TownScene")
         .expect("the town is added once the frame_post_draw await resumes");
-    let mood = ml.tree().get_script(town).and_then(|s| s.get_property("mood"));
+    let mood = ml
+        .tree()
+        .get_script(town)
+        .and_then(|s| s.get_property("mood"));
     assert_eq!(
         mood,
         Some(gdvariant::Variant::Int(1)),

@@ -19,7 +19,9 @@ fn count(needle: &str) -> usize {
 /// to assert what a specific function does / does not call.
 fn func_body(name: &str, len: usize) -> &'static str {
     let sig = format!("function {name}(");
-    let start = HTML.find(&sig).unwrap_or_else(|| panic!("{name} is defined"));
+    let start = HTML
+        .find(&sig)
+        .unwrap_or_else(|| panic!("{name} is defined"));
     &HTML[start..start + len.min(HTML.len() - start)]
 }
 
@@ -35,7 +37,10 @@ fn save_as_opens_the_file_dialog_not_a_browser_prompt() {
     ] {
         assert!(HTML.contains(id), "the Save As dialog has {id}");
     }
-    assert!(HTML.contains("Save Scene As..."), "the dialog is titled like Godot");
+    assert!(
+        HTML.contains("Save Scene As..."),
+        "the dialog is titled like Godot"
+    );
 
     // saveSceneAs opens the dialog and must NOT use a native prompt() anymore.
     let body = func_body("saveSceneAs", 900);
@@ -95,7 +100,9 @@ fn empty_scene_cannot_be_saved() {
 fn save_menu_items_are_wired() {
     // Save Scene -> the toolbar Save button; Save Scene As -> saveSceneAs().
     assert!(HTML.contains(r#"data-action="scene-save-as""#));
-    let start = HTML.find("case 'scene-save-as':").expect("Save As menu case");
+    let start = HTML
+        .find("case 'scene-save-as':")
+        .expect("Save As menu case");
     let seg = &HTML[start..start + 120.min(HTML.len() - start)];
     assert!(
         seg.contains("saveSceneAs()"),

@@ -613,7 +613,11 @@ fn nested_unbind_wrapping_bind() {
     let resolved = unbound.resolve_args(&[Variant::Int(1), Variant::Int(2), Variant::Int(3)]);
     assert_eq!(
         resolved,
-        vec![Variant::Int(1), Variant::Int(2), Variant::String("extra".into())],
+        vec![
+            Variant::Int(1),
+            Variant::Int(2),
+            Variant::String("extra".into())
+        ],
         "outer unbind drops the trailing arg, then the inner bind appends"
     );
 }

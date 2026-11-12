@@ -158,7 +158,7 @@ impl TriangleMesh {
                 // Rank by distance from the origin, not by the ray parameter —
                 // `dir` need not be normalised, so `t` is not a distance.
                 let d = (point - begin).length_squared();
-                if best.as_ref().map_or(true, |(bd, _)| d < *bd) {
+                if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
                     best = Some((
                         d,
                         TriangleMeshHit {

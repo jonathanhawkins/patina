@@ -172,10 +172,7 @@ fn gridmap_tiles_draw_at_the_cell_centre_with_their_orientation() {
         .find(|c| grid.cell_orientation(*c) != 0)
         .expect("the level has rotated tiles");
     let centre = grid.map_to_local(oriented);
-    let (_, basis, _) = instances
-        .iter()
-        .find(|(p, _, _)| *p == centre)
-        .unwrap();
+    let (_, basis, _) = instances.iter().find(|(p, _, _)| *p == centre).unwrap();
     assert_eq!(
         *basis,
         gdscene::grid_map::orientation_basis(grid.cell_orientation(oriented))
@@ -201,7 +198,10 @@ fn mesh_library_reads_item_shapes_and_mesh_transform() {
         shapes,
         vec![
             ("res://stage/collision/corner.res", Vector3::ZERO),
-            ("res://stage/collision/box.tres", Vector3::new(0.0, -2.0, 0.0)),
+            (
+                "res://stage/collision/box.tres",
+                Vector3::new(0.0, -2.0, 0.0)
+            ),
         ]
     );
     assert_eq!(
@@ -359,16 +359,32 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1)
     let child = tree.get_node_by_path("/root/Root/Parent/Child").unwrap();
     let before = gdscene::node3d::get_global_transform(&tree, child).origin;
     assert_eq!(before, Vector3::new(11.0, 3.0, -2.0));
-    gdscene::node3d::call_node3d_method(&mut tree, child, "set_as_top_level", &[Variant::Bool(true)]);
+    gdscene::node3d::call_node3d_method(
+        &mut tree,
+        child,
+        "set_as_top_level",
+        &[Variant::Bool(true)],
+    );
     assert!(gdscene::node3d::is_top_level(&tree, child));
     assert_eq!(
         gdscene::node3d::get_global_transform(&tree, child).origin,
         before,
         "becoming top-level must not move the node"
     );
-    gdscene::node3d::call_node3d_method(&mut tree, child, "set_as_top_level", &[Variant::Bool(false)]);
-    assert_eq!(gdscene::node3d::get_global_transform(&tree, child).origin, before);
-    assert_eq!(gdscene::node3d::get_position(&tree, child), Vector3::new(1.0, 1.0, 1.0));
+    gdscene::node3d::call_node3d_method(
+        &mut tree,
+        child,
+        "set_as_top_level",
+        &[Variant::Bool(false)],
+    );
+    assert_eq!(
+        gdscene::node3d::get_global_transform(&tree, child).origin,
+        before
+    );
+    assert_eq!(
+        gdscene::node3d::get_position(&tree, child),
+        Vector3::new(1.0, 1.0, 1.0)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -439,4 +455,3 @@ fn enemy_lands_rests_and_walks_like_godot() {
         .position;
     assert_near(origin(&ml, E1), body_pos, 1e-4, "node vs its physics body");
 }
-

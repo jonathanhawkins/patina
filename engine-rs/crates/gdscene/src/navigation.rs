@@ -511,7 +511,6 @@ fn string_pull(start: Vector2, end: Vector2, portals: &[(Vector2, Vector2)]) -> 
     let mut apex = start;
     let mut portal_left = start;
     let mut portal_right = start;
-    let mut apex_index = 0usize;
     let mut left_index = 0usize;
     let mut right_index = 0usize;
 
@@ -530,7 +529,7 @@ fn string_pull(start: Vector2, end: Vector2, portals: &[(Vector2, Vector2)]) -> 
                     pts.push(portal_left);
                 }
                 apex = portal_left;
-                apex_index = left_index;
+                let apex_index = left_index;
                 portal_left = apex;
                 portal_right = apex;
                 left_index = apex_index;
@@ -551,7 +550,7 @@ fn string_pull(start: Vector2, end: Vector2, portals: &[(Vector2, Vector2)]) -> 
                     pts.push(portal_right);
                 }
                 apex = portal_right;
-                apex_index = right_index;
+                let apex_index = right_index;
                 portal_left = apex;
                 portal_right = apex;
                 left_index = apex_index;
@@ -963,7 +962,7 @@ impl NavigationServer2D {
         for o in &self.obstacles {
             if o.blocks_segment(a, b) {
                 let pen = o.radius - point_segment_distance(o.position, a, b);
-                if worst.map_or(true, |(_, wp)| pen > wp) {
+                if worst.is_none_or(|(_, wp)| pen > wp) {
                     worst = Some((o, pen));
                 }
             }

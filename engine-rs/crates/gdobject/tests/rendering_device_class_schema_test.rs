@@ -181,7 +181,14 @@ fn small_rd_param_classes_carry_their_schemas() {
         "RDVertexAttribute",
         // `binding` is the vertex-buffer slot; `location` is the shader
         // attribute location. Godot has both and they are not the same thing.
-        &["binding", "location", "offset", "format", "stride", "frequency"],
+        &[
+            "binding",
+            "location",
+            "offset",
+            "format",
+            "stride",
+            "frequency",
+        ],
     );
     assert_has_props(
         "RDPipelineSpecializationConstant",
@@ -198,7 +205,10 @@ fn registration_is_idempotent() {
     let before = props("RDTextureFormat");
     register_viewport_classes();
     let after = props("RDTextureFormat");
-    assert_eq!(before, after, "re-registering must not duplicate properties");
+    assert_eq!(
+        before, after,
+        "re-registering must not duplicate properties"
+    );
 }
 
 /// `RDTextureFormat`'s defaults describe a real 1x1 2D texture, not zeroes —
@@ -216,7 +226,11 @@ fn rd_texture_format_defaults_describe_a_usable_texture() {
             .default_value
             .clone()
     };
-    assert_eq!(get("width"), Variant::Int(1), "extent defaults are 1, not 0");
+    assert_eq!(
+        get("width"),
+        Variant::Int(1),
+        "extent defaults are 1, not 0"
+    );
     assert_eq!(get("height"), Variant::Int(1));
     assert_eq!(get("depth"), Variant::Int(1));
     assert_eq!(get("array_layers"), Variant::Int(1));

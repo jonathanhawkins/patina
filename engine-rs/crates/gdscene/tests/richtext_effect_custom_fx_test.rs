@@ -52,9 +52,7 @@ fn draw(markup: &str, elapsed: f64) -> Vec<DrawCommand> {
 fn glyphs(cmds: &[DrawCommand]) -> Vec<(String, Vector2)> {
     cmds.iter()
         .filter_map(|c| match c {
-            DrawCommand::DrawString { text, position, .. } => {
-                Some((text.clone(), *position))
-            }
+            DrawCommand::DrawString { text, position, .. } => Some((text.clone(), *position)),
             _ => None,
         })
         .collect()
@@ -133,7 +131,9 @@ fn richtext_effect_wave_offsets_glyphs_over_time() {
 
     // Per frame: at least one glyph sits somewhere new.
     assert!(
-        at0.iter().zip(&at1).any(|((_, a), (_, b))| (a.y - b.y).abs() > 1e-3),
+        at0.iter()
+            .zip(&at1)
+            .any(|((_, a), (_, b))| (a.y - b.y).abs() > 1e-3),
         "advancing fx_elapsed_time must move the wave: {at0:?} vs {at1:?}"
     );
 
@@ -165,8 +165,16 @@ fn wave_tag_is_stripped_and_untagged_text_is_unaffected() {
     assert_eq!(joined, "hi xy bye", "tags must not survive into the output");
 
     // First and last commands are the untagged runs; they must not move.
-    assert_eq!(a.first().unwrap().1, b.first().unwrap().1, "leading run is static");
-    assert_eq!(a.last().unwrap().1, b.last().unwrap().1, "trailing run is static");
+    assert_eq!(
+        a.first().unwrap().1,
+        b.first().unwrap().1,
+        "leading run is static"
+    );
+    assert_eq!(
+        a.last().unwrap().1,
+        b.last().unwrap().1,
+        "trailing run is static"
+    );
 }
 
 #[test]
@@ -216,7 +224,10 @@ fn effect_phase_continues_across_a_nested_tag() {
             _ => None,
         })
         .collect();
-    assert_ne!(colors[0], colors[3], "the nested colour tag must still apply");
+    assert_ne!(
+        colors[0], colors[3],
+        "the nested colour tag must still apply"
+    );
 }
 
 #[test]
@@ -226,7 +237,10 @@ fn unknown_and_custom_effect_tags_are_stripped_not_rendered() {
     // leaking the tag into the output or panicking.
     let g = glyphs(&draw("[ghost]boo[/ghost]", 0.0));
     let joined: String = g.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(joined, "boo", "an undispatchable effect renders its text plainly");
+    assert_eq!(
+        joined, "boo",
+        "an undispatchable effect renders its text plainly"
+    );
     assert_eq!(g.len(), 1, "and takes the un-effected fast path");
 }
 

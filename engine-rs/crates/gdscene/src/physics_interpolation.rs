@@ -75,13 +75,12 @@ pub fn effective_interpolation(tree: &SceneTree, node_id: NodeId, tree_enabled: 
         let Some(node) = tree.get_node(id) else {
             break;
         };
-        match node.get_property(INTERP_MODE_PROP) {
-            Variant::Int(v) => match PhysicsInterpolationMode::from_i64(v) {
+        if let Variant::Int(v) = node.get_property(INTERP_MODE_PROP) {
+            match PhysicsInterpolationMode::from_i64(v) {
                 PhysicsInterpolationMode::On => return true,
                 PhysicsInterpolationMode::Off => return false,
                 PhysicsInterpolationMode::Inherit => {}
-            },
-            _ => {}
+            }
         }
         current = node.parent();
     }

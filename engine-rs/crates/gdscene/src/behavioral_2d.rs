@@ -635,8 +635,9 @@ pub fn enclosing_sub_viewport(tree: &SceneTree, id: NodeId) -> Option<NodeId> {
 /// SubViewport, otherwise the viewport it sits in (`camera_2d.cpp`
 /// `set_custom_viewport` / `_update_scroll`). `None` is the root viewport.
 pub fn camera2d_viewport(tree: &SceneTree, cam: NodeId) -> Option<NodeId> {
-    if let Some(Variant::ObjectId(oid)) =
-        tree.get_node(cam).map(|n| n.get_property("custom_viewport"))
+    if let Some(Variant::ObjectId(oid)) = tree
+        .get_node(cam)
+        .map(|n| n.get_property("custom_viewport"))
     {
         let target = NodeId::from_object_id(oid);
         if is_sub_viewport(tree, target) {
@@ -770,8 +771,7 @@ fn process_one_camera2d_scroll(tree: &mut SceneTree, cam: NodeId, viewport: Vect
     };
     // No published centre yet => this camera's first frame: snap.
     let current = previous.unwrap_or(target);
-    let center =
-        node2d::compute_camera2d_position(&config, current, target, viewport, dt) + offset;
+    let center = node2d::compute_camera2d_position(&config, current, target, viewport, dt) + offset;
 
     let target_rotation = node2d::get_global_rotation(tree, cam);
     let previous_rotation = match tree

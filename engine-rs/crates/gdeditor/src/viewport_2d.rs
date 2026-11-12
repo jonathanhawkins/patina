@@ -18,9 +18,10 @@ use gdcore::math::{Color, Vector2};
 // ---------------------------------------------------------------------------
 
 /// Active 2D toolbar tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ToolMode2D {
     /// Click-select or rectangle-select nodes.
+    #[default]
     Select,
     /// Move selected nodes by dragging.
     Move,
@@ -28,12 +29,6 @@ pub enum ToolMode2D {
     Rotate,
     /// Scale selected nodes by dragging.
     Scale,
-}
-
-impl Default for ToolMode2D {
-    fn default() -> Self {
-        Self::Select
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +298,7 @@ impl SmartSnap {
         let mut best_dx: Option<(f32, f32)> = None; // (distance, delta)
         let mut best_dy: Option<(f32, f32)> = None;
 
-        for &(_, ref r) in &self.anchors {
+        for (_, r) in &self.anchors {
             let cx = r.center().x;
             let cy = r.center().y;
 
@@ -317,10 +312,8 @@ impl SmartSnap {
             ];
             for delta in x_candidates {
                 let dist = delta.abs();
-                if dist < self.threshold {
-                    if best_dx.is_none() || dist < best_dx.unwrap().0 {
-                        best_dx = Some((dist, -delta));
-                    }
+                if dist < self.threshold && (best_dx.is_none() || dist < best_dx.unwrap().0) {
+                    best_dx = Some((dist, -delta));
                 }
             }
 
@@ -334,10 +327,8 @@ impl SmartSnap {
             ];
             for delta in y_candidates {
                 let dist = delta.abs();
-                if dist < self.threshold {
-                    if best_dy.is_none() || dist < best_dy.unwrap().0 {
-                        best_dy = Some((dist, -delta));
-                    }
+                if dist < self.threshold && (best_dy.is_none() || dist < best_dy.unwrap().0) {
+                    best_dy = Some((dist, -delta));
                 }
             }
         }

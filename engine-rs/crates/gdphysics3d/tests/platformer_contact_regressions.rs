@@ -183,7 +183,11 @@ fn sphere_on_a_convex_slab_reports_the_true_depth() {
     assert!(r.colliding);
     assert!((r.depth - 0.0015).abs() < 1e-4, "depth {}", r.depth);
     // A → B: from the sphere down into the slab.
-    assert!((r.normal - Vector3::new(0.0, -1.0, 0.0)).length() < 1e-3, "{:?}", r.normal);
+    assert!(
+        (r.normal - Vector3::new(0.0, -1.0, 0.0)).length() < 1e-3,
+        "{:?}",
+        r.normal
+    );
 
     let flipped = test_collision_rot(
         Vector3::ZERO,
@@ -219,5 +223,9 @@ fn sphere_on_a_convex_slab_reports_the_true_depth() {
         &slab,
     );
     let to_edge = (off_edge - Vector3::new(-1.0, 0.0, 0.0)).length();
-    assert!((e.depth - (0.68 - to_edge)).abs() < 1e-4, "edge depth {}", e.depth);
+    assert!(
+        (e.depth - (0.68 - to_edge)).abs() < 1e-4,
+        "edge depth {}",
+        e.depth
+    );
 }

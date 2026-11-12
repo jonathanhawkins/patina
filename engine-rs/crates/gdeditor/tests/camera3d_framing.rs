@@ -72,10 +72,9 @@ fn frame(
         // instance with no base — scene/3d/mesh_instance_3d.cpp:132
         // `set_base(RID())`). Without this every frame
         // was empty and the clip assertions passed vacuously.
-        tree.get_node_mut(mesh).unwrap().set_property(
-            "mesh",
-            Variant::String("primitive:BoxMesh".to_string()),
-        );
+        tree.get_node_mut(mesh)
+            .unwrap()
+            .set_property("mesh", Variant::String("primitive:BoxMesh".to_string()));
     }
     tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
         .unwrap();

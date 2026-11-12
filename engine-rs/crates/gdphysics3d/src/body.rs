@@ -568,7 +568,10 @@ impl PhysicsBody3D {
             // box and bound them. An axis-aligned box of a rotated shape cannot
             // be tight, and over-estimating only costs a narrowphase test,
             // whereas under-estimating loses the collision entirely.
-            let mut rotated = Aabb::new(world_pos + world_rot.xform(local.get_endpoint(0)), Vector3::ZERO);
+            let mut rotated = Aabb::new(
+                world_pos + world_rot.xform(local.get_endpoint(0)),
+                Vector3::ZERO,
+            );
             for corner in 1..8u8 {
                 rotated = rotated.expand(world_pos + world_rot.xform(local.get_endpoint(corner)));
             }
@@ -704,7 +707,8 @@ impl PhysicsBody3D {
                     (m / 3.0) * (hx * hx + hy * hy),
                 )
             }
-            Shape3D::CapsuleShape { radius, height } | Shape3D::CylinderShape { radius, height } => {
+            Shape3D::CapsuleShape { radius, height }
+            | Shape3D::CylinderShape { radius, height } => {
                 // Solid cylinder about Y (spin axis) plus perpendicular axes.
                 let (r, h) = (*radius, *height);
                 let axis = 0.5 * m * r * r;
@@ -782,17 +786,22 @@ mod tests {
     #[test]
     fn angular_velocity_integrates_in_world_space() {
         let mut b = make_rigid(Vector3::ZERO);
-        let start = Quaternion::from_axis_angle(Vector3::new(0.0, 1.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let start =
+            Quaternion::from_axis_angle(Vector3::new(0.0, 1.0, 0.0), std::f32::consts::FRAC_PI_2);
         b.rotation = start;
         b.can_sleep = false;
         b.angular_velocity = Vector3::new(0.0, 0.0, 1.0);
         for _ in 0..30 {
             b.integrate(1.0 / 120.0, Vector3::ZERO);
         }
-        let want = (Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), 0.25) * start).normalized();
+        let want =
+            (Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), 0.25) * start).normalized();
         let probe = Vector3::new(0.3, 0.7, -0.2);
         let (got, exp) = (b.rotation.xform(probe), want.xform(probe));
-        assert!((got - exp).length() < 2e-3, "rotated {probe:?} to {got:?}, world-Z spin gives {exp:?}");
+        assert!(
+            (got - exp).length() < 2e-3,
+            "rotated {probe:?} to {got:?}, world-Z spin gives {exp:?}"
+        );
     }
 
     /// pat-qg3nu: a box carried 0.59 m above a custom centre of mass at the
@@ -804,17 +813,26 @@ mod tests {
             BodyId3D(0),
             BodyType3D::Rigid,
             Vector3::ZERO,
-            Shape3D::BoxShape { half_extents: Vector3::new(0.477039, 0.5, 1.16331) },
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(0.477039, 0.5, 1.16331),
+            },
             40.0,
         );
         b.shape_offset = Vector3::new(0.0, 0.588269, 0.0774262);
         let own = b.shape_inertia();
         let about = b.shape_inertia_about_origin();
-        assert!((own.x - 21.38).abs() < 0.05 && (own.z - 6.37).abs() < 0.05, "{own:?}");
+        assert!(
+            (own.x - 21.38).abs() < 0.05 && (own.z - 6.37).abs() < 0.05,
+            "{own:?}"
+        );
         assert!((about.x - 35.46).abs() < 0.05, "{about:?}");
         assert!((about.y - 21.31).abs() < 0.05, "{about:?}");
         assert!((about.z - 20.21).abs() < 0.05, "{about:?}");
-        assert_eq!(b.local_inertia(), own, "no override: the shape's own inertia");
+        assert_eq!(
+            b.local_inertia(),
+            own,
+            "no override: the shape's own inertia"
+        );
         b.inertia_override = Some(about);
         assert_eq!(b.local_inertia(), about);
     }
@@ -1291,7 +1309,10 @@ mod tests {
             1.0,
         );
         assert_eq!(body.inverse_inertia_diagonal(), Vector3::ZERO);
-        assert_eq!(body.apply_inverse_inertia(Vector3::new(1.0, 2.0, 3.0)), Vector3::ZERO);
+        assert_eq!(
+            body.apply_inverse_inertia(Vector3::new(1.0, 2.0, 3.0)),
+            Vector3::ZERO
+        );
     }
 
     #[test]

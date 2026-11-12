@@ -45,64 +45,123 @@ pub const MONITOR_MAX: usize = 59;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(usize)]
 pub enum Monitor {
+    /// Frames rendered in the last second (`TIME_FPS`).
     TimeFps = 0,
+    /// Time spent in the last idle/process frame, in seconds (`TIME_PROCESS`).
     TimeProcess,
+    /// Time spent in the last physics frame, in seconds (`TIME_PHYSICS_PROCESS`).
     TimePhysicsProcess,
+    /// Time spent in the last navigation step, in seconds (`TIME_NAVIGATION_PROCESS`).
     TimeNavigationProcess,
+    /// Static memory currently in use, in bytes (`MEMORY_STATIC`).
     MemoryStatic,
+    /// Peak static memory usage, in bytes (`MEMORY_STATIC_MAX`).
     MemoryStaticMax,
+    /// Peak message-queue buffer usage, in bytes (`MEMORY_MESSAGE_BUFFER_MAX`).
     MemoryMessageBufferMax,
+    /// Number of instantiated objects (`OBJECT_COUNT`).
     ObjectCount,
+    /// Number of resources in use (`OBJECT_RESOURCE_COUNT`).
     ObjectResourceCount,
+    /// Number of nodes in use (`OBJECT_NODE_COUNT`).
     ObjectNodeCount,
+    /// Number of nodes not attached to any tree (`OBJECT_ORPHAN_NODE_COUNT`).
     ObjectOrphanNodeCount,
+    /// Objects drawn in the last frame (`RENDER_TOTAL_OBJECTS_IN_FRAME`).
     RenderTotalObjectsInFrame,
+    /// Vertices/indices drawn in the last frame (`RENDER_TOTAL_PRIMITIVES_IN_FRAME`).
     RenderTotalPrimitivesInFrame,
+    /// Draw calls issued in the last frame (`RENDER_TOTAL_DRAW_CALLS_IN_FRAME`).
     RenderTotalDrawCallsInFrame,
+    /// Estimated video memory in use, in bytes (`RENDER_VIDEO_MEM_USED`).
     RenderVideoMemUsed,
+    /// Video memory used by textures, in bytes (`RENDER_TEXTURE_MEM_USED`).
     RenderTextureMemUsed,
+    /// Video memory used by render buffers, in bytes (`RENDER_BUFFER_MEM_USED`).
     RenderBufferMemUsed,
+    /// Active 2D physics bodies (`PHYSICS_2D_ACTIVE_OBJECTS`).
     Physics2dActiveObjects,
+    /// 2D collision pairs (`PHYSICS_2D_COLLISION_PAIRS`).
     Physics2dCollisionPairs,
+    /// 2D physics islands (`PHYSICS_2D_ISLAND_COUNT`).
     Physics2dIslandCount,
+    /// Active 3D physics bodies (`PHYSICS_3D_ACTIVE_OBJECTS`).
     Physics3dActiveObjects,
+    /// 3D collision pairs (`PHYSICS_3D_COLLISION_PAIRS`).
     Physics3dCollisionPairs,
+    /// 3D physics islands (`PHYSICS_3D_ISLAND_COUNT`).
     Physics3dIslandCount,
+    /// Audio output latency, in seconds (`AUDIO_OUTPUT_LATENCY`).
     AudioOutputLatency,
+    /// Number of active navigation maps, 2D and 3D combined (`NAVIGATION_ACTIVE_MAPS`).
     NavigationActiveMaps,
+    /// Number of active navigation regions, 2D and 3D combined (`NAVIGATION_REGION_COUNT`).
     NavigationRegionCount,
+    /// Number of active navigation agents, 2D and 3D combined (`NAVIGATION_AGENT_COUNT`).
     NavigationAgentCount,
+    /// Number of active navigation links, 2D and 3D combined (`NAVIGATION_LINK_COUNT`).
     NavigationLinkCount,
+    /// Number of navigation mesh polygons, 2D and 3D combined (`NAVIGATION_POLYGON_COUNT`).
     NavigationPolygonCount,
+    /// Number of navigation mesh polygon edges, 2D and 3D combined (`NAVIGATION_EDGE_COUNT`).
     NavigationEdgeCount,
+    /// Number of navigation edges merged by edge-key overlap, 2D and 3D combined (`NAVIGATION_EDGE_MERGE_COUNT`).
     NavigationEdgeMergeCount,
+    /// Number of navigation edges connected by proximity, 2D and 3D combined (`NAVIGATION_EDGE_CONNECTION_COUNT`).
     NavigationEdgeConnectionCount,
+    /// Number of navigation edges that could not be merged, 2D and 3D combined (`NAVIGATION_EDGE_FREE_COUNT`).
     NavigationEdgeFreeCount,
+    /// Number of active navigation obstacles, 2D and 3D combined (`NAVIGATION_OBSTACLE_COUNT`).
     NavigationObstacleCount,
+    /// Pipeline compilations triggered by 2D canvas rendering (`PIPELINE_COMPILATIONS_CANVAS`).
     PipelineCompilationsCanvas,
+    /// Pipeline compilations triggered by loading meshes (`PIPELINE_COMPILATIONS_MESH`).
     PipelineCompilationsMesh,
+    /// Pipeline compilations triggered by adding surfaces/instances (`PIPELINE_COMPILATIONS_SURFACE`).
     PipelineCompilationsSurface,
+    /// Pipeline compilations triggered while drawing (`PIPELINE_COMPILATIONS_DRAW`).
     PipelineCompilationsDraw,
+    /// Pipeline compilations triggered by specialization (`PIPELINE_COMPILATIONS_SPECIALIZATION`).
     PipelineCompilationsSpecialization,
+    /// Number of 2D active navigation maps (`NAVIGATION_2D_ACTIVE_MAPS`).
     Navigation2dActiveMaps,
+    /// Number of 2D active navigation regions (`NAVIGATION_2D_REGION_COUNT`).
     Navigation2dRegionCount,
+    /// Number of 2D active navigation agents (`NAVIGATION_2D_AGENT_COUNT`).
     Navigation2dAgentCount,
+    /// Number of 2D active navigation links (`NAVIGATION_2D_LINK_COUNT`).
     Navigation2dLinkCount,
+    /// Number of 2D navigation mesh polygons (`NAVIGATION_2D_POLYGON_COUNT`).
     Navigation2dPolygonCount,
+    /// Number of 2D navigation mesh polygon edges (`NAVIGATION_2D_EDGE_COUNT`).
     Navigation2dEdgeCount,
+    /// Number of 2D navigation edges merged by edge-key overlap (`NAVIGATION_2D_EDGE_MERGE_COUNT`).
     Navigation2dEdgeMergeCount,
+    /// Number of 2D navigation edges connected by proximity (`NAVIGATION_2D_EDGE_CONNECTION_COUNT`).
     Navigation2dEdgeConnectionCount,
+    /// Number of 2D navigation edges that could not be merged (`NAVIGATION_2D_EDGE_FREE_COUNT`).
     Navigation2dEdgeFreeCount,
+    /// Number of 2D active navigation obstacles (`NAVIGATION_2D_OBSTACLE_COUNT`).
     Navigation2dObstacleCount,
+    /// Number of 3D active navigation maps (`NAVIGATION_3D_ACTIVE_MAPS`).
     Navigation3dActiveMaps,
+    /// Number of 3D active navigation regions (`NAVIGATION_3D_REGION_COUNT`).
     Navigation3dRegionCount,
+    /// Number of 3D active navigation agents (`NAVIGATION_3D_AGENT_COUNT`).
     Navigation3dAgentCount,
+    /// Number of 3D active navigation links (`NAVIGATION_3D_LINK_COUNT`).
     Navigation3dLinkCount,
+    /// Number of 3D navigation mesh polygons (`NAVIGATION_3D_POLYGON_COUNT`).
     Navigation3dPolygonCount,
+    /// Number of 3D navigation mesh polygon edges (`NAVIGATION_3D_EDGE_COUNT`).
     Navigation3dEdgeCount,
+    /// Number of 3D navigation edges merged by edge-key overlap (`NAVIGATION_3D_EDGE_MERGE_COUNT`).
     Navigation3dEdgeMergeCount,
+    /// Number of 3D navigation edges connected by proximity (`NAVIGATION_3D_EDGE_CONNECTION_COUNT`).
     Navigation3dEdgeConnectionCount,
+    /// Number of 3D navigation edges that could not be merged (`NAVIGATION_3D_EDGE_FREE_COUNT`).
     Navigation3dEdgeFreeCount,
+    /// Number of 3D active navigation obstacles (`NAVIGATION_3D_OBSTACLE_COUNT`).
     Navigation3dObstacleCount,
 }
 
@@ -284,6 +343,7 @@ impl Default for PerformanceRegistry {
 }
 
 impl PerformanceRegistry {
+    /// Creates a registry with every built-in monitor at `0.0` and no custom monitors.
     pub fn new() -> Self {
         Self {
             values: [0.0; MONITOR_MAX],
@@ -304,6 +364,7 @@ impl PerformanceRegistry {
         self.values[monitor.to_index()] += delta;
     }
 
+    /// Reads the current value of a built-in monitor.
     pub fn get(&self, monitor: Monitor) -> f64 {
         self.values[monitor.to_index()]
     }
@@ -319,6 +380,7 @@ impl PerformanceRegistry {
         true
     }
 
+    /// Unregisters a custom monitor. Returns `false` if no monitor has that name.
     pub fn remove_custom_monitor(&mut self, name: &str) -> bool {
         if self.custom.remove(name).is_none() {
             return false;
@@ -327,6 +389,7 @@ impl PerformanceRegistry {
         true
     }
 
+    /// Whether a custom monitor with this name is registered.
     pub fn has_custom_monitor(&self, name: &str) -> bool {
         self.custom.contains_key(name)
     }
@@ -378,6 +441,7 @@ pub struct FrameMonitorFeed {
 }
 
 impl FrameMonitorFeed {
+    /// Creates a feed that has not yet recorded any frame.
     pub fn new() -> Self {
         Self::default()
     }

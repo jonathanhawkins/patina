@@ -21,18 +21,13 @@ pub enum LightType {
 /// Godot-compatible shadow mode for OmniLight3D.
 ///
 /// Determines how the shadow map is constructed for point lights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OmniShadowMode {
     /// Render shadows using a dual-paraboloid map (Godot default).
+    #[default]
     DualParaboloid,
     /// Render shadows using a 6-face cubemap (higher quality).
     Cube,
-}
-
-impl Default for OmniShadowMode {
-    fn default() -> Self {
-        Self::DualParaboloid
-    }
 }
 
 /// Converts a colour temperature in Kelvin to an RGB tint, mirroring Godot's
@@ -51,7 +46,7 @@ pub fn kelvin_to_rgb(kelvin: f32) -> Color {
         329.698_73 * (t - 60.0).powf(-0.133_204_76)
     };
     let g = if t <= 66.0 {
-        99.470_802 * t.ln() - 161.119_57
+        99.470_8 * t.ln() - 161.119_57
     } else {
         288.122_17 * (t - 60.0).powf(-0.075_514_85)
     };
@@ -78,9 +73,10 @@ pub fn kelvin_to_rgb(kelvin: f32) -> Color {
 /// binary lit/shadowed edge. The soft levels take multiple taps across the
 /// light's [`shadow_blur`](Light3D::shadow_blur) radius and average the
 /// results, so a texel partially occluded lands between 0 and 1 (a penumbra).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShadowFilterQuality {
     /// Single tap: fully lit or fully shadowed, no penumbra.
+    #[default]
     Hard,
     /// 4 taps.
     Low,
@@ -88,12 +84,6 @@ pub enum ShadowFilterQuality {
     Medium,
     /// 16 taps.
     High,
-}
-
-impl Default for ShadowFilterQuality {
-    fn default() -> Self {
-        Self::Hard
-    }
 }
 
 impl ShadowFilterQuality {

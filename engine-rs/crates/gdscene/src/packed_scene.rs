@@ -539,8 +539,12 @@ impl PackedScene {
                     // Parse instance_placeholder="res://..." (deferred instancing).
                     let instance_placeholder = attrs.get("instance_placeholder").cloned();
 
-                    let unique_id = attrs.get("unique_id").and_then(|v| v.trim().parse::<i64>().ok());
-                    let parent_id_path = attrs.get("parent_id_path").and_then(|v| parse_id_path_attr(v));
+                    let unique_id = attrs
+                        .get("unique_id")
+                        .and_then(|v| v.trim().parse::<i64>().ok());
+                    let parent_id_path = attrs
+                        .get("parent_id_path")
+                        .and_then(|v| parse_id_path_attr(v));
 
                     current = Some(NodeTemplate {
                         unique_id,
@@ -2465,7 +2469,9 @@ impl PackedScene {
             return;
         }
         let s = gdcore::math3d::Transform3D {
-            basis: gdcore::math3d::Basis::from_scale(gdcore::math::Vector3::new(scale, scale, scale)),
+            basis: gdcore::math3d::Basis::from_scale(gdcore::math::Vector3::new(
+                scale, scale, scale,
+            )),
             origin: gdcore::math::Vector3::ZERO,
         };
         for t in &mut self.templates {
@@ -2543,7 +2549,11 @@ impl PackedScene {
             let mut keys: Vec<&String> = t
                 .properties
                 .keys()
-                .filter(|k| !k.starts_with("__") && !k.starts_with("_instance") && k.as_str() != "_script_path")
+                .filter(|k| {
+                    !k.starts_with("__")
+                        && !k.starts_with("_instance")
+                        && k.as_str() != "_script_path"
+                })
                 .collect();
             keys.sort();
             for k in keys {
@@ -2575,21 +2585,36 @@ impl PackedScene {
         match v {
             Variant::String(s) => {
                 if let Some(id) = parse_ext_resource_ref(s) {
-                    let path = self.ext_resources.get(&id).map(|e| e.path.as_str()).unwrap_or("?");
+                    let path = self
+                        .ext_resources
+                        .get(&id)
+                        .map(|e| e.path.as_str())
+                        .unwrap_or("?");
                     return format!("Ext({path})");
                 }
                 let sub = s
                     .strip_prefix("SubResource:")
-                    .or_else(|| s.strip_prefix("SubResource(").and_then(|i| i.strip_suffix(')')))
+                    .or_else(|| {
+                        s.strip_prefix("SubResource(")
+                            .and_then(|i| i.strip_suffix(')'))
+                    })
                     .map(|i| i.trim().trim_matches('"'));
                 if let Some(id) = sub {
-                    let class = self.sub_resources.get(id).map(String::as_str).unwrap_or("?");
+                    let class = self
+                        .sub_resources
+                        .get(id)
+                        .map(String::as_str)
+                        .unwrap_or("?");
                     let mut body = String::new();
                     if let Some(props) = self.sub_resource_props.get(id) {
-                        let mut keys: Vec<&String> = props.keys().filter(|k| !k.starts_with("__")).collect();
+                        let mut keys: Vec<&String> =
+                            props.keys().filter(|k| !k.starts_with("__")).collect();
                         keys.sort();
                         for k in keys {
-                            body.push_str(&format!("{k}={}; ", self.canonical_value(&props[k], depth + 1)));
+                            body.push_str(&format!(
+                                "{k}={}; ",
+                                self.canonical_value(&props[k], depth + 1)
+                            ));
                         }
                     }
                     return format!("Sub({class}){{{body}}}");
@@ -2597,8 +2622,11 @@ impl PackedScene {
                 format!("{s:?}")
             }
             Variant::Array(items) => {
-                let parts: Vec<String> =
-                    items.to_vec().iter().map(|i| self.canonical_value(i, depth + 1)).collect();
+                let parts: Vec<String> = items
+                    .to_vec()
+                    .iter()
+                    .map(|i| self.canonical_value(i, depth + 1))
+                    .collect();
                 format!("[{}]", parts.join(", "))
             }
             Variant::Dictionary(d) => {
@@ -2861,7 +2889,7 @@ impl PackedScene {
             // higher-ranked lifetime on `F: Fn(&str)`. Every other use of
             // `resolve_scene` in this file is either a direct call or a `&F`
             // parameter, which is why this was the one that broke.
-            .and_then(|path| resolve_scene(path));
+            .and_then(resolve_scene);
 
         if let Some(base) = inherited_base {
             let mut base_levels = Vec::new();
@@ -2951,7 +2979,7 @@ impl PackedScene {
             // Check if this node instances a sub-scene.
             if let Some(ref inst_ref) = tmpl.instance {
                 let scene_path = self.resolve_ext_resource_path(inst_ref);
-                let sub_scene = scene_path.and_then(|p| resolve_scene(p));
+                let sub_scene = scene_path.and_then(resolve_scene);
                 if sub_scene.is_none() {
                     // 🔑 Loud, not silent: the node below becomes an EMPTY
                     // typeless `Node`, so a Player whose scene failed to load
@@ -2960,7 +2988,10 @@ impl PackedScene {
                     tracing::error!(
                         "instanced scene {} for node '{}' could not be loaded (unreadable, \
                          unparseable or cyclic); the node is left as an empty placeholder",
-                        scene_path.map_or_else(|| format!("{inst_ref} (unknown ext_resource)"), |p| format!("'{p}'")),
+                        scene_path.map_or_else(
+                            || format!("{inst_ref} (unknown ext_resource)"),
+                            |p| format!("'{p}'")
+                        ),
                         tmpl.name
                     );
                 }
@@ -3040,7 +3071,8 @@ impl PackedScene {
                                 // `instance=`. Marked expanded so
                                 // `expand_instance_placeholders` and the 2D
                                 // instance preview leave it alone.
-                                sub_node.set_property("_instance", Variant::String(inst_ref.clone()));
+                                sub_node
+                                    .set_property("_instance", Variant::String(inst_ref.clone()));
                                 sub_node.set_property(
                                     "_instance_path",
                                     Variant::String(scene_path.to_string()),
@@ -3101,7 +3133,11 @@ impl PackedScene {
                 // (`libraries/ = SubResource("..")`): those ids are THIS
                 // scene's, so the player is rebuilt by this level's finish pass
                 // — the instanced scene's level cannot resolve them.
-                if tmpl.properties.keys().any(|k| k == "libraries" || k.starts_with("libraries/")) {
+                if tmpl
+                    .properties
+                    .keys()
+                    .any(|k| k == "libraries" || k.starts_with("libraries/"))
+                {
                     player_overrides.push(existing_idx);
                 }
                 if let Some(uid) = tmpl.unique_id {
@@ -3273,8 +3309,18 @@ fn apply_template_properties(node: &mut Node, tmpl: &NodeTemplate) {
     for (key, value) in &tmpl.properties {
         node.set_property(key, instance_value(value));
     }
-    const VIEWS: &[&str] = &["position", "rotation", "rotation_degrees", "scale", "basis", "quaternion"];
-    let authored_view = tmpl.properties.iter().any(|(k, _)| VIEWS.contains(&k.as_str()));
+    const VIEWS: &[&str] = &[
+        "position",
+        "rotation",
+        "rotation_degrees",
+        "scale",
+        "basis",
+        "quaternion",
+    ];
+    let authored_view = tmpl
+        .properties
+        .iter()
+        .any(|(k, _)| VIEWS.contains(&k.as_str()));
     if authored_view {
         return;
     }
@@ -3524,7 +3570,7 @@ fn collect_tile_custom_data(
 }
 
 fn collect_tile_occlusion(
-    source_id: i32,
+    _source_id: i32,
     source_props: &HashMap<String, Variant>,
     sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
     tile_size: gdcore::math::Vector2i,
@@ -3589,7 +3635,7 @@ fn collect_tile_occlusion(
 }
 
 fn collect_tile_navigation(
-    source_id: i32,
+    _source_id: i32,
     source_props: &HashMap<String, Variant>,
     sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
     tile_size: gdcore::math::Vector2i,
@@ -3909,12 +3955,12 @@ fn ext_material_props(
         .properties()
         .map(|(k, v)| {
             let v = match v {
-                Variant::String(s) => match parse_ext_resource_ref(s)
-                    .and_then(|id| resource.ext_resources.get(&id))
-                {
-                    Some(ext) => Variant::String(ext.path.clone()),
-                    None => v.clone(),
-                },
+                Variant::String(s) => {
+                    match parse_ext_resource_ref(s).and_then(|id| resource.ext_resources.get(&id)) {
+                        Some(ext) => Variant::String(ext.path.clone()),
+                        None => v.clone(),
+                    }
+                }
                 other => other.clone(),
             };
             (k.clone(), v)
@@ -4262,12 +4308,6 @@ pub fn add_packed_scene_to_tree(
     Ok(new_root_id)
 }
 
-/// Adds all nodes from a [`PackedScene::instance_with_subscenes()`] call
-/// into a [`crate::SceneTree`] under the given parent, with recursive
-/// sub-scene instancing.
-///
-/// The `resolve_scene` callback is invoked for each `instance=ExtResource`
-/// reference, receiving the `res://` path and returning the parsed sub-scene.
 // ---------------------------------------------------------------------------
 // InstancePlaceholder runtime (pat-0q2kx.139)
 // ---------------------------------------------------------------------------
@@ -4557,8 +4597,14 @@ fn flatten_tile_set_into(
     // demo's tiles are on layer 16, its player masks 30) collided with
     // NOTHING while every tile body was created on layer 1.
     for (key, companion) in [
-        ("physics_layer_0/collision_layer", crate::tilemap::TILE_PHYSICS_COLLISION_LAYER),
-        ("physics_layer_0/collision_mask", crate::tilemap::TILE_PHYSICS_COLLISION_MASK),
+        (
+            "physics_layer_0/collision_layer",
+            crate::tilemap::TILE_PHYSICS_COLLISION_LAYER,
+        ),
+        (
+            "physics_layer_0/collision_mask",
+            crate::tilemap::TILE_PHYSICS_COLLISION_MASK,
+        ),
     ] {
         if let Some(Variant::Int(bits)) = set_props.get(key) {
             props.insert(companion.to_string(), Variant::Int(*bits));
@@ -4596,13 +4642,11 @@ fn flatten_tile_set_into(
                 .strip_prefix("ExtResource:")
                 .and_then(|id| ext_resources.get(id).map(|e| e.path.clone()))
                 .unwrap_or_else(|| tex.clone());
-            props
-                .insert(format!("{prefix}texture"), Variant::String(path));
+            props.insert(format!("{prefix}texture"), Variant::String(path));
         }
         for key in ["texture_region_size", "margins", "separation"] {
             if let Some(value) = source_props.get(key) {
-                props
-                    .insert(format!("{prefix}{key}"), value.clone());
+                props.insert(format!("{prefix}{key}"), value.clone());
             }
         }
 
@@ -4613,12 +4657,7 @@ fn flatten_tile_set_into(
         // Flattened onto the node the physics server can build the
         // tile's static bodies from the tree alone, exactly as
         // `__shape__*` lets it build a CollisionShape2D's body.
-        collect_tile_custom_data(
-            source_id,
-            source_props,
-            &custom_data_layers,
-            props,
-        );
+        collect_tile_custom_data(source_id, source_props, &custom_data_layers, props);
         collect_tile_alternative_flags(source_id, source_props, props);
         if collect_tile_physics(source_id, source_props, props) {
             physics_source_ids.push(source_id);
@@ -4873,7 +4912,8 @@ where
             Vec::new()
         };
         let existing = prior.into_iter().find(|&child| {
-            tree.get_node(child).is_some_and(|c| c.name() == node.name())
+            tree.get_node(child)
+                .is_some_and(|c| c.name() == node.name())
         });
 
         let id = match existing {
@@ -4962,7 +5002,10 @@ where
     // Inner levels first, as Godot wires a sub-scene while instancing it,
     // before the scene that instanced it.
     let ids_of = |indices: &[usize]| -> Vec<NodeId> {
-        indices.iter().filter_map(|&i| final_ids.get(i).copied()).collect()
+        indices
+            .iter()
+            .filter_map(|&i| final_ids.get(i).copied())
+            .collect()
     };
     for level in &levels {
         finish_scene_level(
@@ -4986,7 +5029,10 @@ where
 
 /// The post-entry half of a scene mount: current-camera assignment and video
 /// player binding. Run once the scene root is inside the tree.
-pub fn finish_attached_scene(tree: &mut crate::scene_tree::SceneTree, root_id: crate::node::NodeId) {
+pub fn finish_attached_scene(
+    tree: &mut crate::scene_tree::SceneTree,
+    root_id: crate::node::NodeId,
+) {
     auto_assign_current_camera(tree, root_id);
     crate::video_stream::bind_video_players(tree);
 }
@@ -5026,7 +5072,11 @@ fn apply_level_owners(nodes: &mut [Node], levels: &[SceneLevel], own: &[usize]) 
     let ids: Vec<NodeId> = nodes.iter().map(|n| n.id()).collect();
     let index_of: HashMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     let top_root = 0usize;
-    for (root_idx, level_own) in levels.iter().map(|l| (l.root, &l.own)).chain([(top_root, &own.to_vec())]) {
+    for (root_idx, level_own) in levels
+        .iter()
+        .map(|l| (l.root, &l.own))
+        .chain([(top_root, &own.to_vec())])
+    {
         let owner = ids[root_idx];
         for &idx in level_own {
             if idx != root_idx && idx < nodes.len() {
@@ -5037,7 +5087,9 @@ fn apply_level_owners(nodes: &mut [Node], levels: &[SceneLevel], own: &[usize]) 
     let roots: std::collections::HashSet<usize> =
         levels.iter().map(|l| l.root).chain([top_root]).collect();
     for level in levels {
-        let mut cursor = nodes[level.root].parent().and_then(|p| index_of.get(&p).copied());
+        let mut cursor = nodes[level.root]
+            .parent()
+            .and_then(|p| index_of.get(&p).copied());
         while let Some(i) = cursor {
             if roots.contains(&i) {
                 let owner = ids[i];
@@ -5147,7 +5199,11 @@ pub fn add_packed_scene_to_tree_for_editing(
         }
     };
     for path in scene.editable_instances() {
-        let target = if path == "." { Some(root) } else { tree.get_node_relative(root, path) };
+        let target = if path == "." {
+            Some(root)
+        } else {
+            tree.get_node_relative(root, path)
+        };
         if let Some(node) = target.and_then(|id| tree.get_node_mut(id)) {
             node.set_property("_editable_children", Variant::Bool(true));
         }
@@ -5249,7 +5305,9 @@ where
         let Some(sub) = resolve_scene(&path) else {
             // An error, not a warning: the placeholder is an empty `Node`, so
             // the game runs without whatever this scene was (pat-m2jgd).
-            tracing::error!("instanced scene '{path}' could not be loaded; left as an empty placeholder");
+            tracing::error!(
+                "instanced scene '{path}' could not be loaded; left as an empty placeholder"
+            );
             continue;
         };
         match mount_packed_scene(tree, MountPoint::Into(id), &sub, resolve_scene) {
@@ -5272,7 +5330,6 @@ where
     wire_connections(tree, root, &now_resolvable);
     expanded
 }
-
 
 /// Automatically assigns `current = true` to the first Camera3D in the
 /// subtree rooted at `root_id`, if no Camera3D already has `current` set.
@@ -7179,7 +7236,11 @@ position = Vector2(200, 0)
         let world = nodes[0].id();
         let player = nodes[1].id();
         assert!(nodes[0].owner().is_none(), "the scene root has no owner");
-        assert_eq!(nodes[1].owner(), Some(world), "the instance root belongs to World");
+        assert_eq!(
+            nodes[1].owner(),
+            Some(world),
+            "the instance root belongs to World"
+        );
         for node in &nodes[2..] {
             assert_eq!(
                 node.owner(),
@@ -7635,7 +7696,7 @@ fn bezier_scalar(start: f32, c1: f32, c2: f32, end: f32, t: f32) -> f32 {
 /// wrong, and two copies would drift.
 pub(crate) fn bake_curve_samples(data: &[Variant]) -> Option<Vec<f32>> {
     const ELEMS: usize = 5;
-    if data.is_empty() || data.len() % ELEMS != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(ELEMS) {
         return None;
     }
     struct CurvePt {

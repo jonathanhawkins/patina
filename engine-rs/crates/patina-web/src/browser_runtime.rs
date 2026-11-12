@@ -201,11 +201,19 @@ fn window() -> Result<web_sys::Window, JsValue> {
 ///
 /// Recomputed per event rather than cached: the canvas moves when the page
 /// scrolls or reflows, and a stale origin puts every click at an offset.
-fn mapping_for(canvas: &web_sys::HtmlCanvasElement) -> CanvasMapping {
+///
+/// 🔑 Takes the stretch inverse from the running engine (pat-mgixk.74), so
+/// under any stretch mode a click lands on the node drawn under the cursor
+/// instead of at canvas-pixel coordinates.
+fn mapping_for(
+    canvas: &web_sys::HtmlCanvasElement,
+    runtime: &Rc<RefCell<Runtime>>,
+) -> CanvasMapping {
     let rect = canvas.get_bounding_client_rect();
     CanvasMapping {
         origin_css: Vector2::new(rect.left() as f32, rect.top() as f32),
         device_pixel_ratio: crate::canvas::device_pixel_ratio() as f32,
+        canvas_to_project: runtime.borrow().engine.canvas_to_project_transform(),
     }
 }
 
@@ -330,7 +338,7 @@ fn install_listeners(
             canvas.as_ref(),
             "pointermove",
             move |event: web_sys::PointerEvent| {
-                let mapping = mapping_for(&canvas_for_move);
+                let mapping = mapping_for(&canvas_for_move, &runtime);
                 let input = browser_input::pointer_move(
                     client_point(event.as_ref()),
                     Vector2::new(event.movement_x() as f32, event.movement_y() as f32),
@@ -348,7 +356,7 @@ fn install_listeners(
             canvas.as_ref(),
             name,
             move |event: web_sys::PointerEvent| {
-                let mapping = mapping_for(&canvas_for_button);
+                let mapping = mapping_for(&canvas_for_button, &runtime);
                 // `MouseEvent.button` is signed in the DOM IDL; a negative
                 // value is not a button this engine knows.
                 let button = event.button();
@@ -374,7 +382,7 @@ fn install_listeners(
             canvas.as_ref(),
             "wheel",
             move |event: web_sys::WheelEvent| {
-                let mapping = mapping_for(&canvas_for_wheel);
+                let mapping = mapping_for(&canvas_for_wheel, &runtime);
                 let events = browser_input::wheel(
                     event.delta_y() as f32,
                     WheelDeltaMode::from_dom(event.delta_mode()),
@@ -403,7 +411,7 @@ fn install_listeners(
             canvas.as_ref(),
             "touchstart",
             move |event: web_sys::TouchEvent| {
-                let mapping = mapping_for(&canvas_for_touch);
+                let mapping = mapping_for(&canvas_for_touch, &runtime);
                 let now = now_ms();
                 event.prevent_default();
                 let touches = event.changed_touches();
@@ -431,7 +439,7 @@ fn install_listeners(
             canvas.as_ref(),
             "touchmove",
             move |event: web_sys::TouchEvent| {
-                let mapping = mapping_for(&canvas_for_touch);
+                let mapping = mapping_for(&canvas_for_touch, &runtime);
                 let now = now_ms();
                 // Without this a drag on the canvas scrolls or zooms the page.
                 event.prevent_default();
@@ -460,7 +468,7 @@ fn install_listeners(
         let runtime = runtime.clone();
         let canvas_for_touch = canvas.clone();
         listen(canvas.as_ref(), name, move |event: web_sys::TouchEvent| {
-            let mapping = mapping_for(&canvas_for_touch);
+            let mapping = mapping_for(&canvas_for_touch, &runtime);
             let touches = event.changed_touches();
             let mut runtime = runtime.borrow_mut();
             for i in 0..touches.length() {

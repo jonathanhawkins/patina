@@ -6,7 +6,7 @@
 //! [`SceneTree`](crate::scene_tree::SceneTree)) and referenced by
 //! lightweight [`NodeId`] handles.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use gdcore::ObjectId;

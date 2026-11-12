@@ -74,7 +74,11 @@ fn autoload_instantiated_under_root() {
     let mut boot = EngineBootstrap::new(config);
     boot.run_all().expect("boot succeeds");
 
-    assert_eq!(boot.autoloads_instantiated(), 1, "one autoload instantiated");
+    assert_eq!(
+        boot.autoloads_instantiated(),
+        1,
+        "one autoload instantiated"
+    );
 
     let tree = boot.main_loop().expect("main loop built").tree();
 
@@ -165,7 +169,8 @@ fn no_autoloads_when_project_declares_none() {
 
     let mut boot = EngineBootstrap::new(config);
     // The Autoloads phase runs but instantiates nothing.
-    boot.advance_to(BootPhase::Autoloads).expect("reach autoloads");
+    boot.advance_to(BootPhase::Autoloads)
+        .expect("reach autoloads");
     assert_eq!(boot.current_phase(), BootPhase::Autoloads);
     boot.run_all().expect("boot succeeds");
     assert_eq!(boot.autoloads_instantiated(), 0);

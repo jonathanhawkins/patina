@@ -562,7 +562,6 @@ fn transition_replaces_all_root_children() {
     let top_b = tree.add_child(root, Node::new("TopB", "Node")).unwrap();
     let top_c = tree.add_child(root, Node::new("TopC", "Node")).unwrap();
 
-
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();
 

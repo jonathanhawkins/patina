@@ -55,6 +55,7 @@ fn collect<T: Copy>(points: &[T], keep: &[bool]) -> Vec<T> {
         .collect()
 }
 
+#[allow(clippy::needless_range_loop)] // `i` is also the split index
 fn rdp_2d(points: &[Vector2], start: usize, end: usize, eps: f32, keep: &mut [bool]) {
     if end <= start + 1 {
         return; // no interior points to consider
@@ -77,6 +78,7 @@ fn rdp_2d(points: &[Vector2], start: usize, end: usize, eps: f32, keep: &mut [bo
     }
 }
 
+#[allow(clippy::needless_range_loop)] // `i` is also the split index
 fn rdp_3d(points: &[Vector3], start: usize, end: usize, eps: f32, keep: &mut [bool]) {
     if end <= start + 1 {
         return;

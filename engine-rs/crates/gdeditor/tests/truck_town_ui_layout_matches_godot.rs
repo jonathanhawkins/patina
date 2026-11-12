@@ -72,7 +72,9 @@ fn boot_town() -> MainLoop {
         ml.step(1.0 / 60.0);
     }
     assert!(
-        ml.tree().get_node_by_path("/root/TownScene/GameUI/Back").is_some(),
+        ml.tree()
+            .get_node_by_path("/root/TownScene/GameUI/Back")
+            .is_some(),
         "Enter on the focused first car loads the town"
     );
     ml
@@ -158,10 +160,18 @@ fn town_hud_draws_at_godots_rects_with_its_colours_and_textures() {
             }
         }
     }
-    assert!(orange > 200, "the turbometer texture draws ({orange} orange pixels)");
-    let white_block = (556..588).all(|y| (724..756).all(|x| {
-        let c = px(x, y);
-        c.a > 0.99 && c.r > 0.99 && c.g > 0.99 && c.b > 0.99
-    }));
-    assert!(!white_block, "a missing-texture placeholder square sits on the turbometer");
+    assert!(
+        orange > 200,
+        "the turbometer texture draws ({orange} orange pixels)"
+    );
+    let white_block = (556..588).all(|y| {
+        (724..756).all(|x| {
+            let c = px(x, y);
+            c.a > 0.99 && c.r > 0.99 && c.g > 0.99 && c.b > 0.99
+        })
+    });
+    assert!(
+        !white_block,
+        "a missing-texture placeholder square sits on the turbometer"
+    );
 }

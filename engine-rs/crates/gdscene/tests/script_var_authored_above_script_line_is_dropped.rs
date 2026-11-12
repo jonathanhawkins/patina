@@ -22,9 +22,19 @@ fn speed_after_load(node_body: &str) -> (Variant, bool) {
     let root = tree.root_id();
     let scene = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
     let player = tree.get_node(scene).unwrap().children()[0];
-    tree.attach_script(player, Box::new(GDScriptNodeInstance::from_source(SRC, player).unwrap()));
-    let speed = tree.get_script(player).unwrap().get_property("speed").unwrap_or(Variant::Nil);
-    let marker_left = tree.get_node(player).unwrap().has_property("_props_before_script");
+    tree.attach_script(
+        player,
+        Box::new(GDScriptNodeInstance::from_source(SRC, player).unwrap()),
+    );
+    let speed = tree
+        .get_script(player)
+        .unwrap()
+        .get_property("speed")
+        .unwrap_or(Variant::Nil);
+    let marker_left = tree
+        .get_node(player)
+        .unwrap()
+        .has_property("_props_before_script");
     (speed, marker_left)
 }
 
@@ -32,7 +42,11 @@ fn speed_after_load(node_body: &str) -> (Variant, bool) {
 fn a_var_above_the_script_line_keeps_its_initializer() {
     let (speed, marker_left) =
         speed_after_load("position = Vector2(1, 2)\nspeed = 200\nscript = ExtResource(\"1\")");
-    assert_eq!(speed, Variant::Float(200.0), "Godot drops `speed = 200` set before the script");
+    assert_eq!(
+        speed,
+        Variant::Float(200.0),
+        "Godot drops `speed = 200` set before the script"
+    );
     assert!(!marker_left, "the marker is consumed on attach");
 }
 
@@ -56,5 +70,8 @@ fn native_properties_above_the_script_line_are_kept() {
     let scene = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
     let node = tree.get_node(scene).unwrap();
     assert!(!node.has_property("_props_before_script"));
-    assert_eq!(node.get_property("position"), Variant::Vector2(gdcore::math::Vector2::new(5.0, 6.0)));
+    assert_eq!(
+        node.get_property("position"),
+        Variant::Vector2(gdcore::math::Vector2::new(5.0, 6.0))
+    );
 }

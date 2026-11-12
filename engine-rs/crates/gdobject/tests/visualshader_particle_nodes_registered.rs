@@ -19,17 +19,32 @@ use gdvariant::Variant;
 /// Every particle node and the base Godot gives it.
 const PARTICLE_NODES: &[(&str, &str)] = &[
     ("VisualShaderNodeParticleAccelerator", "VisualShaderNode"),
-    ("VisualShaderNodeParticleBoxEmitter", "VisualShaderNodeParticleEmitter"),
+    (
+        "VisualShaderNodeParticleBoxEmitter",
+        "VisualShaderNodeParticleEmitter",
+    ),
     ("VisualShaderNodeParticleConeVelocity", "VisualShaderNode"),
     ("VisualShaderNodeParticleEmit", "VisualShaderNode"),
     ("VisualShaderNodeParticleEmitter", "VisualShaderNode"),
-    ("VisualShaderNodeParticleMeshEmitter", "VisualShaderNodeParticleEmitter"),
-    ("VisualShaderNodeParticleMultiplyByAxisAngle", "VisualShaderNode"),
+    (
+        "VisualShaderNodeParticleMeshEmitter",
+        "VisualShaderNodeParticleEmitter",
+    ),
+    (
+        "VisualShaderNodeParticleMultiplyByAxisAngle",
+        "VisualShaderNode",
+    ),
     // The outlier: it is the graph's *output*, so it derives the output base.
     ("VisualShaderNodeParticleOutput", "VisualShaderNodeOutput"),
     ("VisualShaderNodeParticleRandomness", "VisualShaderNode"),
-    ("VisualShaderNodeParticleRingEmitter", "VisualShaderNodeParticleEmitter"),
-    ("VisualShaderNodeParticleSphereEmitter", "VisualShaderNodeParticleEmitter"),
+    (
+        "VisualShaderNodeParticleRingEmitter",
+        "VisualShaderNodeParticleEmitter",
+    ),
+    (
+        "VisualShaderNodeParticleSphereEmitter",
+        "VisualShaderNodeParticleEmitter",
+    ),
 ];
 
 fn props(class: &str) -> Vec<String> {
@@ -44,7 +59,11 @@ fn props(class: &str) -> Vec<String> {
 fn visualshader_particle_nodes_registered() {
     register_3d_classes();
 
-    assert_eq!(PARTICLE_NODES.len(), 11, "Godot ships 11 particle graph nodes");
+    assert_eq!(
+        PARTICLE_NODES.len(),
+        11,
+        "Godot ships 11 particle graph nodes"
+    );
     for (class, base) in PARTICLE_NODES {
         assert!(class_exists(class), "ClassDB must know {class}");
         assert!(
@@ -58,7 +77,10 @@ fn visualshader_particle_nodes_registered() {
             is_parent_class(class, "VisualShaderNode"),
             "{class} must be a VisualShaderNode"
         );
-        assert!(is_parent_class(class, "Resource"), "VisualShaderNode is a Resource");
+        assert!(
+            is_parent_class(class, "Resource"),
+            "VisualShaderNode is a Resource"
+        );
         assert!(is_parent_class(class, "Object"));
     }
 }
@@ -144,8 +166,7 @@ fn every_concrete_particle_node_instantiates() {
 #[test]
 fn box_emitter_instantiates_with_its_inherited_properties() {
     register_3d_classes();
-    let obj = instantiate("VisualShaderNodeParticleBoxEmitter")
-        .expect("BoxEmitter instantiates");
+    let obj = instantiate("VisualShaderNodeParticleBoxEmitter").expect("BoxEmitter instantiates");
     // Inherited from the abstract emitter base — the property a .tres would
     // carry, and the thing that would be silently dropped if the base were
     // unregistered or the parent wrong. (`get_property` returns a bare Variant;
@@ -181,7 +202,8 @@ fn selector_enums_match_godot() {
     );
     // Randomness op type.
     assert!(
-        class_get_integer_constant("VisualShaderNodeParticleRandomness", "OP_TYPE_SCALAR").is_some()
+        class_get_integer_constant("VisualShaderNodeParticleRandomness", "OP_TYPE_SCALAR")
+            .is_some()
     );
 }
 

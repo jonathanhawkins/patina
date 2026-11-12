@@ -341,7 +341,7 @@ impl SharedWebAudioOutput {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // `&mut *guard` rather than `&mut guard`: an explicit reborrow through
         // `DerefMut` instead of relying on a coercion at a generic call site.
-        f(&mut *guard)
+        f(&mut guard)
     }
 }
 

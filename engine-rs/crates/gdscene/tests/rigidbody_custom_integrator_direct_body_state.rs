@@ -198,7 +198,11 @@ fn rigidbody_3d_custom_integrator_direct_body_state() {
     // `_integrate_forces` from the flush AFTER a step, and a body that entered
     // with the scene has not been stepped before its first tick.
     ml.step(PHYSICS_DT);
-    assert_eq!(ticks(&ml, id), 0, "no callback before the body's first step");
+    assert_eq!(
+        ticks(&ml, id),
+        0,
+        "no callback before the body's first step"
+    );
     ml.step(PHYSICS_DT);
     assert_eq!(
         ticks(&ml, id),

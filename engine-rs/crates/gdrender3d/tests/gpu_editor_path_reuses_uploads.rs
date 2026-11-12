@@ -44,7 +44,10 @@ fn rebuild(r: &mut GpuRenderer3D, texture: &Arc<TextureImage>) {
                 ..Default::default()
             },
         );
-        r.set_transform(inst, Transform3D::IDENTITY.translated(Vector3::new(x, 0.0, -2.5)));
+        r.set_transform(
+            inst,
+            Transform3D::IDENTITY.translated(Vector3::new(x, 0.0, -2.5)),
+        );
         r.set_visible(inst, true);
     }
 }

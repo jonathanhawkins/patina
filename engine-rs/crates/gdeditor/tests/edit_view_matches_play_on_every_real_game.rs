@@ -46,13 +46,24 @@ fn request(port: u16, method: &str, path: &str, body: &str) -> String {
 
 /// `(game dir, scene path relative to it)` for every game with a scenario.
 fn scenario_scenes() -> Vec<(PathBuf, String)> {
-    let games = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../games").canonicalize().unwrap();
+    let games = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../games")
+        .canonicalize()
+        .unwrap();
     let mut out = Vec::new();
     for e in std::fs::read_dir(&games).unwrap().flatten() {
         let sc = e.path().join("playtest.json");
-        let Ok(text) = std::fs::read_to_string(&sc) else { continue };
+        let Ok(text) = std::fs::read_to_string(&sc) else {
+            continue;
+        };
         let v: serde_json::Value = serde_json::from_str(&text).expect("playtest.json parses");
-        out.push((e.path(), v["scene"].as_str().expect("scenario names a scene").to_string()));
+        out.push((
+            e.path(),
+            v["scene"]
+                .as_str()
+                .expect("scenario names a scene")
+                .to_string(),
+        ));
     }
     out.sort();
     out
@@ -69,7 +80,10 @@ struct Summary {
 }
 
 fn summarize(items: &[Render2DItem]) -> Summary {
-    let mut s = Summary { layers_in_order: true, ..Default::default() };
+    let mut s = Summary {
+        layers_in_order: true,
+        ..Default::default()
+    };
     let mut last = i64::MIN;
     for (i, it) in items.iter().enumerate() {
         if it.canvas_layer < last && s.first_out_of_order.is_none() {
@@ -80,7 +94,9 @@ fn summarize(items: &[Render2DItem]) -> Summary {
         match &it.kind {
             Render2DKind::TileMap { cells } => {
                 for q in cells {
-                    *s.tiles.entry((q.dest.size.x.round() as i64, q.dest.size.y.round() as i64)).or_default() += 1;
+                    *s.tiles
+                        .entry((q.dest.size.x.round() as i64, q.dest.size.y.round() as i64))
+                        .or_default() += 1;
                 }
             }
             Render2DKind::Sprite { texture, .. } if !texture.is_empty() => {
@@ -93,11 +109,29 @@ fn summarize(items: &[Render2DItem]) -> Summary {
 }
 
 fn edit_and_play(game: &Path, scene: &str) -> (Summary, Summary) {
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
-    request(port, "POST", "/api/project/open", &format!(r#"{{"path":"{}"}}"#, game.display()));
-    let load = request(port, "POST", "/api/scene/load", &format!(r#"{{"path":"{}"}}"#, game.join(scene).display()));
-    assert!(load.contains("\"ok\""), "{}: load {scene}: {load}", game.display());
+    request(
+        port,
+        "POST",
+        "/api/project/open",
+        &format!(r#"{{"path":"{}"}}"#, game.display()),
+    );
+    let load = request(
+        port,
+        "POST",
+        "/api/scene/load",
+        &format!(r#"{{"path":"{}"}}"#, game.join(scene).display()),
+    );
+    assert!(
+        load.contains("\"ok\""),
+        "{}: load {scene}: {load}",
+        game.display()
+    );
 
     let edit = {
         let state = handle.state();
@@ -112,9 +146,14 @@ fn edit_and_play(game: &Path, scene: &str) -> (Summary, Summary) {
         let state = handle.state();
         let mut s = state.lock().unwrap();
         let st = &mut *s;
-        let settings = st.run_project_settings.clone().unwrap_or_else(|| st.project_settings.clone());
+        let settings = st
+            .run_project_settings
+            .clone()
+            .unwrap_or_else(|| st.project_settings.clone());
         let ml = st.run_main_loop.as_mut().expect("a running main loop");
-        prepare_play_frame(ml.tree_mut(), W, H, &mut st.texture_cache, &settings).items().to_vec()
+        prepare_play_frame(ml.tree_mut(), W, H, &mut st.texture_cache, &settings)
+            .items()
+            .to_vec()
     };
     request(port, "POST", "/api/runtime/stop", "");
     (summarize(&edit), summarize(&play))
@@ -124,23 +163,41 @@ fn edit_and_play(game: &Path, scene: &str) -> (Summary, Summary) {
 fn every_games_edit_view_draws_what_play_draws() {
     gdobject::class_db::register_all_classes();
     let scenes = scenario_scenes();
-    assert!(scenes.len() >= 3, "expected the real games' scenarios, found {scenes:?}");
+    assert!(
+        scenes.len() >= 3,
+        "expected the real games' scenarios, found {scenes:?}"
+    );
     let mut failures = Vec::new();
     for (game, scene) in &scenes {
         let name = game.file_name().unwrap().to_string_lossy().to_string();
         let (edit, play) = edit_and_play(game, scene);
         if !edit.layers_in_order {
-            failures.push(format!("{name}: the edit view draws a lower canvas layer after a higher one {:?}", edit.first_out_of_order));
+            failures.push(format!(
+                "{name}: the edit view draws a lower canvas layer after a higher one {:?}",
+                edit.first_out_of_order
+            ));
         }
         if !play.layers_in_order {
-            failures.push(format!("{name}: Play draws a lower canvas layer after a higher one {:?}", play.first_out_of_order));
+            failures.push(format!(
+                "{name}: Play draws a lower canvas layer after a higher one {:?}",
+                play.first_out_of_order
+            ));
         }
         if edit.tiles != play.tiles {
-            failures.push(format!("{name}: tiles differ — edit {:?} vs Play {:?} (size → count)", edit.tiles, play.tiles));
+            failures.push(format!(
+                "{name}: tiles differ — edit {:?} vs Play {:?} (size → count)",
+                edit.tiles, play.tiles
+            ));
         }
-        let missing: Vec<&String> = play.textures.keys().filter(|t| !edit.textures.contains_key(*t)).collect();
+        let missing: Vec<&String> = play
+            .textures
+            .keys()
+            .filter(|t| !edit.textures.contains_key(*t))
+            .collect();
         if !missing.is_empty() {
-            failures.push(format!("{name}: Play draws textures the edit view does not: {missing:?}"));
+            failures.push(format!(
+                "{name}: Play draws textures the edit view does not: {missing:?}"
+            ));
         }
         eprintln!(
             "{name} ({scene}): edit {} textures / {} tiles, Play {} textures / {} tiles",
@@ -150,5 +207,9 @@ fn every_games_edit_view_draws_what_play_draws() {
             play.tiles.values().sum::<usize>()
         );
     }
-    assert!(failures.is_empty(), "edit view ≠ Play:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "edit view ≠ Play:\n{}",
+        failures.join("\n")
+    );
 }

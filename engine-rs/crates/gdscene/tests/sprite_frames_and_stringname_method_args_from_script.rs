@@ -109,14 +109,21 @@ fn the_mob_spawn_idioms_run() {
             .collect::<Vec<_>>(),
         other => panic!("`names` should be the clip list, got {other:?}"),
     };
-    assert_eq!(names, ["fly", "swim", "walk"], "in the resource's own order");
+    assert_eq!(
+        names,
+        ["fly", "swim", "walk"],
+        "in the resource's own order"
+    );
 
     let picked = match var(&ml, mob, "picked") {
         Variant::String(s) => s,
         Variant::StringName(s) => s.as_str().to_string(),
         other => panic!("`picked` should be a clip name, got {other:?}"),
     };
-    assert!(names.contains(&picked), "pick_random chose one of them: {picked}");
+    assert!(
+        names.contains(&picked),
+        "pick_random chose one of them: {picked}"
+    );
 
     assert_eq!(var(&ml, mob, "has_swim"), Variant::Bool(true));
     assert_eq!(var(&ml, mob, "has_run"), Variant::Bool(false));

@@ -150,7 +150,7 @@ pub fn mount_pack(label: impl Into<String>, pack: std::sync::Arc<dyn MountedPack
         pack,
     });
     // Descending priority, so the search order is the mount order.
-    guard.sort_by(|a, b| b.priority.cmp(&a.priority));
+    guard.sort_by_key(|m| std::cmp::Reverse(m.priority));
 }
 
 /// Unmounts the pack registered under `label`. Returns whether one was removed.

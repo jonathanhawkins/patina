@@ -253,7 +253,10 @@ pub struct VisualShaderNode {
 impl VisualShaderNode {
     /// Looks a `.tres` property up by name.
     fn prop(&self, name: &str) -> Option<&Variant> {
-        self.properties.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        self.properties
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 
     /// An integer/enum-index property, or `default` when absent.
@@ -574,10 +577,8 @@ impl VisualShader {
                         helpers.push(name);
                     }
                 }
-                VisualShaderNodeType::RandomRange => {
-                    if !helpers.contains(&"hash_noise_range") {
-                        helpers.push("hash_noise_range");
-                    }
+                VisualShaderNodeType::RandomRange if !helpers.contains(&"hash_noise_range") => {
+                    helpers.push("hash_noise_range");
                 }
                 _ => {}
             }

@@ -58,10 +58,9 @@ fn fixture(camera_claims_current: bool) -> Fixture {
     //
     // `primitive:BoxMesh` is the repo's own generated primitive, read by
     // `node3d::get_mesh_path` straight off the `mesh` property.
-    tree.get_node_mut(mesh).unwrap().set_property(
-        "mesh",
-        Variant::String("primitive:BoxMesh".to_string()),
-    );
+    tree.get_node_mut(mesh)
+        .unwrap()
+        .set_property("mesh", Variant::String("primitive:BoxMesh".to_string()));
     tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
         .unwrap();
     let collision = tree

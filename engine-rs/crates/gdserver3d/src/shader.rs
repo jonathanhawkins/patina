@@ -19,18 +19,13 @@ pub use gdresource::shader_ast::Sampler;
 // Re-use the shader type and uniform type enums that mirror Godot's categories.
 
 /// The type of shader program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ShaderType3D {
     /// Spatial / 3D surface shader (the primary type for this module).
+    #[default]
     Spatial,
     /// Sky / environment shader.
     Sky,
-}
-
-impl Default for ShaderType3D {
-    fn default() -> Self {
-        Self::Spatial
-    }
 }
 
 /// Data types that can appear as shader uniforms.
@@ -628,8 +623,8 @@ fn validate_shader(source: &str, shader_type: ShaderType3D) -> Vec<ShaderDiagnos
     // Validate shader_type matches the expected type.
     for (i, line) in source.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("shader_type ") {
-            let declared = trimmed["shader_type ".len()..].trim_end_matches(';').trim();
+        if let Some(rest) = trimmed.strip_prefix("shader_type ") {
+            let declared = rest.trim_end_matches(';').trim();
             let expected = match shader_type {
                 ShaderType3D::Spatial => "spatial",
                 ShaderType3D::Sky => "sky",
@@ -1317,7 +1312,11 @@ fn parse_color_expr_3d(s: &str) -> ColorExpr3D {
                 || t == "TIME"
                 || ["sin(", "cos(", "fract("].iter().any(|f| t.starts_with(f))
         };
-        let (color, scalar) = if floatish(l) && !floatish(r) { (r, l) } else { (l, r) };
+        let (color, scalar) = if floatish(l) && !floatish(r) {
+            (r, l)
+        } else {
+            (l, r)
+        };
         if !floatish(color) && floatish(scalar) {
             return ColorExpr3D::Scale(
                 Box::new(parse_color_expr_3d(color)),
@@ -1656,7 +1655,9 @@ pub fn execute_fragment_3d(
 }
 
 /// Converts a material parameter into a shader value (pat-s3rrv.36).
-pub(crate) fn uniform_to_shader_value_3d(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
+pub(crate) fn uniform_to_shader_value_3d(
+    v: &Variant,
+) -> Option<gdresource::shader_ast::ShaderValue> {
     use gdresource::shader_ast::ShaderValue as SV;
     Some(match v {
         Variant::Bool(b) => SV::Bool(*b),
@@ -2849,7 +2850,13 @@ uniform bool enabled = true;
             "alpha".into(),
         ))];
         let stmts = fragment_body_to_wgsl_statements(&body).expect("uniforms are bound");
-        assert_eq!(stmts, vec![format!("color.a = custom.{}.x;", wgsl_uniform_field("alpha"))]);
+        assert_eq!(
+            stmts,
+            vec![format!(
+                "color.a = custom.{}.x;",
+                wgsl_uniform_field("alpha")
+            )]
+        );
     }
 
     #[test]
@@ -3129,7 +3136,10 @@ uniform bool enabled = true;
             &HashMap::new(),
             &|_n, _u, _v| Color::new(1.0, 1.0, 1.0, 1.0),
         );
-        assert!((out.r - 0.2).abs() < 1e-5 && (out.b - 0.2).abs() < 1e-5, "{out:?}");
+        assert!(
+            (out.r - 0.2).abs() < 1e-5 && (out.b - 0.2).abs() < 1e-5,
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -3309,9 +3319,15 @@ mod color_scale_tests {
         let e = parse_color_expr_3d("0.5 * tint");
         assert_eq!(
             e,
-            ColorExpr3D::Scale(Box::new(ColorExpr3D::Uniform("tint".into())), FloatExpr3D::Literal(0.5))
+            ColorExpr3D::Scale(
+                Box::new(ColorExpr3D::Uniform("tint".into())),
+                FloatExpr3D::Literal(0.5)
+            )
         );
         let wgsl = color_expr_to_wgsl(&e).unwrap();
-        assert!(wgsl.contains(".rgb * 0.5") && wgsl.contains(".a)"), "{wgsl}");
+        assert!(
+            wgsl.contains(".rgb * 0.5") && wgsl.contains(".a)"),
+            "{wgsl}"
+        );
     }
 }

@@ -87,21 +87,28 @@ fn viewport_smart_snap_aligns_to_siblings() {
     // Wide's left edge = 400 - 50 = 350; dragged (size 40) aligns its left edge
     // there when its center x = 350 + 20 = 370.
     let edge_candidate = Vector2::new(368.0, 300.0);
-    let (edge_snapped, edge_guides) =
-        compute_smart_snap(&tree, dragged, edge_candidate, threshold);
+    let (edge_snapped, edge_guides) = compute_smart_snap(&tree, dragged, edge_candidate, threshold);
     assert!(
         (edge_snapped.x - 370.0).abs() < 1e-5,
         "the node's left edge snaps to the sibling's left edge (x={})",
         edge_snapped.x
     );
     assert!(
-        edge_guides.iter().any(|g| g.axis == "x" && g.target_node_id == wide),
+        edge_guides
+            .iter()
+            .any(|g| g.axis == "x" && g.target_node_id == wide),
         "an edge-alignment guide is shown for the wide sibling"
     );
 
     // A drag outside the threshold neither moves the node nor shows a guide.
     let far = Vector2::new(50.0, 50.0);
     let (far_snapped, far_guides) = compute_smart_snap(&tree, dragged, far, threshold);
-    assert_eq!(far_snapped, far, "far drags are left exactly where they are");
-    assert!(far_guides.is_empty(), "no guide lines when nothing is within range");
+    assert_eq!(
+        far_snapped, far,
+        "far drags are left exactly where they are"
+    );
+    assert!(
+        far_guides.is_empty(),
+        "no guide lines when nothing is within range"
+    );
 }

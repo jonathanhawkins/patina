@@ -172,15 +172,6 @@ impl Ty {
         matches!(self.scalar(), Some(Scalar::Float))
     }
 
-    /// The concrete type a declaration of this inferred type gets.
-    fn concrete(self) -> Ty {
-        match self {
-            Ty::Scalar(Scalar::AbstractInt) => Ty::Scalar(Scalar::Int),
-            Ty::Vector(Scalar::AbstractInt, n) => Ty::Vector(Scalar::Int, n),
-            t => t,
-        }
-    }
-
     fn with_width(self, n: u8) -> Ty {
         let s = self.scalar().unwrap_or(Scalar::Float);
         if n == 1 {
@@ -288,9 +279,21 @@ fn fragment_builtin(name: &str) -> Option<Builtin> {
     let b = |ty, init, writable| Some(Builtin { ty, init, writable });
     match name {
         "UV" | "UV2" => b(vec(2), "in.uv", false),
-        "VERTEX" => b(vec(3), "(camera.view_matrix * vec4<f32>(in.world_position, 1.0)).xyz", false),
-        "NORMAL" => b(vec(3), "normalize((camera.view_matrix * vec4<f32>(in.world_normal, 0.0)).xyz)", true),
-        "VIEW" => b(vec(3), "normalize(-(camera.view_matrix * vec4<f32>(in.world_position, 1.0)).xyz)", false),
+        "VERTEX" => b(
+            vec(3),
+            "(camera.view_matrix * vec4<f32>(in.world_position, 1.0)).xyz",
+            false,
+        ),
+        "NORMAL" => b(
+            vec(3),
+            "normalize((camera.view_matrix * vec4<f32>(in.world_normal, 0.0)).xyz)",
+            true,
+        ),
+        "VIEW" => b(
+            vec(3),
+            "normalize(-(camera.view_matrix * vec4<f32>(in.world_position, 1.0)).xyz)",
+            false,
+        ),
         "FRAGCOORD" => b(vec(4), "in.clip_position", false),
         "SCREEN_UV" => b(vec(2), "in.clip_position.xy / custom.time.yz", false),
         "TIME" => b(Ty::F, "custom.time.x", false),
@@ -305,7 +308,11 @@ fn fragment_builtin(name: &str) -> Option<Builtin> {
         "NODE_POSITION_WORLD" => b(vec(3), "model.model_matrix[3].xyz", false),
         "MODEL_MATRIX" => b(Ty::Matrix(4), "model.model_matrix", false),
         "VIEW_MATRIX" => b(Ty::Matrix(4), "camera.view_matrix", false),
-        "INV_VIEW_MATRIX" => b(Ty::Matrix(4), "custom_rigid_inverse(camera.view_matrix)", false),
+        "INV_VIEW_MATRIX" => b(
+            Ty::Matrix(4),
+            "custom_rigid_inverse(camera.view_matrix)",
+            false,
+        ),
         "PROJECTION_MATRIX" => b(Ty::Matrix(4), "camera.projection_matrix", false),
         "PI" => b(Ty::F, "3.141592653589793", false),
         "TAU" => b(Ty::F, "6.283185307179586", false),
@@ -329,10 +336,21 @@ fn fragment_builtin(name: &str) -> Option<Builtin> {
 /// [`CustomSpatialModule::ignored_outputs`].
 fn ignored_fragment_output(name: &str) -> Option<Ty> {
     Some(match name {
-        "SPECULAR" | "RIM" | "RIM_TINT" | "CLEARCOAT" | "CLEARCOAT_ROUGHNESS" | "ANISOTROPY"
-        | "AO" | "AO_LIGHT_AFFECT" | "SSS_STRENGTH" | "SSS_TRANSMITTANCE_DEPTH"
-        | "SSS_TRANSMITTANCE_BOOST" | "NORMAL_MAP_DEPTH" | "ALPHA_SCISSOR_THRESHOLD"
-        | "ALPHA_HASH_SCALE" | "ALPHA_ANTIALIASING_EDGE" => Ty::F,
+        "SPECULAR"
+        | "RIM"
+        | "RIM_TINT"
+        | "CLEARCOAT"
+        | "CLEARCOAT_ROUGHNESS"
+        | "ANISOTROPY"
+        | "AO"
+        | "AO_LIGHT_AFFECT"
+        | "SSS_STRENGTH"
+        | "SSS_TRANSMITTANCE_DEPTH"
+        | "SSS_TRANSMITTANCE_BOOST"
+        | "NORMAL_MAP_DEPTH"
+        | "ALPHA_SCISSOR_THRESHOLD"
+        | "ALPHA_HASH_SCALE"
+        | "ALPHA_ANTIALIASING_EDGE" => Ty::F,
         "NORMAL_MAP" | "BACKLIGHT" | "BENT_NORMAL_MAP" => vec(3),
         "ANISOTROPY_FLOW" | "ALPHA_TEXTURE_COORDINATE" => vec(2),
         "SSS_TRANSMITTANCE_COLOR" => vec(4),
@@ -351,7 +369,11 @@ fn vertex_builtin(name: &str) -> Option<Builtin> {
         "TIME" => b(Ty::F, "custom.time.x", false),
         "MODEL_MATRIX" => b(Ty::Matrix(4), "model.model_matrix", false),
         "VIEW_MATRIX" => b(Ty::Matrix(4), "camera.view_matrix", false),
-        "INV_VIEW_MATRIX" => b(Ty::Matrix(4), "custom_rigid_inverse(camera.view_matrix)", false),
+        "INV_VIEW_MATRIX" => b(
+            Ty::Matrix(4),
+            "custom_rigid_inverse(camera.view_matrix)",
+            false,
+        ),
         "PROJECTION_MATRIX" => b(Ty::Matrix(4), "camera.projection_matrix", false),
         "NODE_POSITION_WORLD" => b(vec(3), "model.model_matrix[3].xyz", false),
         "CAMERA_POSITION_WORLD" => b(vec(3), "camera.camera_position", false),
@@ -550,7 +572,11 @@ impl Translator {
             return Err(format!("member `.{member}` on a non-vector"));
         };
         let sw = swizzle_wgsl(member).ok_or_else(|| format!("member `.{member}`"))?;
-        if sw.len() > 4 || member.chars().any(|c| swizzle_index(c).unwrap_or(9) >= n as usize) {
+        if sw.len() > 4
+            || member
+                .chars()
+                .any(|c| swizzle_index(c).unwrap_or(9) >= n as usize)
+        {
             return Err(format!("swizzle `.{member}` out of range"));
         }
         let t = if sw.len() == 1 {
@@ -636,7 +662,10 @@ impl Translator {
                 let Some(Expr::Ident { name: s, .. }) = args.first() else {
                     return Err("textureSize of a non-sampler".into());
                 };
-                let slot = *self.samplers.get(s).ok_or("textureSize of an unknown sampler")?;
+                let slot = *self
+                    .samplers
+                    .get(s)
+                    .ok_or("textureSize of an unknown sampler")?;
                 return Ok((
                     format!("vec2<i32>(textureDimensions(ct_{slot}))"),
                     Ty::Vector(Scalar::Int, 2),
@@ -678,9 +707,9 @@ impl Translator {
             Ok((format!("{f}({})", s(0)), first))
         };
         match name {
-            "sin" | "cos" | "tan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" | "exp"
-            | "exp2" | "log" | "log2" | "sqrt" | "abs" | "sign" | "floor" | "ceil" | "fract"
-            | "trunc" | "round" | "radians" | "degrees" | "normalize" => one(name),
+            "sin" | "cos" | "tan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" | "exp" | "exp2"
+            | "log" | "log2" | "sqrt" | "abs" | "sign" | "floor" | "ceil" | "fract" | "trunc"
+            | "round" | "radians" | "degrees" | "normalize" => one(name),
             "roundEven" => one("round"),
             "inversesqrt" => one("inverseSqrt"),
             "dFdx" => one("dpdx"),
@@ -799,7 +828,10 @@ impl Translator {
                         m if m == n => (self.coerce(x, *xt, ty), ty),
                         m if m > n => {
                             let sw = &"xyzw"[..n as usize];
-                            (self.coerce(&format!("({x}).{sw}"), xt.with_width(n), ty), ty)
+                            (
+                                self.coerce(&format!("({x}).{sw}"), xt.with_width(n), ty),
+                                ty,
+                            )
                         }
                         _ => return Err("vector constructor too short".into()),
                     });
@@ -1001,7 +1033,14 @@ impl Translator {
         Ok(())
     }
 
-    fn assign(&mut self, target: &Expr, op: &str, value: &Expr, out: &mut String, pad: &str) -> R<()> {
+    fn assign(
+        &mut self,
+        target: &Expr,
+        op: &str,
+        value: &Expr,
+        out: &mut String,
+        pad: &str,
+    ) -> R<()> {
         // The l-value: a name, optionally swizzled once.
         let (base, base_ty, member) = match target {
             Expr::Ident { name, .. } => {
@@ -1059,7 +1098,11 @@ impl Translator {
         self.stage = stage;
         self.scopes.clear();
         self.scopes.push(HashMap::new());
-        let (params, ret) = self.functions.get(&f.name).cloned().unwrap_or((Vec::new(), Ty::Void));
+        let (params, ret) = self
+            .functions
+            .get(&f.name)
+            .cloned()
+            .unwrap_or((Vec::new(), Ty::Void));
         self.ret = ret;
         let mut sig = Vec::new();
         for (name, ty) in f.params.iter().zip(&params) {
@@ -1104,7 +1147,7 @@ fn rename_word(s: &str, from: &str, to: &str) -> String {
     while i < s.len() {
         if s[i..].starts_with(from)
             && (i == 0 || !is_word(bytes[i - 1]))
-            && bytes.get(i + from.len()).map_or(true, |b| !is_word(*b))
+            && bytes.get(i + from.len()).is_none_or(|b| !is_word(*b))
         {
             out.push_str(to);
             i += from.len();
@@ -1139,13 +1182,28 @@ fn parse_render_modes(source: &str) -> R<SpatialRenderModes> {
                 "depth_test_disabled" => m.depth_test_disabled = true,
                 // Lighting-model and feature toggles this renderer has one
                 // fixed answer for; accepting them changes nothing drawn.
-                "diffuse_burley" | "diffuse_lambert" | "diffuse_lambert_wrap" | "diffuse_toon"
-                | "specular_schlick_ggx" | "specular_toon" | "specular_disabled"
-                | "shadows_disabled" | "ambient_light_disabled" | "fog_disabled"
-                | "vertex_lighting" | "depth_prepass_alpha" | "shadow_to_opacity"
-                | "skip_vertex_transform_disabled" | "alpha_to_coverage"
-                | "alpha_to_coverage_and_one" | "ensure_correct_normals" | "particle_trails"
-                | "sss_mode_skin" | "debug_shadow_splits" | "wireframe" | "" => {}
+                "diffuse_burley"
+                | "diffuse_lambert"
+                | "diffuse_lambert_wrap"
+                | "diffuse_toon"
+                | "specular_schlick_ggx"
+                | "specular_toon"
+                | "specular_disabled"
+                | "shadows_disabled"
+                | "ambient_light_disabled"
+                | "fog_disabled"
+                | "vertex_lighting"
+                | "depth_prepass_alpha"
+                | "shadow_to_opacity"
+                | "skip_vertex_transform_disabled"
+                | "alpha_to_coverage"
+                | "alpha_to_coverage_and_one"
+                | "ensure_correct_normals"
+                | "particle_trails"
+                | "sss_mode_skin"
+                | "debug_shadow_splits"
+                | "wireframe"
+                | "" => {}
                 other => return Err(format!("render_mode `{other}`")),
             }
         }
@@ -1178,9 +1236,7 @@ pub fn transpile_spatial(
         Ok(m) => Ok(m),
         // `textureSample` needs uniform control flow; retry with explicit
         // level-0 samples, which do not. Mip selection is the only cost.
-        Err(e) if e.contains("NonUniform") => {
-            build(base, &program, uniforms, render_modes, true)
-        }
+        Err(e) if e.contains("NonUniform") => build(base, &program, uniforms, render_modes, true),
         Err(e) => Err(e),
     }
 }
@@ -1267,7 +1323,10 @@ fn build(
         if f.name == "light" {
             return Err("custom light() function".into());
         }
-        if f.param_qualifiers.iter().any(|q| q == "out" || q == "inout") {
+        if f.param_qualifiers
+            .iter()
+            .any(|q| q == "out" || q == "inout")
+        {
             return Err(format!("`{}` has an out/inout parameter", f.name));
         }
         let params = f
@@ -1302,7 +1361,13 @@ fn build(
         let declared = Ty::parse(ty).ok_or_else(|| format!("const `{name}` of type `{ty}`"))?;
         let (x, xt) = t.expr(init)?;
         let x = t.coerce(&x, xt, declared);
-        writeln!(consts_src, "const {}: {} = {x};", ident(name), declared.wgsl()).ok();
+        writeln!(
+            consts_src,
+            "const {}: {} = {x};",
+            ident(name),
+            declared.wgsl()
+        )
+        .ok();
         t.consts.insert(name.clone(), declared);
     }
 
@@ -1346,10 +1411,26 @@ fn build(
         t.block(&f.body, &mut fragment_body, 1)?;
     }
 
-    let frag_used = t.used_builtins.get(&Stage::Fragment).cloned().unwrap_or_default();
-    let frag_written = t.written_builtins.get(&Stage::Fragment).cloned().unwrap_or_default();
-    let vert_used = t.used_builtins.get(&Stage::Vertex).cloned().unwrap_or_default();
-    let vert_written = t.written_builtins.get(&Stage::Vertex).cloned().unwrap_or_default();
+    let frag_used = t
+        .used_builtins
+        .get(&Stage::Fragment)
+        .cloned()
+        .unwrap_or_default();
+    let frag_written = t
+        .written_builtins
+        .get(&Stage::Fragment)
+        .cloned()
+        .unwrap_or_default();
+    let vert_used = t
+        .used_builtins
+        .get(&Stage::Vertex)
+        .cloned()
+        .unwrap_or_default();
+    let vert_written = t
+        .written_builtins
+        .get(&Stage::Vertex)
+        .cloned()
+        .unwrap_or_default();
     let uses_time = frag_used.iter().chain(&vert_used).any(|n| n == "TIME");
     let writes_alpha = frag_written.contains("ALPHA");
     let mut ignored_outputs: Vec<String> = frag_written
@@ -1389,11 +1470,23 @@ fn build(
     let all_frag: Vec<&String> = frag_used.iter().collect();
     for name in &all_frag {
         let b = fragment_builtin(name).expect("noted from the table");
-        writeln!(decl, "var<private> {}: {};", builtin_global(Stage::Fragment, name), b.ty.wgsl()).ok();
+        writeln!(
+            decl,
+            "var<private> {}: {};",
+            builtin_global(Stage::Fragment, name),
+            b.ty.wgsl()
+        )
+        .ok();
     }
     for name in &vert_used {
         let b = vertex_builtin(name).expect("noted from the table");
-        writeln!(decl, "var<private> {}: {};", builtin_global(Stage::Vertex, name), b.ty.wgsl()).ok();
+        writeln!(
+            decl,
+            "var<private> {}: {};",
+            builtin_global(Stage::Vertex, name),
+            b.ty.wgsl()
+        )
+        .ok();
     }
     decl.push_str(&consts_src);
     decl.push('\n');
@@ -1412,19 +1505,38 @@ fn build(
         writeln!(frag, "    cvary_{name} = in.cvary_{name};").ok();
     }
     // Seed every output, read or not, so the wrapper below can pack them.
-    let outputs = ["ALBEDO", "ALPHA", "EMISSION", "ROUGHNESS", "METALLIC", "NORMAL"];
+    let outputs = [
+        "ALBEDO",
+        "ALPHA",
+        "EMISSION",
+        "ROUGHNESS",
+        "METALLIC",
+        "NORMAL",
+    ];
     let mut seeded: Vec<String> = all_frag.iter().map(|s| s.to_string()).collect();
     for o in outputs {
         if !seeded.iter().any(|s| s == o) {
             seeded.push(o.to_string());
             let b = fragment_builtin(o).expect("output");
-            writeln!(decl, "var<private> {}: {};", builtin_global(Stage::Fragment, o), b.ty.wgsl()).ok();
+            writeln!(
+                decl,
+                "var<private> {}: {};",
+                builtin_global(Stage::Fragment, o),
+                b.ty.wgsl()
+            )
+            .ok();
         }
     }
     for name in &seeded {
         let b = fragment_builtin(name).expect("noted from the table");
         if !b.init.is_empty() {
-            writeln!(frag, "    {} = {};", builtin_global(Stage::Fragment, name), b.init).ok();
+            writeln!(
+                frag,
+                "    {} = {};",
+                builtin_global(Stage::Fragment, name),
+                b.init
+            )
+            .ok();
         }
     }
     frag.push_str("    custom_fragment_body(in, front_facing);\n");
@@ -1451,12 +1563,24 @@ fn build(
     for o in ["VERTEX", "NORMAL", "UV"] {
         if !vseed.iter().any(|s| s == o) {
             vseed.push(o.to_string());
-            writeln!(decl, "var<private> {}: {};", builtin_global(Stage::Vertex, o), vertex_builtin(o).expect("o").ty.wgsl()).ok();
+            writeln!(
+                decl,
+                "var<private> {}: {};",
+                builtin_global(Stage::Vertex, o),
+                vertex_builtin(o).expect("o").ty.wgsl()
+            )
+            .ok();
         }
     }
     for name in &vseed {
         let b = vertex_builtin(name).expect("noted from the table");
-        writeln!(vert, "    {} = {};", builtin_global(Stage::Vertex, name), b.init).ok();
+        writeln!(
+            vert,
+            "    {} = {};",
+            builtin_global(Stage::Vertex, name),
+            b.init
+        )
+        .ok();
     }
     vert.push_str("    custom_vertex_body();\n");
     for (name, _) in &vary_names {
@@ -1486,7 +1610,13 @@ fn build(
             .unwrap_or(false)
             || !ty.is_float_like();
         let interp = if flat { " @interpolate(flat)" } else { "" };
-        writeln!(vo, "    @location({}){interp} cvary_{name}: {},", 3 + i, ty.wgsl()).ok();
+        writeln!(
+            vo,
+            "    @location({}){interp} cvary_{name}: {},",
+            3 + i,
+            ty.wgsl()
+        )
+        .ok();
     }
     splice(&mut module, vo_marker, &vo)?;
 
@@ -1579,11 +1709,20 @@ fn calls_in(body: &[Stmt]) -> HashSet<String> {
                 e(target, out);
                 e(value, out);
             }
-            Stmt::If { cond, then, otherwise } => {
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 e(cond, out);
                 then.iter().chain(otherwise).for_each(|t| s(t, out));
             }
-            Stmt::For { init, cond, step, body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 init.iter().for_each(|i| s(i, out));
                 cond.iter().for_each(|c| e(c, out));
                 step.iter().for_each(|i| s(i, out));
@@ -1608,9 +1747,12 @@ fn calls_in(body: &[Stmt]) -> HashSet<String> {
 fn validate(module: &str) -> R<()> {
     use wgpu::naga;
     let parsed = naga::front::wgsl::parse_str(module).map_err(|e| format!("wgsl parse: {e}"))?;
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
-        .validate(&parsed)
-        .map_err(|e| format!("wgsl validate: {e:?}"))?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&parsed)
+    .map_err(|e| format!("wgsl validate: {e:?}"))?;
     Ok(())
 }
 
@@ -1632,7 +1774,11 @@ pub fn module_for(
         return None;
     }
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&shader.source_code) {
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&shader.source_code)
+    {
         return Some(hit.clone());
     }
     let built = transpile_spatial(
@@ -1669,7 +1815,12 @@ pub fn slot_value(slot: &UniformSlot, value: Option<&gdvariant::Variant>) -> [f3
     };
     // An unset vec4/colour uniform defaults to opaque in Godot's zero-init
     // only for alpha it was given; a declared default already carries it.
-    if slot.source_color && matches!(slot.ty, UniformType::Vec3 | UniformType::Vec4 | UniformType::Color) {
+    if slot.source_color
+        && matches!(
+            slot.ty,
+            UniformType::Vec3 | UniformType::Vec4 | UniformType::Color
+        )
+    {
         for c in out.iter_mut().take(3) {
             *c = gdcore::math::srgb_to_linear_channel(*c);
         }
@@ -1683,7 +1834,11 @@ mod tests {
     use crate::wgpu_pipeline::SHADER_3D_WGSL;
 
     fn go(src: &str) -> Result<CustomSpatialModule, String> {
-        transpile_spatial(SHADER_3D_WGSL, src, &gdserver3d::shader::parse_uniforms(src))
+        transpile_spatial(
+            SHADER_3D_WGSL,
+            src,
+            &gdserver3d::shader::parse_uniforms(src),
+        )
     }
 
     #[test]
@@ -1805,7 +1960,10 @@ void fragment() {
     fn ignored_outputs_are_listed() {
         let m = go("shader_type spatial;\nvoid fragment() { ALBEDO = vec3(0.5); RIM = 0.2; SPECULAR = 0.1; }\n")
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(m.ignored_outputs, vec!["RIM".to_string(), "SPECULAR".to_string()]);
+        assert_eq!(
+            m.ignored_outputs,
+            vec!["RIM".to_string(), "SPECULAR".to_string()]
+        );
     }
 
     #[test]
@@ -1818,7 +1976,9 @@ void fragment() {
         };
         let v = slot_value(
             &slot,
-            Some(&gdvariant::Variant::Color(gdcore::math::Color::new(0.5, 1.0, 0.0, 0.5))),
+            Some(&gdvariant::Variant::Color(gdcore::math::Color::new(
+                0.5, 1.0, 0.0, 0.5,
+            ))),
         );
         assert!((v[0] - 0.21404).abs() < 1e-3, "{v:?}");
         assert_eq!((v[1], v[2], v[3]), (1.0, 0.0, 0.5));

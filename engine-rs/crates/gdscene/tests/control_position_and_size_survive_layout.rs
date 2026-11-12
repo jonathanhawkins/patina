@@ -58,7 +58,10 @@ fn an_authored_position_and_size_rect_is_drawn_on_every_frame() {
     let (mut tree, _) = boot();
     for n in 1..=3 {
         let fb = frame(&mut tree);
-        assert!(red(&fb, 15, 15), "frame {n}: the Plate is drawn where it was authored");
+        assert!(
+            red(&fb, 15, 15),
+            "frame {n}: the Plate is drawn where it was authored"
+        );
         assert!(!red(&fb, 25, 15), "frame {n}: and only there");
     }
 }
@@ -73,8 +76,14 @@ fn a_position_assigned_later_moves_the_control_and_it_stays_moved() {
         .set_property("position", Variant::Vector2(Vector2::new(50.0, 30.0)));
     for n in 1..=2 {
         let fb = frame(&mut tree);
-        assert!(red(&fb, 55, 35), "frame {n} after the move: drawn at the new position");
-        assert!(!red(&fb, 15, 15), "frame {n} after the move: gone from the old one");
+        assert!(
+            red(&fb, 55, 35),
+            "frame {n} after the move: drawn at the new position"
+        );
+        assert!(
+            !red(&fb, 15, 15),
+            "frame {n} after the move: gone from the old one"
+        );
     }
 }
 
@@ -83,7 +92,10 @@ fn an_anchored_control_still_follows_its_anchors() {
     let (mut tree, main) = boot();
     let fb = frame(&mut tree);
     let c = fb.get_pixel(95, 45);
-    assert!(c.g > 0.9 && c.r < 0.1, "anchored right: x 90..100 of a 100-wide view");
+    assert!(
+        c.g > 0.9 && c.r < 0.1,
+        "anchored right: x 90..100 of a 100-wide view"
+    );
     let anchored = tree.get_node_relative(main, "Anchored").unwrap();
     let pos = tree.get_node(anchored).unwrap().get_property("position");
     assert_eq!(pos, Variant::Vector2(Vector2::new(90.0, 40.0)));

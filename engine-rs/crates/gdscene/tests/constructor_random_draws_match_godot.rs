@@ -65,20 +65,36 @@ fn script_side_construction_draws_too_and_other_classes_draw_nothing() {
     let mut tree = SceneTree::new();
     tree.create_node("Node2D", "Plain");
     tree.create_node("RigidBody2D", "Body");
-    assert_eq!(gdcore::rng::randi(), expected[0], "a Node2D / RigidBody2D draws nothing");
+    assert_eq!(
+        gdcore::rng::randi(),
+        expected[0],
+        "a Node2D / RigidBody2D draws nothing"
+    );
 
     gdcore::rng::seed(7);
     tree.create_node("GPUParticles2D", "Gpu");
-    assert_eq!(gdcore::rng::randi(), expected[2], "GPUParticles2D() draws two");
+    assert_eq!(
+        gdcore::rng::randi(),
+        expected[2],
+        "GPUParticles2D() draws two"
+    );
 
     gdcore::rng::seed(7);
     tree.create_node("CPUParticles2D", "Cpu");
-    assert_eq!(gdcore::rng::randi(), expected[1], "CPUParticles2D() draws one");
+    assert_eq!(
+        gdcore::rng::randi(),
+        expected[1],
+        "CPUParticles2D() draws one"
+    );
 
     gdcore::rng::seed(7);
     tree.create_node("GPUParticles3D", "Gpu3");
     tree.create_node("CPUParticles3D", "Cpu3");
-    assert_eq!(gdcore::rng::randi(), expected[3], "GPUParticles3D() two + CPUParticles3D() one");
+    assert_eq!(
+        gdcore::rng::randi(),
+        expected[3],
+        "GPUParticles3D() two + CPUParticles3D() one"
+    );
 
     // A host building in pieces suppresses them and draws once, in order.
     gdcore::rng::seed(7);
@@ -86,8 +102,15 @@ fn script_side_construction_draws_too_and_other_classes_draw_nothing() {
         let _quiet = gdscene::construction_randomness::suppress();
         tree.create_node("GPUParticles2D", "Quiet")
     };
-    assert_eq!(gdcore::rng::randi(), expected[0], "no draws while suppressed");
+    assert_eq!(
+        gdcore::rng::randi(),
+        expected[0],
+        "no draws while suppressed"
+    );
     gdcore::rng::seed(7);
-    assert_eq!(gdscene::construction_randomness::draw_for_subtree(&tree, gpu), 2);
+    assert_eq!(
+        gdscene::construction_randomness::draw_for_subtree(&tree, gpu),
+        2
+    );
     assert_eq!(gdcore::rng::randi(), expected[2]);
 }

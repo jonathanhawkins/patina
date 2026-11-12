@@ -173,7 +173,10 @@ fn animtree_rejects_duplicate_state_and_unknown_transition() {
     thread::sleep(Duration::from_millis(100));
 
     let first = http_post(port, "/api/animation/tree/state/add", r#"{"name":"Idle"}"#);
-    assert!(first.contains("200 OK"), "first add should succeed:\n{first}");
+    assert!(
+        first.contains("200 OK"),
+        "first add should succeed:\n{first}"
+    );
 
     let dup = http_post(port, "/api/animation/tree/state/add", r#"{"name":"Idle"}"#);
     assert!(

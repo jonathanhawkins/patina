@@ -57,8 +57,12 @@ fn rpc_annotation_end_to_end_dispatch() {
     // the inbound hash resolve to B's matching node — Godot addresses RPCs by
     // node path, not by id.
     let (server, client) = MockNetwork::create_pair(PeerId(2));
-    tree_a.get_multiplayer_mut().set_multiplayer_peer(Box::new(server));
-    tree_b.get_multiplayer_mut().set_multiplayer_peer(Box::new(client));
+    tree_a
+        .get_multiplayer_mut()
+        .set_multiplayer_peer(Box::new(server));
+    tree_b
+        .get_multiplayer_mut()
+        .set_multiplayer_peer(Box::new(client));
 
     // The annotation registered the method: without registration this call
     // fails with UnregisteredRPC, which is what always used to happen.
@@ -115,7 +119,9 @@ func fire():
     // that the node's hp is untouched and nothing was registered for the name.
     tree.call_script_method(id, "fire", &[]);
     assert!(
-        tree.get_multiplayer().get_rpc_config("never_declared").is_none(),
+        tree.get_multiplayer()
+            .get_rpc_config("never_declared")
+            .is_none(),
         "an undeclared method must never be registered"
     );
 }

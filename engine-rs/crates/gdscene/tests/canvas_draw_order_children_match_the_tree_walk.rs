@@ -21,7 +21,11 @@ fn by_tree_walk(tree: &SceneTree, parent: NodeId) -> Vec<NodeId> {
 
 fn assert_all_match(tree: &SceneTree) {
     for id in tree.all_nodes_in_tree_order() {
-        assert_eq!(draw_ordered_children(tree, id), by_tree_walk(tree, id), "children of {id:?}");
+        assert_eq!(
+            draw_ordered_children(tree, id),
+            by_tree_walk(tree, id),
+            "children of {id:?}"
+        );
     }
 }
 
@@ -35,7 +39,9 @@ fn draw_ordered_children_match_the_tree_walk_through_edits() {
     for i in 0..60 {
         let parent = ids[(i * 7) % ids.len()];
         let class = if i % 3 == 0 { "Control" } else { "Node2D" };
-        let id = tree.add_child(parent, Node::new(&format!("N{i}"), class)).unwrap();
+        let id = tree
+            .add_child(parent, Node::new(&format!("N{i}"), class))
+            .unwrap();
         ids.push(id);
     }
     assert_all_match(&tree);
@@ -43,8 +49,12 @@ fn draw_ordered_children_match_the_tree_walk_through_edits() {
     // Reorder, reparent and remove, checking after each.
     let some_parent = ids[1];
     let kids = draw_ordered_children(&tree, some_parent);
-    assert!(kids.len() >= 2, "the fixture must give node 1 several children");
-    tree.move_child(some_parent, kids[kids.len() - 1], 0).unwrap();
+    assert!(
+        kids.len() >= 2,
+        "the fixture must give node 1 several children"
+    );
+    tree.move_child(some_parent, kids[kids.len() - 1], 0)
+        .unwrap();
     assert_all_match(&tree);
     tree.reparent(ids[10], ids[30]).unwrap();
     assert_all_match(&tree);

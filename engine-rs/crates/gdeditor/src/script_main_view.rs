@@ -243,10 +243,7 @@ fn leading_identifier(s: &str) -> Option<String> {
 /// The file-name component of a script path: `res://scripts/player.gd` →
 /// `player.gd`. Used as the display label in the open-scripts switcher.
 fn script_file_name(path: &str) -> String {
-    path.rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(path)
-        .to_string()
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
 /// One row in the editor's "open scripts" switcher list (Godot's script-editor

@@ -73,6 +73,7 @@ pub fn clip_to_screen(v: &VertexOutput, width: u32, height: u32) -> Option<Scree
 /// Uses edge-function (barycentric) rasterization with perspective-correct
 /// attribute interpolation. The fragment shader is invoked for each visible
 /// fragment that passes the depth test.
+#[allow(clippy::too_many_arguments)]
 pub fn rasterize_triangle(
     v0: &ScreenVertex,
     v1: &ScreenVertex,

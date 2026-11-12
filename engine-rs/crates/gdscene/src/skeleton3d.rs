@@ -139,12 +139,7 @@ pub fn cache_bone_count(tree: &mut SceneTree, node_id: NodeId) {
 /// Finds a bone by name, returning its index or `None`.
 pub fn find_bone(tree: &SceneTree, node_id: NodeId, name: &str) -> Option<usize> {
     let count = get_bone_count(tree, node_id);
-    for i in 0..count {
-        if get_bone_name(tree, node_id, i).as_deref() == Some(name) {
-            return Some(i);
-        }
-    }
-    None
+    (0..count).find(|&i| get_bone_name(tree, node_id, i).as_deref() == Some(name))
 }
 
 /// Returns the name of bone at `idx`, or `None` if out of range.

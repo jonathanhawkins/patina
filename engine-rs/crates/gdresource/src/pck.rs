@@ -726,7 +726,7 @@ fn align_up(offset: u64, alignment: u64) -> u64 {
     if alignment == 0 {
         return offset;
     }
-    (offset + alignment - 1) / alignment * alignment
+    offset.div_ceil(alignment) * alignment
 }
 
 // ---------------------------------------------------------------------------
@@ -791,7 +791,7 @@ impl PckMountManager {
             loader,
         });
         // Sort by descending priority for search order.
-        self.mounts.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.mounts.sort_by_key(|m| std::cmp::Reverse(m.priority));
         Ok(())
     }
 

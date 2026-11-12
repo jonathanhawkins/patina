@@ -507,13 +507,7 @@ impl Variant {
                     *f as i64
                 }
             }
-            Self::Bool(b) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
+            Self::Bool(b) if *b => 1,
             Self::String(s) => s.trim().parse::<i64>().unwrap_or(0),
             _ => 0,
         }
@@ -530,13 +524,7 @@ impl Variant {
         match self {
             Self::Float(f) => *f,
             Self::Int(i) => *i as f64,
-            Self::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Self::Bool(b) if *b => 1.0,
             Self::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
             _ => 0.0,
         }
@@ -1474,7 +1462,11 @@ fn c(value: f32) -> String {
 fn num4(value: f32) -> String {
     let s = format!("{:.4}", value);
     let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".to_string() } else { s.to_string() }
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 impl fmt::Display for Variant {

@@ -17,7 +17,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,8 +53,14 @@ fn script_editor_history_and_help_search() {
     let html = editor_html(port);
 
     // History arrows + their navigation wiring.
-    assert!(html.contains(r#"id="script-back""#), "script editor should have a back arrow");
-    assert!(html.contains(r#"id="script-forward""#), "script editor should have a forward arrow");
+    assert!(
+        html.contains(r#"id="script-back""#),
+        "script editor should have a back arrow"
+    );
+    assert!(
+        html.contains(r#"id="script-forward""#),
+        "script editor should have a forward arrow"
+    );
     assert!(
         html.contains("scriptHistoryGo") && html.contains("scriptDocHistory"),
         "the arrows should navigate an edited-document history stack"

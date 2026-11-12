@@ -186,8 +186,16 @@ func _physics_process(delta):
 #[test]
 fn collision_object_2d_get_rid_is_a_rid_that_ray_exclude_honours() {
     let (rid_type, has, hit_without) = rid_probe(false);
-    assert_eq!(rid_type, Variant::Int(23), "get_rid() must be a RID (TYPE_RID = 23)");
-    assert_eq!(has, Variant::Bool(true), "has_method(\"get_rid\") must be true");
+    assert_eq!(
+        rid_type,
+        Variant::Int(23),
+        "get_rid() must be a RID (TYPE_RID = 23)"
+    );
+    assert_eq!(
+        has,
+        Variant::Bool(true),
+        "has_method(\"get_rid\") must be true"
+    );
     assert_eq!(
         hit_without,
         Variant::Array(vec![Variant::Bool(false)].into()),
@@ -358,7 +366,11 @@ func _process(delta):
         (v3.x - expected).abs() < 1e-4 && v3.y.abs() < 1e-6,
         "stick 0.6, deadzone 0.3 -> ({expected:.6}, 0), got {v3:?}"
     );
-    assert_eq!(one("v7"), Vector2::ZERO, "stick 0.6 is inside a 0.7 deadzone");
+    assert_eq!(
+        one("v7"),
+        Vector2::ZERO,
+        "stick 0.6 is inside a 0.7 deadzone"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +459,10 @@ light_energy = 1.0
     tree.add_child(root, node).unwrap();
     gdscene::packed_scene::finish_attached_scene(&mut tree, id);
     let errs = tree.drain_script_errors();
-    assert!(errs.is_empty(), "stage.gd must run without a script error: {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "stage.gd must run without a script error: {errs:?}"
+    );
 
     assert_eq!(
         gdcore::project_settings::directional_soft_shadow_quality_override(),
@@ -463,9 +478,21 @@ light_energy = 1.0
         .copied()
         .filter(|c| tree.get_node(*c).unwrap().class_name() == "DirectionalLight3D")
         .collect();
-    assert_eq!(lights.len(), 2, "the Compatibility branch adds a second sun");
+    assert_eq!(
+        lights.len(),
+        2,
+        "the Compatibility branch adds a second sun"
+    );
     let prop = |n: NodeId, k: &str| tree.get_node(n).unwrap().get_property(k);
-    assert_eq!(prop(lights[0], "sky_mode"), Variant::Int(2), "SKY_MODE_SKY_ONLY = 2");
-    assert_eq!(prop(lights[1], "sky_mode"), Variant::Int(1), "SKY_MODE_LIGHT_ONLY = 1");
+    assert_eq!(
+        prop(lights[0], "sky_mode"),
+        Variant::Int(2),
+        "SKY_MODE_SKY_ONLY = 2"
+    );
+    assert_eq!(
+        prop(lights[1], "sky_mode"),
+        Variant::Int(1),
+        "SKY_MODE_LIGHT_ONLY = 1"
+    );
     assert_eq!(prop(lights[1], "light_energy"), Variant::Float(0.25));
 }

@@ -46,9 +46,15 @@ fn upstream_sidecar() -> String {
 /// with the glb's sidecar REMOVED: Godot's behaviour with no `.import`.
 fn project_without_sidecar() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(platformer_root().join("project.godot"), dir.path().join("project.godot"))
-        .unwrap();
-    copy_dir(&platformer_root().join("player"), &dir.path().join("player"));
+    std::fs::copy(
+        platformer_root().join("project.godot"),
+        dir.path().join("project.godot"),
+    )
+    .unwrap();
+    copy_dir(
+        &platformer_root().join("player"),
+        &dir.path().join("player"),
+    );
     std::fs::remove_file(dir.path().join("player/player.glb.import")).unwrap();
     dir
 }
@@ -70,10 +76,20 @@ fn copy_dir(from: &Path, to: &Path) {
 /// plus the upstream `player.glb.import`.
 fn project_with_upstream_sidecar() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(platformer_root().join("project.godot"), dir.path().join("project.godot"))
-        .unwrap();
-    copy_dir(&platformer_root().join("player"), &dir.path().join("player"));
-    std::fs::write(dir.path().join("player/player.glb.import"), upstream_sidecar()).unwrap();
+    std::fs::copy(
+        platformer_root().join("project.godot"),
+        dir.path().join("project.godot"),
+    )
+    .unwrap();
+    copy_dir(
+        &platformer_root().join("player"),
+        &dir.path().join("player"),
+    );
+    std::fs::write(
+        dir.path().join("player/player.glb.import"),
+        upstream_sidecar(),
+    )
+    .unwrap();
     dir
 }
 
@@ -90,7 +106,9 @@ fn boot(root: &Path, scene: &str) -> (SceneTree, NodeId) {
 }
 
 fn loop_modes(tree: &SceneTree, glb_root: NodeId) -> Vec<(String, LoopMode)> {
-    let ap = tree.get_node_relative(glb_root, "AnimationPlayer").expect("AnimationPlayer");
+    let ap = tree
+        .get_node_relative(glb_root, "AnimationPlayer")
+        .expect("AnimationPlayer");
     let player = tree.get_animation_player(ap).expect("clips attached");
     let mut out: Vec<_> = player
         .animations
@@ -146,10 +164,17 @@ fn idle_loops_through_the_animation_tree_like_godot_with_the_sidecar() {
     let skeleton = tree
         .get_node_relative(player, "Player/Skeleton/Skeleton3D")
         .expect("skeleton");
-    let at = tree.get_node_relative(player, "AnimationTree").expect("tree");
-    let anim_tree = tree.get_animation_tree_mut(at).expect("AnimationTree attached");
+    let at = tree
+        .get_node_relative(player, "AnimationTree")
+        .expect("tree");
+    let anim_tree = tree
+        .get_animation_tree_mut(at)
+        .expect("AnimationTree attached");
     for name in ["run", "speed", "state"] {
-        anim_tree.set_parameter(format!("parameters/{name}/blend_amount"), Variant::Float(0.0));
+        anim_tree.set_parameter(
+            format!("parameters/{name}/blend_amount"),
+            Variant::Float(0.0),
+        );
     }
     for _ in 0..90 {
         anim_tree.advance(1.0 / 60.0);
@@ -157,28 +182,66 @@ fn idle_loops_through_the_animation_tree_like_godot_with_the_sidecar() {
     skeleton3d::process_skeletons(&mut tree);
 
     let godot: &[(&str, [f32; 12])] = &[
-        ("hip", [1.000000, 0.000000, -0.000000, 0.000000, 1.000000, 0.000001, 0.000000, -0.000001, 1.000000, 0.000000, 2.020854, 0.394217]),
-        ("head", [1.000000, -0.000000, -0.000002, 0.000000, 0.999783, 0.020811, 0.000002, -0.020811, 0.999783, 0.000000, 4.897612, 0.283739]),
-        ("r-forearm", [-0.929345, 0.105866, 0.353709, -0.056946, -0.987646, 0.145985, 0.364794, 0.115528, 0.923893, 1.535318, 3.291771, 0.366181]),
-        ("l-foot", [-0.999785, 0.019304, -0.009299, -0.010119, -0.043012, 0.999027, 0.018879, 0.998889, 0.043198, -0.738713, 0.193314, 0.315612]),
+        (
+            "hip",
+            [
+                1.000000, 0.000000, -0.000000, 0.000000, 1.000000, 0.000001, 0.000000, -0.000001,
+                1.000000, 0.000000, 2.020854, 0.394217,
+            ],
+        ),
+        (
+            "head",
+            [
+                1.000000, -0.000000, -0.000002, 0.000000, 0.999783, 0.020811, 0.000002, -0.020811,
+                0.999783, 0.000000, 4.897612, 0.283739,
+            ],
+        ),
+        (
+            "r-forearm",
+            [
+                -0.929345, 0.105866, 0.353709, -0.056946, -0.987646, 0.145985, 0.364794, 0.115528,
+                0.923893, 1.535318, 3.291771, 0.366181,
+            ],
+        ),
+        (
+            "l-foot",
+            [
+                -0.999785, 0.019304, -0.009299, -0.010119, -0.043012, 0.999027, 0.018879, 0.998889,
+                0.043198, -0.738713, 0.193314, 0.315612,
+            ],
+        ),
     ];
     for (name, want) in godot {
         let bone = skeleton3d::find_bone(&tree, skeleton, name).unwrap();
         let t: Transform3D = skeleton3d::get_bone_global_pose(&tree, skeleton, bone);
         let b = &t.basis;
         let got = [
-            b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z, t.origin.x,
-            t.origin.y, t.origin.z,
+            b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z, t.origin.x, t.origin.y,
+            t.origin.z,
         ];
-        let err = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(err <= 1e-4, "{name}: off Godot by {err}\n  patina {got:?}\n  godot  {want:?}");
+        let err = got
+            .iter()
+            .zip(want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            err <= 1e-4,
+            "{name}: off Godot by {err}\n  patina {got:?}\n  godot  {want:?}"
+        );
     }
 }
 
 #[test]
 fn gltf_clip_names_starting_or_ending_with_loop_or_cycle_loop() {
     // `looping_idle` begins with "loop", so Godot's prefix test takes it too.
-    for name in ["loop_walk", "WalkLoop", "Cycle", "run_cycle", "LOOP", "looping_idle"] {
+    for name in [
+        "loop_walk",
+        "WalkLoop",
+        "Cycle",
+        "run_cycle",
+        "LOOP",
+        "looping_idle",
+    ] {
         assert!(gltf_name_requests_loop(name), "{name}");
     }
     // The platformer's own names, and a word that merely CONTAINS one.
@@ -193,10 +256,18 @@ fn clip(name: &str) -> Animation {
 
 #[test]
 fn import_name_hints_loop_and_are_stripped_when_suffixes_are_on() {
-    let mut clips = vec![clip("walk-loop"), clip("run_cycle"), clip("idle$loop"), clip("jump")];
+    let mut clips = vec![
+        clip("walk-loop"),
+        clip("run_cycle"),
+        clip("idle$loop"),
+        clip("jump"),
+    ];
     // `[params]` without `nodes/use_name_suffixes=false`: Godot's default is on.
     apply_import_animation_settings(&mut clips, "[params]\n\n_subresources={}\n");
-    let got: Vec<_> = clips.iter().map(|c| (c.name.as_str(), c.loop_mode)).collect();
+    let got: Vec<_> = clips
+        .iter()
+        .map(|c| (c.name.as_str(), c.loop_mode))
+        .collect();
     assert_eq!(
         got,
         [
@@ -209,7 +280,10 @@ fn import_name_hints_loop_and_are_stripped_when_suffixes_are_on() {
 
     let mut off = vec![clip("walk-loop")];
     apply_import_animation_settings(&mut off, "[params]\nnodes/use_name_suffixes=false\n");
-    assert_eq!((off[0].name.as_str(), off[0].loop_mode), ("walk-loop", LoopMode::None));
+    assert_eq!(
+        (off[0].name.as_str(), off[0].loop_mode),
+        ("walk-loop", LoopMode::None)
+    );
 }
 
 #[test]
@@ -218,7 +292,11 @@ fn a_sidecar_entry_overrides_the_name_rules_including_back_to_none() {
     clips[0].loop_mode = LoopMode::Linear; // what the glTF name rule gave it
     let sidecar = "[params]\n\n_subresources={\n\"animations\": {\n\"cycle\": {\n\"settings/loop_mode\": 0\n},\n\"idle\": {\n\"settings/loop_mode\": 2,\n\"slices/amount\": 0\n}\n}\n}\ngltf/naming_version=2\n";
     apply_import_animation_settings(&mut clips, sidecar);
-    assert_eq!(clips[0].loop_mode, LoopMode::None, "an entry wins over the name rule");
+    assert_eq!(
+        clips[0].loop_mode,
+        LoopMode::None,
+        "an entry wins over the name rule"
+    );
     assert_eq!(clips[1].loop_mode, LoopMode::PingPong);
     assert_eq!(clips[2].loop_mode, LoopMode::None, "no entry: unchanged");
 }

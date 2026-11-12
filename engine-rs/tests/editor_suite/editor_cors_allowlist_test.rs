@@ -8,9 +8,7 @@
 // `not_found`, `path_sandbox`, `cors_origin` — pinned by
 // editor_error_envelope_test.rs); these tests predate it and asked for
 // `E_`-prefixed codes the server never emits.
-use gdeditor::editor_server::{
-    CorsAllowlist, EditorServerHandle, EditorState, RateLimiter,
-};
+use gdeditor::editor_server::{CorsAllowlist, EditorServerHandle, EditorState, RateLimiter};
 use gdscene::node::Node;
 use gdscene::SceneTree;
 

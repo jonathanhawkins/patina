@@ -44,7 +44,9 @@ fn png(
 
 /// Unfiltered rows: a 0 filter byte before each.
 fn rows(rows: &[&[u8]]) -> Vec<u8> {
-    rows.iter().flat_map(|r| std::iter::once(0u8).chain(r.iter().copied())).collect()
+    rows.iter()
+        .flat_map(|r| std::iter::once(0u8).chain(r.iter().copied()))
+        .collect()
 }
 
 fn rgba(t: &gdrender2d::texture::Texture2D, x: u32, y: u32) -> [u8; 4] {
@@ -89,12 +91,28 @@ fn a_2_bit_palette_png_unpacks_and_rounds_its_stride_up() {
 
 #[test]
 fn sixteen_bit_rgba_and_keyed_gray_decode() {
-    let file = png(1, 1, 16, 6, 0, &[], &rows(&[&[0xFF, 0xFF, 0x80, 0x00, 0, 0, 0xFF, 0xFF]]));
+    let file = png(
+        1,
+        1,
+        16,
+        6,
+        0,
+        &[],
+        &rows(&[&[0xFF, 0xFF, 0x80, 0x00, 0, 0, 0xFF, 0xFF]]),
+    );
     let t = decode_png(&file).expect("16-bit RGBA decodes");
     assert_eq!(rgba(&t, 0, 0), [255, 128, 0, 255]);
 
     // A 4-bit gray image whose tRNS keys value 5 to transparent.
-    let file = png(2, 1, 4, 0, 0, &[(b"tRNS", vec![0, 5])], &rows(&[&[(5 << 4) | 15]]));
+    let file = png(
+        2,
+        1,
+        4,
+        0,
+        0,
+        &[(b"tRNS", vec![0, 5])],
+        &rows(&[&[(5 << 4) | 15]]),
+    );
     let t = decode_png(&file).expect("4-bit gray decodes");
     assert_eq!(rgba(&t, 0, 0)[3], 0, "the keyed gray value is transparent");
     assert_eq!(rgba(&t, 1, 0), [255, 255, 255, 255]);

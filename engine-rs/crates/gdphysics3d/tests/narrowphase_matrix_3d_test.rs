@@ -179,7 +179,11 @@ fn capsule_vs_capsule_and_cylinder_pairs_resolve() {
     };
     let cc = collision::test_collision(Vector3::ZERO, &cap, Vector3::new(0.8, 0.0, 0.0), &cap);
     assert!(cc.colliding, "overlapping capsules should collide");
-    assert!(cc.normal.x > 0.8, "capsule→capsule normal +X, got {:?}", cc.normal);
+    assert!(
+        cc.normal.x > 0.8,
+        "capsule→capsule normal +X, got {:?}",
+        cc.normal
+    );
 
     // Cylinder vs cylinder (routed through GJK/EPA) collides when overlapping.
     let cyl = Shape3D::CylinderShape {
@@ -191,7 +195,10 @@ fn capsule_vs_capsule_and_cylinder_pairs_resolve() {
 
     // Capsule vs cylinder (mixed GJK/EPA pair) collides when overlapping.
     let mixed = collision::test_collision(Vector3::ZERO, &cap, Vector3::new(1.0, 0.0, 0.0), &cyl);
-    assert!(mixed.colliding, "overlapping capsule/cylinder should collide");
+    assert!(
+        mixed.colliding,
+        "overlapping capsule/cylinder should collide"
+    );
 }
 
 #[test]
@@ -216,8 +223,15 @@ fn tilted_capsule_on_plane_collides() {
         tilt,
         &cap,
     );
-    assert!(hit.colliding, "tilted capsule should touch the ground plane");
-    assert!(hit.normal.y > 0.9, "plane→capsule normal +Y, got {:?}", hit.normal);
+    assert!(
+        hit.colliding,
+        "tilted capsule should touch the ground plane"
+    );
+    assert!(
+        hit.normal.y > 0.9,
+        "plane→capsule normal +Y, got {:?}",
+        hit.normal
+    );
 }
 
 /// A box resting OFF-centre on a wide floor stays flat: its contact must sit
@@ -227,17 +241,33 @@ fn a_box_resting_off_centre_on_a_wide_floor_stays_flat() {
     let mut world = PhysicsWorld3D::new();
     world.add_body(static_body(
         Vector3::ZERO,
-        Shape3D::BoxShape { half_extents: Vector3::new(10.0, 0.5, 10.0) },
+        Shape3D::BoxShape {
+            half_extents: Vector3::new(10.0, 0.5, 10.0),
+        },
     ));
     let id = world.add_body(rigid(
         Vector3::new(6.0, 1.6, -4.0),
-        Shape3D::BoxShape { half_extents: Vector3::new(0.5, 0.5, 0.5) },
+        Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        },
     ));
     settle(&mut world, 180);
     let b = world.get_body(id).unwrap();
-    assert!((b.position.y - 1.0).abs() < 0.1, "rests on the floor; y={}", b.position.y);
-    assert!(b.rotation.w.abs() > 0.999, "must not tip: rot={:?}", b.rotation);
-    assert!((b.position.x - 6.0).abs() < 0.1 && (b.position.z + 4.0).abs() < 0.1, "must not slide: {:?}", b.position);
+    assert!(
+        (b.position.y - 1.0).abs() < 0.1,
+        "rests on the floor; y={}",
+        b.position.y
+    );
+    assert!(
+        b.rotation.w.abs() > 0.999,
+        "must not tip: rot={:?}",
+        b.rotation
+    );
+    assert!(
+        (b.position.x - 6.0).abs() < 0.1 && (b.position.z + 4.0).abs() < 0.1,
+        "must not slide: {:?}",
+        b.position
+    );
 }
 
 /// Edge: a box whose centre hangs past a ledge still tips — the contact is
@@ -248,13 +278,21 @@ fn a_box_hanging_past_a_ledge_tips_over() {
     // Ledge top face spans x in [-2, 2].
     world.add_body(static_body(
         Vector3::ZERO,
-        Shape3D::BoxShape { half_extents: Vector3::new(2.0, 0.5, 2.0) },
+        Shape3D::BoxShape {
+            half_extents: Vector3::new(2.0, 0.5, 2.0),
+        },
     ));
     let id = world.add_body(rigid(
         Vector3::new(2.3, 1.05, 0.0),
-        Shape3D::BoxShape { half_extents: Vector3::new(0.5, 0.5, 0.5) },
+        Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        },
     ));
     settle(&mut world, 60);
     let b = world.get_body(id).unwrap();
-    assert!(b.rotation.w.abs() < 0.995, "an overhanging box must rotate: rot={:?}", b.rotation);
+    assert!(
+        b.rotation.w.abs() < 0.995,
+        "an overhanging box must rotate: rot={:?}",
+        b.rotation
+    );
 }

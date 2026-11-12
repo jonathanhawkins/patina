@@ -16,7 +16,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,26 +54,42 @@ fn script_menu_actions_perform() {
     // Menu items present (File / Search / Debug) — distinctive labels as they
     // ship in the inline menu definitions.
     for item in [
-        "Save As...", "Save All", "Close All",
-        "Find...", "Find Next", "Replace...", "Find in Files...",
-        "Step Into", "Step Over",
+        "Save As...",
+        "Save All",
+        "Close All",
+        "Find...",
+        "Find Next",
+        "Replace...",
+        "Find in Files...",
+        "Step Into",
+        "Step Over",
     ] {
         assert!(html.contains(item), "script menu missing item `{item}`");
     }
 
     // Actions are wired (the dispatcher performs real work, not a bare log).
     for wired in [
-        "case 'save':", "saveScript()",
+        "case 'save':",
+        "saveScript()",
         "case 'save_as':",
-        "case 'close':", "scriptCloseActive",
-        "case 'close_all':", "scriptCloseAll",
-        "case 'find':", "scriptFindInEditor",
-        "case 'find_in_files':", "scriptFindInFiles",
+        "case 'close':",
+        "scriptCloseActive",
+        "case 'close_all':",
+        "scriptCloseAll",
+        "case 'find':",
+        "scriptFindInEditor",
+        "case 'find_in_files':",
+        "scriptFindInFiles",
         "/api/search?q=",
-        "case 'step_into':", "debug-btn-step-in",
-        "case 'continue':", "debug-btn-continue",
+        "case 'step_into':",
+        "debug-btn-step-in",
+        "case 'continue':",
+        "debug-btn-continue",
     ] {
-        assert!(html.contains(wired), "script menu action not wired: `{wired}`");
+        assert!(
+            html.contains(wired),
+            "script menu action not wired: `{wired}`"
+        );
     }
 
     // The old "wired incrementally" stub is gone.

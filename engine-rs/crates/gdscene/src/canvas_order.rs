@@ -6,7 +6,7 @@
 //! runtime (Y-sort was an editor overlay, `z_as_relative` stored but unused, no
 //! modulate multiply). This module computes those values from scene nodes.
 
-use gdcore::math::{Color, Vector2};
+use gdcore::math::Color;
 use gdvariant::Variant;
 
 use crate::node::Node;
@@ -184,6 +184,7 @@ pub fn clip_children_mode(tree: &SceneTree, node_id: NodeId) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gdcore::math::Vector2;
     use gdvariant::Variant;
 
     fn approx(a: f32, b: f32) -> bool {

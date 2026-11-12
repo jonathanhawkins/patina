@@ -326,9 +326,8 @@ impl SubViewport {
             if let Variant::Int(i) = node.get_property("render_target_clear_mode") {
                 self.clear_mode = ClearMode::from_i64(i);
             }
-            match node.get_property("transparent_bg") {
-                Variant::Bool(b) => self.transparent_bg = b,
-                _ => {}
+            if let Variant::Bool(b) = node.get_property("transparent_bg") {
+                self.transparent_bg = b
             }
         }
     }

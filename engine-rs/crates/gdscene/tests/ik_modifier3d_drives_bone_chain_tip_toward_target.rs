@@ -14,14 +14,14 @@
 //! (0, 1, 0) — rotating a joint's own pose swings its *descendants*, never
 //! itself — so the chain's reach is **2** (bones 1 and 2), not 3.
 
+use gdcore::math::Vector3;
+use gdcore::math3d::Transform3D;
 use gdscene::node::Node;
+use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
 use gdscene::skeleton3d::{
     add_bone, get_bone_global_pose, process_modifiers, set_bone_parent, set_bone_rest,
 };
-use gdcore::math::Vector3;
-use gdcore::math3d::Transform3D;
-use gdscene::node::NodeId;
 use gdvariant::Variant;
 
 /// A skeleton whose bones each sit 1 unit above their parent, so bone 3's
@@ -75,7 +75,10 @@ fn ik_modifier3d_drives_bone_chain_tip_toward_target() {
 
     // Straight up the +Y axis to start.
     let start = get_bone_global_pose(&tree, skel, tip_bone).origin;
-    assert!((start - Vector3::new(0.0, 3.0, 0.0)).length() < 1e-4, "{start:?}");
+    assert!(
+        (start - Vector3::new(0.0, 3.0, 0.0)).length() < 1e-4,
+        "{start:?}"
+    );
 
     // Target out on +X, inside the chain's reachable ball.
     //
@@ -96,7 +99,10 @@ fn ik_modifier3d_drives_bone_chain_tip_toward_target() {
         "tip must move TOWARD the target: {before} -> {after} (tip now {after_pos:?})",
     );
     // A reachable target: the solve should get genuinely close, not just nudge.
-    assert!(after < 0.1, "tip should about reach the target, got {after}");
+    assert!(
+        after < 0.1,
+        "tip should about reach the target, got {after}"
+    );
 }
 
 #[test]

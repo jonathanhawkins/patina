@@ -53,10 +53,17 @@ pub(crate) fn apply_camera_post_for_bytes(
     camera_post(pixels, width, height, env, true);
 }
 
-fn camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3D, for_bytes: bool) {
+fn camera_post(
+    pixels: &mut [Color],
+    width: u32,
+    height: u32,
+    env: &Environment3D,
+    for_bytes: bool,
+) {
     // The byte table stands in for encode + clamp only when nothing runs
     // between them (BCS adjustments and the debanding dither do).
-    let byte_table = (for_bytes && !env.adjustment_enabled && !env.use_debanding).then(srgb_byte_table);
+    let byte_table =
+        (for_bytes && !env.adjustment_enabled && !env.use_debanding).then(srgb_byte_table);
     let exposure = env.tonemap_exposure;
     // AgX reads its own white point (Godot passes `tonemap_agx_white` as the
     // tonemap settings' white when the mapper is AgX — environment.cpp:253).
@@ -79,12 +86,13 @@ fn camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3
     // pixels whose exposed luminance exceeds the HDR threshold contribute, so a
     // scene with no HDR highlights (e.g. the default preview sun at exactly 1.0)
     // produces an all-black glow — skip the whole pyramid in that case.
-    let glow = if env.glow_enabled && glow_has_active_level(env) && scene_can_bloom(pixels, env, exposure)
-    {
-        Some(generate_glow(pixels, width, height, env, exposure))
-    } else {
-        None
-    };
+    let glow =
+        if env.glow_enabled && glow_has_active_level(env) && scene_can_bloom(pixels, env, exposure)
+        {
+            Some(generate_glow(pixels, width, height, env, exposure))
+        } else {
+            None
+        };
     let pre_tonemap_glow = env.glow_blend_mode != GlowBlendMode::Softlight;
 
     // Every pixel below depends only on its own value, its index and the
@@ -97,7 +105,11 @@ fn camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3
 
         // Pre-tonemap glow (every blend mode except soft light).
         if let (Some(g), true) = (glow.as_ref(), pre_tonemap_glow) {
-            let gi = [g[i][0] * intensity, g[i][1] * intensity, g[i][2] * intensity];
+            let gi = [
+                g[i][0] * intensity,
+                g[i][1] * intensity,
+                g[i][2] * intensity,
+            ];
             c = blend_glow(c, gi, env.glow_blend_mode, white, intensity);
         }
 
@@ -107,7 +119,11 @@ fn camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3
         // Post-tonemap glow (soft light only: it must run after tonemapping to
         // avoid a discontinuity at 1.0).
         if let (Some(g), false) = (glow.as_ref(), pre_tonemap_glow) {
-            let mut gi = [g[i][0] * intensity, g[i][1] * intensity, g[i][2] * intensity];
+            let mut gi = [
+                g[i][0] * intensity,
+                g[i][1] * intensity,
+                g[i][2] * intensity,
+            ];
             gi = map(gi);
             c = blend_glow(c, gi, GlowBlendMode::Softlight, white, intensity);
         }
@@ -205,6 +221,7 @@ pub(crate) struct SrgbByteTable {
 
 impl SrgbByteTable {
     #[inline]
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(t > 0)` deliberately catches NaN
     pub(crate) fn byte(&self, t: f32) -> u8 {
         // Negative, -0 and NaN keep the exact path (they are rare here).
         if !(t > 0.0) {
@@ -244,7 +261,10 @@ pub(crate) fn srgb_byte_table() -> &'static SrgbByteTable {
             }
             byte_value[k as usize] = v;
         }
-        SrgbByteTable { thresholds, byte_value }
+        SrgbByteTable {
+            thresholds,
+            byte_value,
+        }
     })
 }
 
@@ -366,7 +386,12 @@ impl AgxCurve {
         w = w * w;
         w /= shoulder_max;
         w *= slope;
-        Self { contrast, toe_a, slope, w }
+        Self {
+            contrast,
+            toe_a,
+            slope,
+            w,
+        }
     }
 
     /// The allenwp tonemapping curve for one channel: a sigmoid power-function
@@ -392,8 +417,8 @@ impl AgxCurve {
 
         // Combined Rec.709 → Rec.2020 and Blender AgX inset matrix.
         let ir = 0.544_814_75 * r + 0.373_787_4 * g + 0.081_397_855 * b;
-        let ig = 0.140_416_95 * r + 0.754_137_55 * g + 0.105_445_5 * b;
-        let ib = 0.088_810_42 * r + 0.178_871_76 * g + 0.732_317_82 * b;
+        let ig = 0.140_416_95 * r + 0.754_137_6 * g + 0.105_445_5 * b;
+        let ib = 0.088_810_42 * r + 0.178_871_76 * g + 0.732_317_8 * b;
 
         // allenwp curve, then clip to the output ceiling (uncapped values show
         // a cyan shift on very bright inputs).
@@ -490,11 +515,7 @@ fn blend_glow(
     intensity: f32,
 ) -> [f32; 3] {
     match mode {
-        GlowBlendMode::Additive => [
-            color[0] + glow[0],
-            color[1] + glow[1],
-            color[2] + glow[2],
-        ],
+        GlowBlendMode::Additive => [color[0] + glow[0], color[1] + glow[1], color[2] + glow[2]],
         GlowBlendMode::Screen => {
             // Glow clamped to [0, white], then screen-blended.
             let g = [
@@ -603,7 +624,11 @@ fn generate_glow(
     let (mut cur, mut cw, mut ch) = downsample_box(&scene_rgb, w, h);
     apply_glow_threshold(&mut cur, env, exposure);
     cur = gaussian_blur(&cur, cw, ch);
-    levels.push(GlowLevel { px: cur.clone(), w: cw, h: ch });
+    levels.push(GlowLevel {
+        px: cur.clone(),
+        w: cw,
+        h: ch,
+    });
 
     // Levels 1..=max_level: plain downsample + blur of the previous level.
     for _ in 1..=max_level {
@@ -616,7 +641,11 @@ fn generate_glow(
         next = gaussian_blur(&next, nw, nh);
         cw = nw;
         ch = nh;
-        levels.push(GlowLevel { px: next, w: cw, h: ch });
+        levels.push(GlowLevel {
+            px: next,
+            w: cw,
+            h: ch,
+        });
     }
 
     // Gather: weighted bilinear sample of each active level at the pixel's uv.
@@ -799,7 +828,16 @@ mod srgb_byte_tests {
                 assert_eq!(table.byte(v), srgb_byte(v), "near threshold {th:e}");
             }
         }
-        for v in [f32::INFINITY, f32::NAN, -0.0, -1.0, f32::NEG_INFINITY, 1e30, 2.0, 1.0] {
+        for v in [
+            f32::INFINITY,
+            f32::NAN,
+            -0.0,
+            -1.0,
+            f32::NEG_INFINITY,
+            1e30,
+            2.0,
+            1.0,
+        ] {
             assert_eq!(table.byte(v), srgb_byte(v), "{v}");
         }
         for k in 0..=255u32 {
@@ -817,15 +855,32 @@ mod srgb_byte_tests {
         let src: Vec<Color> = (0..w * h)
             .map(|i| {
                 let f = i as f32 / (w * h) as f32;
-                Color::new(f * 4.0, (f * 37.0).fract() * 1.5, ((i * 7919) % 1000) as f32 / 300.0, 1.0)
+                Color::new(
+                    f * 4.0,
+                    (f * 37.0).fract() * 1.5,
+                    ((i * 7919) % 1000) as f32 / 300.0,
+                    1.0,
+                )
             })
             .collect();
-        for mapper in [ToneMapper::Agx, ToneMapper::Linear, ToneMapper::Filmic, ToneMapper::Aces, ToneMapper::Reinhard] {
+        for mapper in [
+            ToneMapper::Agx,
+            ToneMapper::Linear,
+            ToneMapper::Filmic,
+            ToneMapper::Aces,
+            ToneMapper::Reinhard,
+        ] {
             env.tone_mapper = mapper;
             let (mut a, mut b) = (src.clone(), src.clone());
             apply_camera_post(&mut a, w, h, &env);
             apply_camera_post_for_bytes(&mut b, w, h, &env);
-            let pack = |c: &Color| [(c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8];
+            let pack = |c: &Color| {
+                [
+                    (c.r * 255.0) as u8,
+                    (c.g * 255.0) as u8,
+                    (c.b * 255.0) as u8,
+                ]
+            };
             for (i, (x, y)) in a.iter().zip(&b).enumerate() {
                 assert_eq!(pack(x), pack(y), "{mapper:?} pixel {i}");
             }
@@ -851,7 +906,11 @@ mod tests {
         assert!(tonemap_filmic(0.2, 1.0) < tonemap_filmic(0.5, 1.0));
         assert!(tonemap_filmic(0.5, 1.0) < tonemap_filmic(0.9, 1.0));
         // With white=1.0 the normalized curve lifts midtones: 0.5 → ~0.694.
-        assert!((tonemap_filmic(0.5, 1.0) - 0.6936).abs() < 2e-3, "got {}", tonemap_filmic(0.5, 1.0));
+        assert!(
+            (tonemap_filmic(0.5, 1.0) - 0.6936).abs() < 2e-3,
+            "got {}",
+            tonemap_filmic(0.5, 1.0)
+        );
         // The highlight rolloff: a bright HDR input exceeds white before the
         // final clamp (it will be clamped to 1.0 on sRGB encode).
         assert!(tonemap_filmic(4.0, 1.0) > 1.0);
@@ -887,7 +946,10 @@ mod tests {
 
         let mid = agx.apply([0.18; 3]);
         for ch in mid {
-            assert!((ch - 0.18).abs() < 2e-3, "agx(0.18) must stay ~0.18, got {ch}");
+            assert!(
+                (ch - 0.18).abs() < 2e-3,
+                "agx(0.18) must stay ~0.18, got {ch}"
+            );
         }
 
         let white = agx.apply([16.29; 3]);
@@ -899,9 +961,18 @@ mod tests {
         // min(output_max) before the outset).
         let lo = agx.apply([0.5; 3]);
         let hi = agx.apply([4.0; 3]);
-        assert!(hi[0] > lo[0], "agx must be monotonic: {} !> {}", hi[0], lo[0]);
+        assert!(
+            hi[0] > lo[0],
+            "agx must be monotonic: {} !> {}",
+            hi[0],
+            lo[0]
+        );
         let over = agx.apply([100.0; 3]);
-        assert!((over[0] - 1.0).abs() < 2e-3, "agx clips past white, got {}", over[0]);
+        assert!(
+            (over[0] - 1.0).abs() < 2e-3,
+            "agx clips past white, got {}",
+            over[0]
+        );
     }
 
     #[test]
@@ -913,7 +984,13 @@ mod tests {
     #[test]
     fn screen_glow_never_exceeds_white() {
         // Screen blend with full glow can't push a mid value past white.
-        let out = blend_glow([0.5, 0.5, 0.5], [10.0, 10.0, 10.0], GlowBlendMode::Screen, 1.0, 0.3);
+        let out = blend_glow(
+            [0.5, 0.5, 0.5],
+            [10.0, 10.0, 10.0],
+            GlowBlendMode::Screen,
+            1.0,
+            0.3,
+        );
         for ch in out {
             assert!(ch <= 1.0 + 1e-6, "screen blend exceeded white: {ch}");
             assert!(ch >= 0.5, "screen blend darkened the base: {ch}");
@@ -922,7 +999,13 @@ mod tests {
 
     #[test]
     fn additive_glow_adds() {
-        let out = blend_glow([0.2, 0.2, 0.2], [0.3, 0.0, 0.0], GlowBlendMode::Additive, 1.0, 0.3);
+        let out = blend_glow(
+            [0.2, 0.2, 0.2],
+            [0.3, 0.0, 0.0],
+            GlowBlendMode::Additive,
+            1.0,
+            0.3,
+        );
         assert!((out[0] - 0.5).abs() < 1e-6);
         assert!((out[1] - 0.2).abs() < 1e-6);
     }
@@ -996,7 +1079,6 @@ mod tests {
         assert!((smoothstep(1.0, 3.0, 2.0) - 0.5).abs() < 1e-6);
     }
 }
-
 
 /// Screen-space ambient occlusion (pat-p0s82.11) — depth-buffer based darkening.
 ///

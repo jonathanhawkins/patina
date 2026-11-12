@@ -122,7 +122,7 @@ impl FrameProfile {
     /// Returns entries sorted by time (descending — hottest first).
     pub fn sorted_by_time(&self) -> Vec<&ProfilerEntry> {
         let mut sorted: Vec<&ProfilerEntry> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| b.time.cmp(&a.time));
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.time));
         sorted
     }
 }
@@ -421,7 +421,7 @@ impl ProfilerPanel {
             .collect();
 
         // Sort by total time descending (hottest functions first).
-        stats.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+        stats.sort_by_key(|s| std::cmp::Reverse(s.total_time));
         stats
     }
 

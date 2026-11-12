@@ -39,7 +39,8 @@ fn dims(res: &Resource) -> (i64, i64) {
 fn pixels(res: &Resource) -> Vec<Color> {
     match res.get_property("pixels") {
         Some(Variant::Array(a)) => a
-            .to_vec().iter()
+            .to_vec()
+            .iter()
             .map(|v| match v {
                 Variant::Color(c) => *c,
                 other => panic!("pixels entry not a Color: {other:?}"),
@@ -56,7 +57,10 @@ fn png_advanced_variants_decode() {
     let r16 = load(PNG16, "sixteen.png");
     assert_eq!(r16.class_name, "Texture2D");
     assert!(
-        matches!(r16.get_property("has_pixel_data"), Some(Variant::Bool(true))),
+        matches!(
+            r16.get_property("has_pixel_data"),
+            Some(Variant::Bool(true))
+        ),
         "16-bit PNG must decode to real pixels"
     );
     assert_eq!(dims(&r16), (2, 2));

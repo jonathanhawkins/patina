@@ -51,6 +51,7 @@ pub const AXIS_Z: i64 = 2;
 /// otherwise the origin is its top-left corner. `offset` is in texels and so is
 /// scaled by `pixel_size` like the size itself — an offset in world units would
 /// drift as soon as `pixel_size` changed.
+#[allow(clippy::too_many_arguments)]
 pub fn sprite_quad_mesh(
     tex_w: u32,
     tex_h: u32,
@@ -559,7 +560,11 @@ pub fn rasterize_text_ttf(
     if text_w <= 0.0 || text_h <= 0.0 {
         return None;
     }
-    let pad = if outline_radius > 0.0 { outline_radius.ceil() as i64 + 1 } else { 0 };
+    let pad = if outline_radius > 0.0 {
+        outline_radius.ceil() as i64 + 1
+    } else {
+        0
+    };
     let cw = text_w.ceil() as i64;
     let ch = text_h.ceil() as i64;
     let (w, h) = (cw + 2 * pad, ch + 2 * pad);
@@ -898,10 +903,10 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     // branch-wise rather than unified so the no-outline case stays
     // bit-identical to what already shipped and was verified.
     let _ = (scale, outline_px); // the 5x7 path's inputs; see `rasterize_text`.
-    // pat-3ljz4: the real TTF face at `font_size`, one texel per font pixel.
-    // Godot's stroker radius is `outline_size / 4` font px (see above), and
-    // a transparent `outline_modulate` draws no outline surfaces at all
-    // (`label_3d.cpp`: `outline_modulate.a != 0.0 && outline_size > 0`).
+                                 // pat-3ljz4: the real TTF face at `font_size`, one texel per font pixel.
+                                 // Godot's stroker radius is `outline_size / 4` font px (see above), and
+                                 // a transparent `outline_modulate` draws no outline surfaces at all
+                                 // (`label_3d.cpp`: `outline_modulate.a != 0.0 && outline_size > 0`).
     let outline_radius = if outline_size > 0 && outline_modulate.a > 0.0 {
         outline_size as f32 / 4.0
     } else {
@@ -910,12 +915,26 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     let line_spacing = as_f32(node.get_property("line_spacing")).unwrap_or(0.0);
     let (texture, albedo) = if outline_radius > 0.0 {
         (
-            cached_label_texture_ttf(&text, font_size, line_spacing, modulate, outline_radius, outline_modulate)?,
+            cached_label_texture_ttf(
+                &text,
+                font_size,
+                line_spacing,
+                modulate,
+                outline_radius,
+                outline_modulate,
+            )?,
             Color::WHITE,
         )
     } else {
         (
-            cached_label_texture_ttf(&text, font_size, line_spacing, Color::WHITE, 0.0, Color::WHITE)?,
+            cached_label_texture_ttf(
+                &text,
+                font_size,
+                line_spacing,
+                Color::WHITE,
+                0.0,
+                Color::WHITE,
+            )?,
             modulate,
         )
     };

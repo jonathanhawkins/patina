@@ -16,7 +16,10 @@ fn a_webp_with_a_fresh_clone_sidecar_loads_from_its_source() {
     let img = image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 0, 0, 255]));
     let mut webp = Vec::new();
     image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut std::io::Cursor::new(&mut webp), image::ImageFormat::WebP)
+        .write_to(
+            &mut std::io::Cursor::new(&mut webp),
+            image::ImageFormat::WebP,
+        )
         .unwrap();
     std::fs::write(root.join("rock.webp"), &webp).unwrap();
     // Exactly what Godot writes next to an imported texture — pointing at an

@@ -110,7 +110,10 @@ fn gltf_scene_emits_skeleton_for_skinned_node() {
     let gltf_root = &scene.root.children[0];
     let armature = find_child(gltf_root, "Armature").expect("Armature node missing");
 
-    assert_eq!(armature.properties.get("skin_index"), Some(&Variant::Int(0)));
+    assert_eq!(
+        armature.properties.get("skin_index"),
+        Some(&Variant::Int(0))
+    );
 
     // The skin must materialize as a Skeleton3D child reflecting joint count.
     let skeleton = find_child(armature, "Rig").expect("Skeleton3D companion missing");
@@ -456,7 +459,11 @@ fn build_ttf_fixture(
 fn font_import_ttf_produces_font_file() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("regular.ttf");
-    std::fs::write(&path, build_ttf_fixture(0x0001_0000, 2048, 1800, -450, 90, 512)).unwrap();
+    std::fs::write(
+        &path,
+        build_ttf_fixture(0x0001_0000, 2048, 1800, -450, 90, 512),
+    )
+    .unwrap();
 
     let imp = FontImporter;
     assert!(imp.can_import("ttf"));
@@ -471,7 +478,11 @@ fn font_import_ttf_produces_font_file() {
 fn font_import_otf_produces_font_file() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("display.otf");
-    std::fs::write(&path, build_ttf_fixture(0x4F54_544F, 1000, 880, -220, 0, 256)).unwrap();
+    std::fs::write(
+        &path,
+        build_ttf_fixture(0x4F54_544F, 1000, 880, -220, 0, 256),
+    )
+    .unwrap();
 
     let imp = FontImporter;
     assert!(imp.can_import("otf"));
@@ -484,7 +495,11 @@ fn font_import_otf_produces_font_file() {
 fn font_import_extracts_glyph_metrics() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("metrics.ttf");
-    std::fs::write(&path, build_ttf_fixture(0x0001_0000, 2048, 1900, -500, 120, 1024)).unwrap();
+    std::fs::write(
+        &path,
+        build_ttf_fixture(0x0001_0000, 2048, 1900, -500, 120, 1024),
+    )
+    .unwrap();
 
     let imp = FontImporter;
     let metrics = imp.parse(&path).expect("metrics parse");

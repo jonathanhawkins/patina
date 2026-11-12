@@ -47,9 +47,21 @@ impl Schedule {
 
 /// Probe 1: full throttle over the ramp at the end of the start road, then
 /// the steering sweep while it lands.
-const RAMP: Schedule = Schedule { settle: 300, throttle: 300, left: 144, right: 144, coast: 60 };
+const RAMP: Schedule = Schedule {
+    settle: 300,
+    throttle: 300,
+    left: 144,
+    right: 144,
+    coast: 60,
+};
 /// Probe 2: a short throttle, then the left turn on the flat road.
-const TURN: Schedule = Schedule { settle: 300, throttle: 120, left: 120, right: 120, coast: 60 };
+const TURN: Schedule = Schedule {
+    settle: 300,
+    throttle: 120,
+    left: 120,
+    right: 120,
+    coast: 60,
+};
 
 fn game_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -81,13 +93,17 @@ fn car_on_town() -> Car {
     let root = tree.root_id();
     let town = gdscene::gltf_scene::packed_scene_from_gltf_path("res://town/model/town_model.gltf")
         .expect("town_model.gltf imports");
-    gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(&mut tree, root, &town, &|_| None)
-        .expect("town instances");
+    gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(&mut tree, root, &town, &|_| {
+        None
+    })
+    .expect("town instances");
 
     // town_scene.tscn's InstancePos: `Transform3D(3.57628e-07, 0, -1, 0, 1, 0,
     // 1, 0, 3.57628e-07, ...)` is ROW-major, so its columns are these. The car
     // drives along world -X.
-    let pos = tree.add_child(root, Node::new("InstancePos", "Node3D")).unwrap();
+    let pos = tree
+        .add_child(root, Node::new("InstancePos", "Node3D"))
+        .unwrap();
     let t = Transform3D {
         basis: Basis {
             x: Vector3::new(3.57628e-07, 0.0, 1.0),
@@ -96,19 +112,31 @@ fn car_on_town() -> Car {
         },
         origin: Vector3::new(35.48, 8.72405, 14.335),
     };
-    gdscene::node3d::set_transform_component(tree.get_node_mut(pos).unwrap(), "transform", &Variant::Transform3D(t));
+    gdscene::node3d::set_transform_component(
+        tree.get_node_mut(pos).unwrap(),
+        "transform",
+        &Variant::Transform3D(t),
+    );
 
-    let car_scene = gdscene::packed_scene::load_scene_from_res("res://vehicles/car_base.tscn").expect("car_base.tscn");
-    let car = gdscene::packed_scene::add_packed_scene_to_tree_from_res(&mut tree, pos, &car_scene).expect("car instances");
+    let car_scene = gdscene::packed_scene::load_scene_from_res("res://vehicles/car_base.tscn")
+        .expect("car_base.tscn");
+    let car = gdscene::packed_scene::add_packed_scene_to_tree_from_res(&mut tree, pos, &car_scene)
+        .expect("car instances");
     let body = named_child(&tree, car, "Body");
     let wheels = ["Wheel1", "Wheel2", "Wheel3", "Wheel4"].map(|n| named_child(&tree, body, n));
     // The probe drives the controls itself, as the Godot one did with the
     // script detached.
-    tree.get_node_mut(body).unwrap().set_property("script", Variant::Nil);
+    tree.get_node_mut(body)
+        .unwrap()
+        .set_property("script", Variant::Nil);
     // The Godot probe reported the chassis' contacts the same way; monitoring
     // does not change the simulation.
-    tree.get_node_mut(body).unwrap().set_property("contact_monitor", Variant::Bool(true));
-    tree.get_node_mut(body).unwrap().set_property("max_contacts_reported", Variant::Int(16));
+    tree.get_node_mut(body)
+        .unwrap()
+        .set_property("contact_monitor", Variant::Bool(true));
+    tree.get_node_mut(body)
+        .unwrap()
+        .set_property("max_contacts_reported", Variant::Int(16));
 
     let mut ml = MainLoop::new(tree);
     // The project's own settings: 120 ticks/s and `3d/physics_engine="Jolt
@@ -173,7 +201,9 @@ fn body_contacts(tree: &SceneTree, id: NodeId) -> Vec<(Vector3, Vector3)> {
 fn run(s: Schedule) -> Vec<Rec> {
     let mut car = car_on_town();
     let mut out: Vec<Rec> = Vec::new();
-    let mut dump = std::env::var("VEHICLE_DUMP").ok().map(|p| std::fs::File::create(p).unwrap());
+    let mut dump = std::env::var("VEHICLE_DUMP")
+        .ok()
+        .map(|p| std::fs::File::create(p).unwrap());
     let mut steering = 0.0f32;
     for tick in 1..=s.ticks() {
         car.ml.step(DT as f64);
@@ -183,8 +213,12 @@ fn run(s: Schedule) -> Vec<Rec> {
             basis: gdscene::node3d::get_local_transform(tree, car.body).basis,
             speed: v3(tree, car.body, "linear_velocity").length(),
             ang: v3(tree, car.body, "angular_velocity"),
-            wheel_local: car.wheels.map(|w| gdscene::node3d::get_local_transform(tree, w)),
-            wheel_contact: car.wheels.map(|w| tree.get_node(w).unwrap().get_property("_wheel_in_contact") == Variant::Bool(true)),
+            wheel_local: car
+                .wheels
+                .map(|w| gdscene::node3d::get_local_transform(tree, w)),
+            wheel_contact: car.wheels.map(|w| {
+                tree.get_node(w).unwrap().get_property("_wheel_in_contact") == Variant::Bool(true)
+            }),
             wheel_rpm: car.wheels.map(|w| f(tree, w, "_wheel_rpm")),
             contacts: body_contacts(tree, car.body),
         };
@@ -200,8 +234,7 @@ fn run(s: Schedule) -> Vec<Rec> {
                 w.origin.x, w.origin.y, w.origin.z, rec.wheel_contact,
             )
             .unwrap();
-            writeln!(d, "{tick} contacts {:?}", rec.contacts)
-            .unwrap();
+            writeln!(d, "{tick} contacts {:?}", rec.contacts).unwrap();
         }
         let speed = rec.speed;
         out.push(rec);
@@ -224,7 +257,11 @@ fn run(s: Schedule) -> Vec<Rec> {
             40.0
         };
         let step = 1.5 * DT;
-        steering = if (target - steering).abs() <= step { target } else { steering + step * (target - steering).signum() };
+        steering = if (target - steering).abs() <= step {
+            target
+        } else {
+            steering + step * (target - steering).signum()
+        };
         let node = car.ml.tree_mut().get_node_mut(car.body).unwrap();
         node.set_property("engine_force", Variant::Float(engine as f64));
         node.set_property("steering", Variant::Float(steering as f64));
@@ -237,12 +274,18 @@ fn at(recs: &[Rec], tick: u32) -> &Rec {
 }
 
 fn assert_near(what: &str, got: f32, godot: f32, tol: f32) {
-    assert!((got - godot).abs() <= tol, "{what}: Patina {got}, Godot {godot} (tolerance {tol})");
+    assert!(
+        (got - godot).abs() <= tol,
+        "{what}: Patina {got}, Godot {godot} (tolerance {tol})"
+    );
 }
 
 fn assert_vec_near(what: &str, got: Vector3, godot: (f32, f32, f32), tol: f32) {
     let d = Vector3::new(got.x - godot.0, got.y - godot.1, got.z - godot.2).length();
-    assert!(d <= tol, "{what}: Patina {got:?}, Godot {godot:?} ({d} apart, tolerance {tol})");
+    assert!(
+        d <= tol,
+        "{what}: Patina {got:?}, Godot {godot:?} ({d} apart, tolerance {tol})"
+    );
 }
 
 /// The car settles on its four springs at Godot's ride height, rolling slowly
@@ -255,15 +298,45 @@ fn assert_vec_near(what: &str, got: Vector3, godot: (f32, f32, f32), tol: f32) {
 /// | 300 | (-0.0017, 0.1307, 0.6184), speed 0.550 | 0.0155, rpm 21.1 |
 #[test]
 fn minivan_settles_on_its_springs_at_godots_height() {
-    let recs = run(Schedule { settle: 300, throttle: 0, left: 0, right: 0, coast: 0 });
-    assert_near("Wheel1 y at tick 2 (pose trails the cast)", at(&recs, 2).wheel_local[0].origin.y, 0.1152, 1e-3);
-    assert_near("Wheel1 y at tick 3", at(&recs, 3).wheel_local[0].origin.y, -0.0336, 2e-3);
-    assert_vec_near("Body at tick 160", at(&recs, 160).pos, (-0.0017, 0.1480, 0.1136), 0.01);
+    let recs = run(Schedule {
+        settle: 300,
+        throttle: 0,
+        left: 0,
+        right: 0,
+        coast: 0,
+    });
+    assert_near(
+        "Wheel1 y at tick 2 (pose trails the cast)",
+        at(&recs, 2).wheel_local[0].origin.y,
+        0.1152,
+        1e-3,
+    );
+    assert_near(
+        "Wheel1 y at tick 3",
+        at(&recs, 3).wheel_local[0].origin.y,
+        -0.0336,
+        2e-3,
+    );
+    assert_vec_near(
+        "Body at tick 160",
+        at(&recs, 160).pos,
+        (-0.0017, 0.1480, 0.1136),
+        0.01,
+    );
     let r = at(&recs, 300);
     assert_vec_near("Body at tick 300", r.pos, (-0.0017, 0.1307, 0.6184), 0.01);
     assert_near("speed at tick 300", r.speed, 0.550, 0.02);
-    assert!(r.wheel_contact.iter().all(|&c| c), "every wheel on the road at tick 300: {:?}", r.wheel_contact);
-    assert_near("Wheel1 y at tick 300", r.wheel_local[0].origin.y, 0.0155, 0.003);
+    assert!(
+        r.wheel_contact.iter().all(|&c| c),
+        "every wheel on the road at tick 300: {:?}",
+        r.wheel_contact
+    );
+    assert_near(
+        "Wheel1 y at tick 300",
+        r.wheel_local[0].origin.y,
+        0.0155,
+        0.003,
+    );
     // The wheel keeps its authored x/z: only the suspension drop moves it.
     assert_near("Wheel1 x", r.wheel_local[0].origin.x, 0.573678, 1e-4);
     assert_near("Wheel1 z", r.wheel_local[0].origin.z, 1.10416, 1e-4);
@@ -295,12 +368,29 @@ fn minivan_settles_on_its_springs_at_godots_height() {
 #[test]
 fn throttle_and_ramp_jump_match_godot() {
     let recs = run(RAMP);
-    for (tick, speed, z) in [(360, 4.165, 1.9266), (420, 5.995, 4.4933), (540, 9.229, 12.1454)] {
+    for (tick, speed, z) in [
+        (360, 4.165, 1.9266),
+        (420, 5.995, 4.4933),
+        (540, 9.229, 12.1454),
+    ] {
         let r = at(&recs, tick);
-        assert_near(&format!("speed at tick {tick}"), r.speed, speed, 0.002 * speed);
+        assert_near(
+            &format!("speed at tick {tick}"),
+            r.speed,
+            speed,
+            0.002 * speed,
+        );
         assert_near(&format!("z at tick {tick}"), r.pos.z, z, 0.002 * z.max(1.0));
-        assert!(r.wheel_contact.iter().all(|&c| c), "tick {tick}: all wheels on the road");
-        assert_near(&format!("x at tick {tick} (drives straight)"), r.pos.x, -0.0017, 0.005);
+        assert!(
+            r.wheel_contact.iter().all(|&c| c),
+            "tick {tick}: all wheels on the road"
+        );
+        assert_near(
+            &format!("x at tick {tick} (drives straight)"),
+            r.pos.x,
+            -0.0017,
+            0.005,
+        );
     }
     let rpm = at(&recs, 540).wheel_rpm[0];
     assert_near("Wheel1 rpm at tick 540", rpm, 353.8, 0.03 * 353.8);
@@ -312,14 +402,23 @@ fn throttle_and_ramp_jump_match_godot() {
     // speed), so Patina's first contact, found after the motion, sits where
     // Godot's tick-577 one does.
     let c = &at(&recs, 576).contacts;
-    assert_eq!(c.len(), 2, "tick 576: the chassis touches the ramp at {c:?}; Godot reports 2 contacts");
+    assert_eq!(
+        c.len(),
+        2,
+        "tick 576: the chassis touches the ramp at {c:?}; Godot reports 2 contacts"
+    );
     let mut zs: Vec<f32> = c.iter().map(|(p, _)| p.z).collect();
     zs.sort_by(f32::total_cmp);
     assert_near("near contact z (world)", zs[0], 13.8563, 0.005);
     assert_near("far contact z (world)", zs[1], 14.8103, 0.005);
     for (p, n) in c {
         assert_near("contact x (world, Godot's tick 577)", p.x, 19.2442, 0.01);
-        assert_vec_near("contact normal (the ramp face)", *n, (0.4926, 0.8702, 0.0), 0.002);
+        assert_vec_near(
+            "contact normal (the ramp face)",
+            *n,
+            (0.4926, 0.8702, 0.0),
+            0.002,
+        );
     }
     for tick in 570..=700 {
         let w = at(&recs, tick).ang;
@@ -330,19 +429,52 @@ fn throttle_and_ramp_jump_match_godot() {
     }
     let r = at(&recs, 600);
     assert_vec_near("Body at tick 600", r.pos, (-0.0017, 0.8185, 16.6831), 0.04);
-    assert!(!r.wheel_contact[0], "Wheel1 has left the ramp at tick 600 (Godot)");
-    assert!(at(&recs, 628).wheel_contact[1], "the rear wheels are still on the lip at tick 628 (Godot)");
+    assert!(
+        !r.wheel_contact[0],
+        "Wheel1 has left the ramp at tick 600 (Godot)"
+    );
+    assert!(
+        at(&recs, 628).wheel_contact[1],
+        "the rear wheels are still on the lip at tick 628 (Godot)"
+    );
     let r = at(&recs, 630);
-    assert_vec_near("Body at tick 630 (airborne)", r.pos, (-0.0017, 1.9320, 18.2081), 0.05);
+    assert_vec_near(
+        "Body at tick 630 (airborne)",
+        r.pos,
+        (-0.0017, 1.9320, 18.2081),
+        0.05,
+    );
     assert_near("pitch rate at tick 630", r.ang.z, 0.9108, 0.06);
-    assert_near("y at tick 660 (top of the jump)", at(&recs, 660).pos.y, 2.5023, 0.08);
-    assert_near("x at tick 700 (still on the centre line)", at(&recs, 700).pos.x, -0.0015, 0.01);
-    assert!(!at(&recs, 629).wheel_contact.iter().any(|&c| c), "every wheel airborne at tick 629 (Godot)");
+    assert_near(
+        "y at tick 660 (top of the jump)",
+        at(&recs, 660).pos.y,
+        2.5023,
+        0.08,
+    );
+    assert_near(
+        "x at tick 700 (still on the centre line)",
+        at(&recs, 700).pos.x,
+        -0.0015,
+        0.01,
+    );
+    assert!(
+        !at(&recs, 629).wheel_contact.iter().any(|&c| c),
+        "every wheel airborne at tick 629 (Godot)"
+    );
     for tick in [630, 640] {
         let r = at(&recs, tick);
         for (i, w) in r.wheel_local.iter().enumerate() {
-            assert!(!r.wheel_contact[i], "wheel {} airborne at tick {tick}", i + 1);
-            assert_near(&format!("wheel {} hangs at its rest length", i + 1), w.origin.y, -0.0348, 1e-3);
+            assert!(
+                !r.wheel_contact[i],
+                "wheel {} airborne at tick {tick}",
+                i + 1
+            );
+            assert_near(
+                &format!("wheel {} hangs at its rest length", i + 1),
+                w.origin.y,
+                -0.0348,
+                1e-3,
+            );
         }
     }
 }
@@ -363,20 +495,44 @@ fn steering_turns_like_godot() {
     let recs = run(TURN);
     let r = at(&recs, 480);
     assert_vec_near("Body at tick 480", r.pos, (0.4622, 0.1252, 7.3117), 0.02);
-    assert_vec_near("heading at tick 480", r.basis.z, (0.3831, 0.0162, 0.9236), 0.01);
+    assert_vec_near(
+        "heading at tick 480",
+        r.basis.z,
+        (0.3831, 0.0162, 0.9236),
+        0.01,
+    );
     assert_near("speed at tick 480", r.speed, 5.396, 0.03);
     for (i, steers) in [(0, true), (1, false), (2, true), (3, false)] {
         let x = r.wheel_local[i].basis.x;
-        let want = if steers { (0.921, 0.0, -0.389) } else { (1.0, 0.0, 0.0) };
-        assert_vec_near(&format!("wheel {} axle at steering 0.4", i + 1), x, want, 0.01);
+        let want = if steers {
+            (0.921, 0.0, -0.389)
+        } else {
+            (1.0, 0.0, 0.0)
+        };
+        assert_vec_near(
+            &format!("wheel {} axle at steering 0.4", i + 1),
+            x,
+            want,
+            0.01,
+        );
     }
     let r = at(&recs, 540);
     assert_vec_near("Body at tick 540", r.pos, (2.1388, 0.1231, 9.1530), 0.03);
-    assert_vec_near("heading at tick 540", r.basis.z, (0.8292, 0.0163, 0.5587), 0.015);
+    assert_vec_near(
+        "heading at tick 540",
+        r.basis.z,
+        (0.8292, 0.0163, 0.5587),
+        0.015,
+    );
     assert_near("speed at tick 540", r.speed, 4.756, 0.03);
     // pat-std5q: the right wheels drop off the road edge here and the
     // chassis box lands on it; Godot's car is at (3.5563, -0.0061, 9.7741).
-    assert_vec_near("Body at tick 580", at(&recs, 580).pos, (3.5563, -0.0061, 9.7741), 0.04);
+    assert_vec_near(
+        "Body at tick 580",
+        at(&recs, 580).pos,
+        (3.5563, -0.0061, 9.7741),
+        0.04,
+    );
 }
 
 /// The wheels SPIN: the pose's Y axis turns about the axle by the integrated
@@ -386,11 +542,20 @@ fn steering_turns_like_godot() {
 /// run, so a small speed difference shows up here as an angle.
 #[test]
 fn wheels_spin_like_godot() {
-    let recs = run(Schedule { settle: 300, throttle: 120, left: 0, right: 0, coast: 0 });
+    let recs = run(Schedule {
+        settle: 300,
+        throttle: 120,
+        left: 0,
+        right: 0,
+        coast: 0,
+    });
     let y = at(&recs, 420).wheel_local[0].basis.y;
     let godot = Vector3::new(0.0, 0.8798, -0.4753);
     let angle = y.normalized().dot(godot).clamp(-1.0, 1.0).acos();
-    assert!(angle < 0.2, "Wheel1 spin pose {y:?} is {angle} rad from Godot's {godot:?}");
+    assert!(
+        angle < 0.2,
+        "Wheel1 spin pose {y:?} is {angle} rad from Godot's {godot:?}"
+    );
     // And it is not still at rest: the authored pose has Y = (0, 1, 0).
     assert!(y.z.abs() > 0.1, "Wheel1 never spun: basis Y {y:?}");
 }

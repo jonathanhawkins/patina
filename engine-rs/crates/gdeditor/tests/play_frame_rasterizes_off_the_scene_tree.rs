@@ -22,7 +22,8 @@ use gdeditor::texture_cache::TextureCache;
 use gdeditor::viewport_2d_render::{
     apply_camera2d_view, apply_stretch_transform, build_control_render_items_sourced,
     build_runtime_render_list, camera2d_view_transform, canvas_size_of, merge_control_items,
-    paint_black_bars, prepare_play_frame, render_canvas_from_list, render_play_frame, CanvasQuality,
+    paint_black_bars, prepare_play_frame, render_canvas_from_list, render_play_frame,
+    CanvasQuality,
 };
 use gdrender2d::renderer::FrameBuffer;
 use gdrender2d::texture::Texture2D;
@@ -136,7 +137,10 @@ fn the_split_play_frame_draws_exactly_what_the_one_piece_tree_pipeline_drew() {
     // the green box is off the light's cull mask (layer 2 vs 1), so the red
     // lamp does not tint it and it stays green-dominant.
     let lit = px(&split, 30, 25);
-    assert!(lit.r > lit.g + 0.2, "the red lamp must tint the rect: {lit:?}");
+    assert!(
+        lit.r > lit.g + 0.2,
+        "the red lamp must tint the rect: {lit:?}"
+    );
     let boxed = px(&split, 75, 25);
     assert!(
         boxed.g > boxed.r && boxed.g > boxed.b,
@@ -146,7 +150,10 @@ fn the_split_play_frame_draws_exactly_what_the_one_piece_tree_pipeline_drew() {
     let mut tree = tree_of(LIT_SCENE);
     let mut cache = TextureCache::new(".");
     let wrapped = render_play_frame(&mut tree, W, H, &mut cache, &settings);
-    assert!(wrapped.pixels == split.pixels, "render_play_frame = prepare + rasterize");
+    assert!(
+        wrapped.pixels == split.pixels,
+        "render_play_frame = prepare + rasterize"
+    );
 }
 
 #[test]
@@ -173,9 +180,15 @@ fn a_prepared_frame_is_a_snapshot_that_later_tree_changes_cannot_reach() {
     let rect = find(&tree, "Rect");
     let dim = find(&tree, "Dim");
     let lamp = find(&tree, "Lamp");
-    tree.get_node_mut(rect).unwrap().set_property("position", Variant::Vector2(Vector2::new(30.0, 30.0)));
-    tree.get_node_mut(dim).unwrap().set_property("color", Variant::Color(Color::new(1.0, 1.0, 1.0, 1.0)));
-    tree.get_node_mut(lamp).unwrap().set_property("enabled", Variant::Bool(false));
+    tree.get_node_mut(rect)
+        .unwrap()
+        .set_property("position", Variant::Vector2(Vector2::new(30.0, 30.0)));
+    tree.get_node_mut(dim)
+        .unwrap()
+        .set_property("color", Variant::Color(Color::new(1.0, 1.0, 1.0, 1.0)));
+    tree.get_node_mut(lamp)
+        .unwrap()
+        .set_property("enabled", Variant::Bool(false));
 
     let snapshot = prepared.rasterize(&mut cache);
     assert!(
@@ -184,7 +197,10 @@ fn a_prepared_frame_is_a_snapshot_that_later_tree_changes_cannot_reach() {
     );
     // Not vacuous: the changes do show on the next frame.
     let after = render_play_frame(&mut tree, W, H, &mut cache, &settings);
-    assert!(after.pixels != before.pixels, "the tree changes must alter a fresh frame");
+    assert!(
+        after.pixels != before.pixels,
+        "the tree changes must alter a fresh frame"
+    );
 }
 
 fn tex(c: Color) -> Texture2D {
@@ -201,7 +217,11 @@ fn a_lent_texture_cache_keeps_every_change_made_to_its_stand_in() {
     cache.insert("res://a.png", tex(red));
     cache.insert("res://b.png", tex(red));
     let mut stand_in = cache.lend_placeholder();
-    assert_eq!(stand_in.project_root(), "/proj", "handlers read the root from the cache");
+    assert_eq!(
+        stand_in.project_root(),
+        "/proj",
+        "handlers read the root from the cache"
+    );
     assert!(stand_in.is_empty());
     stand_in.invalidate("res://a.png");
     stand_in.insert("res://c.png", tex(blue));
@@ -210,7 +230,10 @@ fn a_lent_texture_cache_keeps_every_change_made_to_its_stand_in() {
         cache.loaded().map(|(k, _)| k.to_string()).collect();
     assert_eq!(
         names,
-        ["res://b.png", "res://c.png"].iter().map(|s| s.to_string()).collect(),
+        ["res://b.png", "res://c.png"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         "an invalidation made while lent must not be undone by the cache coming back"
     );
 
@@ -231,7 +254,10 @@ fn a_lent_texture_cache_keeps_every_change_made_to_its_stand_in() {
     stand_in.set_project_root("/other");
     cache.adopt_newer(stand_in);
     assert_eq!(cache.project_root(), "/other");
-    assert!(cache.is_empty(), "textures of the old project must not survive a re-root");
+    assert!(
+        cache.is_empty(),
+        "textures of the old project must not survive a re-root"
+    );
 
     // A normal cache records nothing (no unbounded invalidation log).
     let mut plain = TextureCache::new("/p");

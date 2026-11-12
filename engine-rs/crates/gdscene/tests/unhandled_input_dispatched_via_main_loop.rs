@@ -47,9 +47,7 @@ fn unhandled_input_dispatched_via_main_loop() {
     // -- (a) the event reaches _unhandled_input through a real frame --------
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let listener_id = tree
-        .add_child(root, Node::new("Listener", "Node"))
-        .unwrap();
+    let listener_id = tree.add_child(root, Node::new("Listener", "Node")).unwrap();
 
     // Records that the virtual ran and what the event payload carried.
     //
@@ -90,9 +88,7 @@ func _unhandled_input(event):
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let blocker_id = tree.add_child(root, Node::new("Blocker", "Node")).unwrap();
-    let listener_id = tree
-        .add_child(root, Node::new("Listener", "Node"))
-        .unwrap();
+    let listener_id = tree.add_child(root, Node::new("Listener", "Node")).unwrap();
 
     let blocker_src = "\
 extends Node
@@ -134,9 +130,7 @@ fn unhandled_input_reaches_sibling_when_not_handled() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let quiet_id = tree.add_child(root, Node::new("Quiet", "Node")).unwrap();
-    let listener_id = tree
-        .add_child(root, Node::new("Listener", "Node"))
-        .unwrap();
+    let listener_id = tree.add_child(root, Node::new("Listener", "Node")).unwrap();
 
     // Same shape as the blocker, but it does NOT mark the event handled.
     let quiet_src = "\
@@ -182,9 +176,7 @@ func _unhandled_input(event):
 fn input_events_are_not_redelivered_on_later_steps() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let counter_id = tree
-        .add_child(root, Node::new("Counter", "Node"))
-        .unwrap();
+    let counter_id = tree.add_child(root, Node::new("Counter", "Node")).unwrap();
 
     let counter_src = "\
 extends Node

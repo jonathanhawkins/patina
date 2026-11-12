@@ -76,7 +76,10 @@ fn boot(tscn: &str) -> (MainLoop, NodeId) {
 fn an_exported_packed_scene_set_in_the_tscn_reaches_the_script_as_a_scene() {
     let _guard = ROOTS.lock().unwrap_or_else(|p| p.into_inner());
     gdobject::class_db::register_all_classes();
-    let dir = project(&[("mob.tscn", MOB.as_bytes()), ("main.gd", MAIN_GD.as_bytes())]);
+    let dir = project(&[
+        ("mob.tscn", MOB.as_bytes()),
+        ("main.gd", MAIN_GD.as_bytes()),
+    ]);
     gdcore::file_access::set_path_roots(Some(dir), None);
 
     let (ml, main) = boot(MAIN);
@@ -153,7 +156,10 @@ fn a_stopped_animated_sprite_draws_its_current_frame_of_a_stringname_animation()
     gdcore::file_access::set_path_roots(Some(dir), None);
 
     let (mut ml, main) = boot(SPRITE);
-    let sprite = ml.tree().get_node_relative(main, "AnimatedSprite2D").unwrap();
+    let sprite = ml
+        .tree()
+        .get_node_relative(main, "AnimatedSprite2D")
+        .unwrap();
     ml.step(1.0 / 60.0);
     let texture = |ml: &MainLoop| ml.tree().get_node(sprite).unwrap().get_property("texture");
     assert_eq!(

@@ -144,7 +144,10 @@ fn percent_unique_name_parses_as_a_node_path() {
 fn binary_percent_is_still_modulo() {
     assert!(matches!(
         var_value("var n = 7 % 3\n"),
-        Expr::BinaryOp { op: gdscript_interop::BinOp::Mod, .. }
+        Expr::BinaryOp {
+            op: gdscript_interop::BinOp::Mod,
+            ..
+        }
     ));
     assert_eq!(
         call_check("extends Node\nfunc check():\n    var a = 7\n    return a % 3\n"),
@@ -183,8 +186,14 @@ fn ray_query_parameters_3d_create_sets_its_arguments() {
         panic!("expected an Array, got {full:?}")
     };
     let full = full.to_vec();
-    assert_eq!(full[0], Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0)));
-    assert_eq!(full[1], Variant::Vector3(gdcore::math::Vector3::new(4.0, 5.0, 6.0)));
+    assert_eq!(
+        full[0],
+        Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0))
+    );
+    assert_eq!(
+        full[1],
+        Variant::Vector3(gdcore::math::Vector3::new(4.0, 5.0, 6.0))
+    );
     assert_eq!(full[2], Variant::Int(5));
     assert_eq!(full[3], Variant::Int(1), "the exclude list is carried");
     assert_eq!(

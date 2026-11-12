@@ -300,6 +300,7 @@ pub fn convex_face_planes(points: &[Vector3]) -> Vec<(Vector3, f32)> {
     use std::sync::{Mutex, OnceLock};
 
     const CACHE_LIMIT: usize = 4096;
+    #[allow(clippy::type_complexity)]
     static CACHE: OnceLock<Mutex<HashMap<Vec<u32>, Vec<(Vector3, f32)>>>> = OnceLock::new();
 
     let n = points.len();

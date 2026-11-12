@@ -247,12 +247,18 @@ fn carry_is_uniform_per_tick() {
         // the question becomes why the floor lookup missed.
         let root = ml.tree().root_id();
         let rid = ml.tree().find_child(root, "Rider", true).expect("Rider");
-        let pv = match ml.tree().get_node(rid).map(|n| n.get_property("platform_velocity")) {
+        let pv = match ml
+            .tree()
+            .get_node(rid)
+            .map(|n| n.get_property("platform_velocity"))
+        {
             Some(Variant::Vector2(v)) => v.x,
             _ => f32::NAN,
         };
         let on_floor = matches!(
-            ml.tree().get_node(rid).map(|n| n.get_property("is_on_floor")),
+            ml.tree()
+                .get_node(rid)
+                .map(|n| n.get_property("is_on_floor")),
             Some(Variant::Bool(true))
         );
         stored.push(pv);
@@ -264,7 +270,10 @@ fn carry_is_uniform_per_tick() {
     // loop, so tick 1 legitimately carries nothing.
     let steady = &deltas[1..];
     let zeros = steady.iter().filter(|d| d.abs() < 0.5).count();
-    let full = steady.iter().filter(|d| (**d - PLATFORM_DX).abs() < 0.5).count();
+    let full = steady
+        .iter()
+        .filter(|d| (**d - PLATFORM_DX).abs() < 0.5)
+        .count();
 
     assert_eq!(
         zeros,

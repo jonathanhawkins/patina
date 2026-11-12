@@ -817,7 +817,11 @@ fn signal_deferred_oracle_matches() {
             o.lock().unwrap().push(label.to_string());
             Variant::Nil
         });
-        if deferred { c.as_deferred() } else { c }
+        if deferred {
+            c.as_deferred()
+        } else {
+            c
+        }
     };
     tree.connect_signal(emitter, "sig_mixed", conn("immediate_A", false));
     tree.connect_signal(emitter, "sig_mixed", conn("immediate_B", false));
@@ -846,8 +850,14 @@ fn signal_deferred_oracle_matches() {
         .map(|e| e["label"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(*order.lock().unwrap(), expected);
-    let diffs = compare_traces(&parse_events(&oracle["event_trace"]), &signal_emit_trace_events(&tree));
-    assert!(diffs.is_empty(), "trace diverges from the oracle: {diffs:?}");
+    let diffs = compare_traces(
+        &parse_events(&oracle["event_trace"]),
+        &signal_emit_trace_events(&tree),
+    );
+    assert!(
+        diffs.is_empty(),
+        "trace diverges from the oracle: {diffs:?}"
+    );
 }
 
 /// `fixtures/golden/traces/signal_registration_order_oracle.json`: one
@@ -861,15 +871,22 @@ fn signal_registration_order_oracle_matches() {
     tree.event_trace_mut().clear();
     tree.set_trace_frame(0);
     for e in &expected {
-        let id = tree.get_node_by_path(&e.node_path).unwrap_or_else(|| panic!("{}", e.node_path));
+        let id = tree
+            .get_node_by_path(&e.node_path)
+            .unwrap_or_else(|| panic!("{}", e.node_path));
         tree.emit_signal(id, &e.detail, &[]);
     }
     let diffs = compare_traces(&expected, &signal_emit_trace_events(&tree));
-    assert!(diffs.is_empty(), "registration-order trace diverges: {diffs:?}");
+    assert!(
+        diffs.is_empty(),
+        "registration-order trace diverges: {diffs:?}"
+    );
 }
 
 fn load_trace_fixture(name: &str) -> Value {
     let path = fixtures_dir().join("golden").join("traces").join(name);
-    serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
-        .expect("oracle JSON")
+    serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .expect("oracle JSON")
 }

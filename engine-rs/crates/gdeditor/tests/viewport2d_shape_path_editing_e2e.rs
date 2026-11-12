@@ -178,11 +178,16 @@ fn viewport2d_shape_path_editing_e2e() {
     back.collect_subtree_top_down(scene_root, &mut ids);
     let reloaded_body = ids
         .iter()
-        .find(|id| back.get_node(**id).map(|n| n.name() == "Body").unwrap_or(false))
+        .find(|id| {
+            back.get_node(**id)
+                .map(|n| n.name() == "Body")
+                .unwrap_or(false)
+        })
         .copied()
         .expect("Body survives the round trip");
     assert_eq!(
-        back.get_node(reloaded_body).map(|n| n.get_property("__shape__size")),
+        back.get_node(reloaded_body)
+            .map(|n| n.get_property("__shape__size")),
         Some(Variant::Vector2(gdcore::math::Vector2::new(64.0, 48.0))),
         "the reloaded shape must carry the resized geometry"
     );
@@ -198,7 +203,10 @@ fn viewport2d_shape_path_editing_e2e() {
             .get_node_by_path("/root/Main/Body")
             .expect("body exists");
         assert_eq!(
-            state.scene_tree.get_node(nid).map(|n| n.get_property("__shape__size")),
+            state
+                .scene_tree
+                .get_node(nid)
+                .map(|n| n.get_property("__shape__size")),
             Some(Variant::Vector2(gdcore::math::Vector2::new(20.0, 20.0))),
             "undo must restore the size the scene was authored with"
         );
@@ -214,7 +222,10 @@ fn viewport2d_shape_path_editing_e2e() {
         assert_eq!(added["ok"], true, "point add failed: {added}");
     }
 
-    let points = json_of(&http_get(port, &format!("/api/viewport/points?node_id={path}")));
+    let points = json_of(&http_get(
+        port,
+        &format!("/api/viewport/points?node_id={path}"),
+    ));
     assert_eq!(points["editable"], true, "Path2D must be point-editable");
     assert_eq!(
         points["property"], "__curve__points",
@@ -247,7 +258,10 @@ fn viewport2d_shape_path_editing_e2e() {
 
     // -- undo removes the last point ------------------------------------------
     http_post(port, "/api/undo", "{}");
-    let after = json_of(&http_get(port, &format!("/api/viewport/points?node_id={path}")));
+    let after = json_of(&http_get(
+        port,
+        &format!("/api/viewport/points?node_id={path}"),
+    ));
     assert_eq!(
         after["points"].as_array().map(|p| p.len()),
         Some(1),
@@ -270,7 +284,10 @@ fn point_routes_cover_polygon_and_reject_other_classes() {
         ));
         assert_eq!(added["ok"], true, "vertex add failed: {added}");
     }
-    let points = json_of(&http_get(port, &format!("/api/viewport/points?node_id={poly}")));
+    let points = json_of(&http_get(
+        port,
+        &format!("/api/viewport/points?node_id={poly}"),
+    ));
     assert_eq!(
         points["property"], "polygon",
         "a Polygon2D holds its vertices directly: {points}"
@@ -284,7 +301,10 @@ fn point_routes_cover_polygon_and_reject_other_classes() {
         &format!(r#"{{"node_id":{poly},"index":1,"x":55,"y":5}}"#),
     ));
     assert_eq!(moved["ok"], true, "vertex move failed: {moved}");
-    let after_move = json_of(&http_get(port, &format!("/api/viewport/points?node_id={poly}")));
+    let after_move = json_of(&http_get(
+        port,
+        &format!("/api/viewport/points?node_id={poly}"),
+    ));
     assert_eq!(after_move["points"][1][0], 55.0, "the moved vertex updated");
 
     let removed = json_of(&http_post(
@@ -300,7 +320,10 @@ fn point_routes_cover_polygon_and_reject_other_classes() {
         "/api/polygon2d/vertex/remove",
         &format!(r#"{{"node_id":{poly},"index":99}}"#),
     );
-    assert!(bad.contains("404"), "an out-of-range index must fail: {bad}");
+    assert!(
+        bad.contains("404"),
+        "an out-of-range index must fail: {bad}"
+    );
 
     // ⚠️ A CollisionShape2D has no point list; the route must refuse rather than
     // writing a `polygon` property onto a node that has no such concept.

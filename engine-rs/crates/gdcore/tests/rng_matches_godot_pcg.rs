@@ -33,7 +33,11 @@ fn f64_bits(v: impl IntoIterator<Item = f64>) -> Vec<u64> {
 fn random_number_generator_instance_matches_godot_for_seed_12345() {
     let mut r = Rng::with_seed(SEED);
     assert_eq!(r.seed(), SEED);
-    assert_eq!(r.state(), -7751912382566491497i64 as u64, "state after `seed = 12345`");
+    assert_eq!(
+        r.state(),
+        -7751912382566491497i64 as u64,
+        "state after `seed = 12345`"
+    );
 
     let randi: Vec<u32> = (0..4).map(|_| r.randi()).collect();
     assert_eq!(randi, [1321476956, 17539747, 3348728241, 2863338820]);
@@ -45,25 +49,44 @@ fn random_number_generator_instance_matches_godot_for_seed_12345() {
     let mut r = Rng::with_seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| r.randf())),
-        bits(&[4598212003255812096, 4604180076135710720, 4582310135950475264, 4604860738257813504]),
+        bits(&[
+            4598212003255812096,
+            4604180076135710720,
+            4582310135950475264,
+            4604860738257813504
+        ]),
         "RandomNumberGenerator.randf()"
     );
 
     let mut r = Rng::with_seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| r.randf_range(-3.5, 7.25))),
-        bits(&[-4618076180292042752, 4615439171304030208, -4608867059592331264, 4616729034271752192]),
+        bits(&[
+            -4618076180292042752,
+            4615439171304030208,
+            -4608867059592331264,
+            4616729034271752192
+        ]),
         "RandomNumberGenerator.randf_range(-3.5, 7.25)"
     );
 
     let mut r = Rng::with_seed(SEED);
     let ri: Vec<i64> = (0..6).map(|_| r.randi_range(-10, 100)).collect();
-    assert_eq!(ri, [79, 72, 89, 15, 56, 47], "RandomNumberGenerator.randi_range(-10, 100)");
+    assert_eq!(
+        ri,
+        [79, 72, 89, 15, 56, 47],
+        "RandomNumberGenerator.randi_range(-10, 100)"
+    );
 
     let mut r = Rng::with_seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| r.randfn(1.0, 2.0))),
-        bits(&[-4619251153421467648, 4604772473458655232, 4611754636972392448, 4605892646563479552]),
+        bits(&[
+            -4619251153421467648,
+            4604772473458655232,
+            4611754636972392448,
+            4605892646563479552
+        ]),
         "RandomNumberGenerator.randfn(1.0, 2.0)"
     );
 }
@@ -72,7 +95,10 @@ fn random_number_generator_instance_matches_godot_for_seed_12345() {
 fn rand_from_seed_matches_godot() {
     let mut s = SEED;
     assert_eq!(rng::rand_from_seed(&mut s), 1321476956);
-    assert_eq!(s, SEED, "Godot writes back the seed it started from: [1321476956, 12345]");
+    assert_eq!(
+        s, SEED,
+        "Godot writes back the seed it started from: [1321476956, 12345]"
+    );
 }
 
 #[test]
@@ -81,19 +107,33 @@ fn global_random_functions_match_godot_for_seed_12345() {
 
     rng::seed(SEED);
     let randi: Vec<u32> = (0..4).map(|_| rng::randi()).collect();
-    assert_eq!(randi, [1321476956, 17539747, 3348728241, 2863338820], "randi()");
+    assert_eq!(
+        randi,
+        [1321476956, 17539747, 3348728241, 2863338820],
+        "randi()"
+    );
 
     rng::seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| rng::randf())),
-        bits(&[4599214296151359488, 4571358312406188032, 4605198011839021056, 4604180076135710720]),
+        bits(&[
+            4599214296151359488,
+            4571358312406188032,
+            4605198011839021056,
+            4604180076135710720
+        ]),
         "randf() is (float)rand() / (float)UINT32_MAX"
     );
 
     rng::seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| rng::randf_range(-3.5, 7.25))),
-        bits(&[-4618076179319626536, 4611886223412725118, 4616729034502416664, -4622809327214796736]),
+        bits(&[
+            -4618076179319626536,
+            4611886223412725118,
+            4616729034502416664,
+            -4622809327214796736
+        ]),
         "randf_range(-3.5, 7.25) is the DOUBLE randd() * (to - from) + from"
     );
 
@@ -104,7 +144,12 @@ fn global_random_functions_match_godot_for_seed_12345() {
     rng::seed(SEED);
     assert_eq!(
         f64_bits((0..4).map(|_| rng::randfn(1.0, 2.0))),
-        bits(&[-4611022827862630423, 4603723601486594154, 4612259917416913723, -4628335758851322544]),
+        bits(&[
+            -4611022827862630423,
+            4603723601486594154,
+            4612259917416913723,
+            -4628335758851322544
+        ]),
         "randfn(1.0, 2.0)"
     );
 
@@ -128,29 +173,53 @@ fn global_random_functions_match_godot_for_seed_12345() {
 
     rng::seed(42);
     let s42: Vec<u32> = (0..3).map(|_| rng::randi()).collect();
-    assert_eq!(s42, [492690617, 1919685028, 3561993920], "seed(42) — the agent play tool's seed");
+    assert_eq!(
+        s42,
+        [492690617, 1919685028, 3561993920],
+        "seed(42) — the agent play tool's seed"
+    );
 
     // Pinned seeding: the start, the k-th `randomize()` and the j-th
     // RandomNumberGenerator are all derived from the base, by the rule the
     // Godot capture (scripts/lib/godot-reference-capture.gd) applies.
     rng::pin_seed(Some(SEED));
-    assert_eq!(rng::randi(), 1321476956, "pinning seeds the global generator with the base");
-    assert_eq!(rng::randomize(), SEED + 1, "the 1st randomize() seeds base + 1");
+    assert_eq!(
+        rng::randi(),
+        1321476956,
+        "pinning seeds the global generator with the base"
+    );
+    assert_eq!(
+        rng::randomize(),
+        SEED + 1,
+        "the 1st randomize() seeds base + 1"
+    );
     let after_randomize = rng::randi();
     rng::seed(SEED + 1);
     assert_eq!(rng::randi(), after_randomize);
-    assert_eq!(rng::randomize(), SEED + 2, "the 2nd randomize() seeds base + 2");
+    assert_eq!(
+        rng::randomize(),
+        SEED + 2,
+        "the 2nd randomize() seeds base + 2"
+    );
     let a = Rng::new_for_script();
     assert_eq!(a.seed(), SEED + rng::PINNED_INSTANCE_OFFSET + 1);
     let mut b = Rng::new_for_script();
     assert_eq!(b.seed(), SEED + rng::PINNED_INSTANCE_OFFSET + 2);
-    assert_eq!(b.randomize(), SEED + rng::PINNED_INSTANCE_OFFSET + 3, "an instance randomize() shares the instance counter");
+    assert_eq!(
+        b.randomize(),
+        SEED + rng::PINNED_INSTANCE_OFFSET + 3,
+        "an instance randomize() shares the instance counter"
+    );
 
     // Unpinned again: randomize() and new instances come from entropy.
     rng::pin_seed(None);
     let c = Rng::new_for_script();
     let d = Rng::new_for_script();
-    assert_ne!(c.seed(), d.seed(), "unpinned RandomNumberGenerator.new() is randomized");
+    assert_ne!(
+        c.seed(),
+        d.seed(),
+        "unpinned RandomNumberGenerator.new() is randomized"
+    );
     assert_ne!(rng::randomize(), SEED + 3);
 }
 

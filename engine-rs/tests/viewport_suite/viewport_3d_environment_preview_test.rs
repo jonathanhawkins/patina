@@ -110,7 +110,7 @@ fn panoramic_sky_placeholder_renders() {
                 panorama_path: "res://my_hdr.exr".to_string(),
                 texture: None,
                 ..Default::default()
-        }),
+            }),
             ..Default::default()
         }),
         ..Default::default()
@@ -318,7 +318,7 @@ fn preview_info_panoramic_with_path() {
                 panorama_path: "res://sky.hdr".to_string(),
                 texture: None,
                 ..Default::default()
-        }),
+            }),
             ..Default::default()
         }),
         ..Default::default()

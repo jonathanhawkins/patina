@@ -114,7 +114,10 @@ fn load_path_and_load_are_exposed() {
         // CompressedTextureLayered is GDREGISTER_ABSTRACT_CLASS upstream; its
         // load_path/load surface is reached through the concrete subclasses.
         if class == "CompressedTextureLayered" {
-            assert!(instantiate(class).is_none(), "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS");
+            assert!(
+                instantiate(class).is_none(),
+                "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS"
+            );
             continue;
         }
         let obj = instantiate(class).unwrap_or_else(|| panic!("{class} instantiates"));

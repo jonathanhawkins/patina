@@ -12,11 +12,16 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use gdplatform::multiplayer_peer_state::MultiplayerPeerSignal;
-use gdplatform::network::{ConnectionStatus, MultiplayerAPI, NetworkPeer, Packet, PeerId, TransferMode};
+use gdplatform::network::{
+    ConnectionStatus, MultiplayerAPI, NetworkPeer, Packet, PeerId, TransferMode,
+};
 use gdplatform::websocket_multiplayer::WebSocketMultiplayerPeer;
 
 /// Pumps both ends until the client is fully connected (handshake + id assign).
-fn pump_until_connected(server: &mut WebSocketMultiplayerPeer, client: &mut WebSocketMultiplayerPeer) {
+fn pump_until_connected(
+    server: &mut WebSocketMultiplayerPeer,
+    client: &mut WebSocketMultiplayerPeer,
+) {
     for _ in 0..200 {
         let _ = server.poll();
         let _ = client.poll();
@@ -49,7 +54,10 @@ fn pump_for_packet(
         }
         sleep(Duration::from_millis(5));
     }
-    panic!("packet {:?} never arrived", String::from_utf8_lossy(expected));
+    panic!(
+        "packet {:?} never arrived",
+        String::from_utf8_lossy(expected)
+    );
 }
 
 fn connected_pair() -> (WebSocketMultiplayerPeer, WebSocketMultiplayerPeer) {
@@ -112,7 +120,9 @@ fn client_sees_the_server_as_a_connected_peer() {
 
     let signals = client.drain_signals();
     assert!(
-        signals.contains(&MultiplayerPeerSignal::PeerConnected(PeerId::SERVER.0 as i32)),
+        signals.contains(&MultiplayerPeerSignal::PeerConnected(
+            PeerId::SERVER.0 as i32
+        )),
         "client should register the server as a peer, got {:?}",
         signals
     );
@@ -210,7 +220,10 @@ fn a_payload_over_the_default_outbound_buffer_is_refused() {
             transfer_mode: TransferMode::Reliable,
         },
     );
-    assert!(err.is_err(), "70 KiB over a 65535-byte outbound buffer must be refused");
+    assert!(
+        err.is_err(),
+        "70 KiB over a 65535-byte outbound buffer must be refused"
+    );
 }
 
 #[test]

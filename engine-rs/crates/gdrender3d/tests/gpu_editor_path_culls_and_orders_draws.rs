@@ -26,7 +26,11 @@ fn add_cube(r: &mut GpuRenderer3D, at: Vector3, color: Color) {
     r.set_mesh(inst, Mesh3D::cube(0.5));
     r.set_material(
         inst,
-        Material3D { albedo: color, shading_mode: ShadingMode::Unlit, ..Default::default() },
+        Material3D {
+            albedo: color,
+            shading_mode: ShadingMode::Unlit,
+            ..Default::default()
+        },
     );
     r.set_transform(inst, Transform3D::IDENTITY.translated(at));
     r.set_visible(inst, true);
@@ -60,7 +64,11 @@ fn draws_outside_the_view_are_culled_and_the_frame_is_unchanged() {
     // partly on screen, so it must NOT be culled.
     let visible = |r: &mut GpuRenderer3D| {
         add_cube(r, Vector3::new(0.0, 0.0, -2.5), red);
-        add_cube(r, Vector3::new(-1.05, 0.0, -2.5), Color::new(0.0, 1.0, 0.0, 1.0));
+        add_cube(
+            r,
+            Vector3::new(-1.05, 0.0, -2.5),
+            Color::new(0.0, 1.0, 0.0, 1.0),
+        );
     };
     r.reset_scene();
     visible(&mut r);
@@ -82,7 +90,10 @@ fn draws_outside_the_view_are_culled_and_the_frame_is_unchanged() {
         2,
         "the 50 cubes outside the clip volume must not be drawn"
     );
-    assert!(with_offscreen == alone, "culling must not change a single pixel");
+    assert!(
+        with_offscreen == alone,
+        "culling must not change a single pixel"
+    );
 }
 
 #[test]
@@ -118,5 +129,8 @@ fn coplanar_draws_resolve_in_creation_order_in_every_renderer() {
             "centre is r={r} b={b}; the first-created cube is r={fr:.2} b={fb:.2}"
         );
     }
-    assert!(frames.windows(2).all(|p| p[0] == p[1]), "every renderer draws the same frame");
+    assert!(
+        frames.windows(2).all(|p| p[0] == p[1]),
+        "every renderer draws the same frame"
+    );
 }

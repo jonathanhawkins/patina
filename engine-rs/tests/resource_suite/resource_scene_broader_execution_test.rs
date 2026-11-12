@@ -823,9 +823,18 @@ fn tres_saver_renumbered_produces_sequential_ids() {
     // generates one when it is empty (ResourceFormatSaverText,
     // scene/resources/resource_format_text.cpp:1889-1926). Sequential
     // renumbering was Godot 3's format; this test used to require it.
-    assert!(saved.contains("id=\"sub_99\""), "existing ids are preserved: {saved}");
-    assert!(saved.contains("id=\"sub_42\""), "existing ids are preserved: {saved}");
-    assert!(!saved.contains("id=\"1\""), "nothing is renumbered: {saved}");
+    assert!(
+        saved.contains("id=\"sub_99\""),
+        "existing ids are preserved: {saved}"
+    );
+    assert!(
+        saved.contains("id=\"sub_42\""),
+        "existing ids are preserved: {saved}"
+    );
+    assert!(
+        !saved.contains("id=\"1\""),
+        "nothing is renumbered: {saved}"
+    );
 }
 
 #[test]

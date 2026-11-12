@@ -1,4 +1,3 @@
-
 //! pat-mgixk.31: the four Joint3D classes' indexed `set_param`/`get_param`,
 //! plus HingeJoint3D's second family `set_flag`/`get_flag`.
 //!

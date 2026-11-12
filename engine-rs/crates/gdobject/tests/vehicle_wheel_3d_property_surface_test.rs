@@ -74,10 +74,18 @@ fn vehicle_wheel_3d_exposes_the_full_suspension_surface() {
 #[test]
 fn damping_is_a_pair_not_a_single_coefficient() {
     register_3d_classes();
-    assert_eq!(default_of("VehicleWheel3D", "damping_compression"), Variant::Float(0.83));
-    assert_eq!(default_of("VehicleWheel3D", "damping_relaxation"), Variant::Float(0.88));
+    assert_eq!(
+        default_of("VehicleWheel3D", "damping_compression"),
+        Variant::Float(0.83)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "damping_relaxation"),
+        Variant::Float(0.88)
+    );
     assert!(
-        !props("VehicleWheel3D").iter().any(|p| p == "suspension_damping"),
+        !props("VehicleWheel3D")
+            .iter()
+            .any(|p| p == "suspension_damping"),
         "`suspension_damping` is the *sim's* field name, not the node's — the \
          node has the compression/relaxation pair"
     );
@@ -89,20 +97,53 @@ fn damping_is_a_pair_not_a_single_coefficient() {
 #[test]
 fn defaults_describe_a_usable_wheel() {
     register_3d_classes();
-    assert_eq!(default_of("VehicleWheel3D", "wheel_radius"), Variant::Float(0.5));
-    assert_eq!(default_of("VehicleWheel3D", "wheel_rest_length"), Variant::Float(0.15));
-    assert_eq!(default_of("VehicleWheel3D", "suspension_travel"), Variant::Float(0.2));
-    assert_eq!(default_of("VehicleWheel3D", "suspension_stiffness"), Variant::Float(5.88));
-    assert_eq!(default_of("VehicleWheel3D", "suspension_max_force"), Variant::Float(6000.0));
-    assert_eq!(default_of("VehicleWheel3D", "wheel_friction_slip"), Variant::Float(10.5));
-    assert_eq!(default_of("VehicleWheel3D", "wheel_roll_influence"), Variant::Float(0.1));
+    assert_eq!(
+        default_of("VehicleWheel3D", "wheel_radius"),
+        Variant::Float(0.5)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "wheel_rest_length"),
+        Variant::Float(0.15)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "suspension_travel"),
+        Variant::Float(0.2)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "suspension_stiffness"),
+        Variant::Float(5.88)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "suspension_max_force"),
+        Variant::Float(6000.0)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "wheel_friction_slip"),
+        Variant::Float(10.5)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "wheel_roll_influence"),
+        Variant::Float(0.1)
+    );
 
     // Drive inputs default to inert — the body drives, unless a wheel overrides.
-    assert_eq!(default_of("VehicleWheel3D", "engine_force"), Variant::Float(0.0));
+    assert_eq!(
+        default_of("VehicleWheel3D", "engine_force"),
+        Variant::Float(0.0)
+    );
     assert_eq!(default_of("VehicleWheel3D", "brake"), Variant::Float(0.0));
-    assert_eq!(default_of("VehicleWheel3D", "steering"), Variant::Float(0.0));
-    assert_eq!(default_of("VehicleWheel3D", "use_as_traction"), Variant::Bool(false));
-    assert_eq!(default_of("VehicleWheel3D", "use_as_steering"), Variant::Bool(false));
+    assert_eq!(
+        default_of("VehicleWheel3D", "steering"),
+        Variant::Float(0.0)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "use_as_traction"),
+        Variant::Bool(false)
+    );
+    assert_eq!(
+        default_of("VehicleWheel3D", "use_as_steering"),
+        Variant::Bool(false)
+    );
 }
 
 /// ⚠️ The node's `suspension_stiffness` is NOT the sim's. Godot's default is

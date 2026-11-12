@@ -297,11 +297,7 @@ pub fn binary_scene_to_tscn(resource: &Resource) -> EngineResult<String> {
             }
         } else if is_unparented(nd.parent) {
             if let Some(base) = base_scene.filter(|b| *b >= 0) {
-                let _ = write!(
-                    header,
-                    " instance={}",
-                    writer.literal(variant_of(base as i32)?)
-                );
+                let _ = write!(header, " instance={}", writer.literal(variant_of(base)?));
             }
         }
         header.push(']');

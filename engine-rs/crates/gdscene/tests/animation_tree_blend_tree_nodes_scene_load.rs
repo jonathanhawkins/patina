@@ -177,7 +177,9 @@ fn script_src(sets: &[(&str, String)]) -> String {
     } else {
         body
     };
-    format!("extends Node2D\nfunc _process(delta):\n    var t = get_node(\"AnimationTree\")\n{body}")
+    format!(
+        "extends Node2D\nfunc _process(delta):\n    var t = get_node(\"AnimationTree\")\n{body}"
+    )
 }
 
 fn num_prop(tree: &SceneTree, node: NodeId, prop: &str) -> f32 {
@@ -199,8 +201,8 @@ fn run(scene_text: &str, sets: &[(&str, String)], frames: usize) -> f32 {
     let sprite = tree
         .find_child(scene_root, "Sprite", true)
         .expect("Sprite exists");
-    let script = GDScriptNodeInstance::from_source(&script_src(sets), scene_root)
-        .expect("script parses");
+    let script =
+        GDScriptNodeInstance::from_source(&script_src(sets), scene_root).expect("script parses");
     tree.attach_script(scene_root, Box::new(script));
 
     let mut ml = MainLoop::new(tree);
@@ -215,7 +217,10 @@ fn run(scene_text: &str, sets: &[(&str, String)], frames: usize) -> f32 {
 #[test]
 fn animation_tree_blend_tree_nodes_scene_load() {
     let scene = add2_timescale_scene(false);
-    let base = [("TS/scale", "1.0".to_string()), ("Add/add_amount", "0.0".to_string())];
+    let base = [
+        ("TS/scale", "1.0".to_string()),
+        ("Add/add_amount", "0.0".to_string()),
+    ];
 
     // Six frames = 0.1s of a 1s ramp, so every reading below sits inside the
     // first loop and the comparison cannot be confounded by a wrap.
@@ -230,7 +235,10 @@ fn animation_tree_blend_tree_nodes_scene_load() {
     // -- (a) TimeScale: double the scale, double the advance ----------------
     let at_2x = run(
         &scene,
-        &[("TS/scale", "2.0".to_string()), ("Add/add_amount", "0.0".to_string())],
+        &[
+            ("TS/scale", "2.0".to_string()),
+            ("Add/add_amount", "0.0".to_string()),
+        ],
         6,
     );
     assert!(
@@ -244,7 +252,10 @@ fn animation_tree_blend_tree_nodes_scene_load() {
     // -- (b) Add2: the additive layer is added, and only when asked ---------
     let added = run(
         &scene,
-        &[("TS/scale", "1.0".to_string()), ("Add/add_amount", "1.0".to_string())],
+        &[
+            ("TS/scale", "1.0".to_string()),
+            ("Add/add_amount", "1.0".to_string()),
+        ],
         6,
     );
     assert!(
@@ -258,7 +269,10 @@ fn animation_tree_blend_tree_nodes_scene_load() {
 /// 🔑 ONE unsupported node must no longer cost the whole tree.
 #[test]
 fn an_unsupported_node_no_longer_drops_the_whole_tree() {
-    let sets = [("TS/scale", "1.0".to_string()), ("Add/add_amount", "0.0".to_string())];
+    let sets = [
+        ("TS/scale", "1.0".to_string()),
+        ("Add/add_amount", "0.0".to_string()),
+    ];
     let intact = run(&add2_timescale_scene(false), &sets, 6);
     let with_bogus = run(&add2_timescale_scene(true), &sets, 6);
 

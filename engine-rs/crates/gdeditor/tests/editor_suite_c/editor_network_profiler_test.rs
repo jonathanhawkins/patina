@@ -20,7 +20,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -54,7 +58,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -81,7 +88,10 @@ fn network_profiler_renders_godot_chrome() {
         "&#10006; Clear",
         "Autostart",
     ] {
-        assert!(html.contains(needle), "Network Profiler toolbar missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "Network Profiler toolbar missing `{needle}`"
+        );
     }
 
     // Down / Up bandwidth read-outs (incoming/outgoing LineEdits + labels).
@@ -93,12 +103,23 @@ fn network_profiler_renders_godot_chrome() {
         "id=\"net-incoming\"",
         "id=\"net-outgoing\"",
     ] {
-        assert!(html.contains(needle), "Network Profiler bandwidth chrome missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "Network Profiler bandwidth chrome missing `{needle}`"
+        );
     }
 
     // RPC counters tree columns: Node | Incoming RPC | Outgoing RPC.
-    for needle in ["id=\"net-rpc-body\"", ">Node<", ">Incoming RPC<", ">Outgoing RPC<"] {
-        assert!(html.contains(needle), "RPC counters tree missing `{needle}`");
+    for needle in [
+        "id=\"net-rpc-body\"",
+        ">Node<",
+        ">Incoming RPC<",
+        ">Outgoing RPC<",
+    ] {
+        assert!(
+            html.contains(needle),
+            "RPC counters tree missing `{needle}`"
+        );
     }
 
     // Replication tree columns: Root | Synchronizer | Config | Count | Size.
@@ -122,7 +143,10 @@ fn network_profiler_renders_godot_chrome() {
         "/api/debug/network_autostart",
         "/api/debug/network_clear",
     ] {
-        assert!(html.contains(needle), "Network Profiler JS missing `{needle}`");
+        assert!(
+            html.contains(needle),
+            "Network Profiler JS missing `{needle}`"
+        );
     }
 
     handle.stop();
@@ -166,12 +190,32 @@ fn network_profiler_info_payload_shape() {
     let info = body_json(&http_get(port, "/api/debug/info"));
     let net = &info["network"];
     assert!(net.is_object(), "debug/info publishes a `network` object");
-    assert!(net["incoming_bandwidth"].is_number(), "network.incoming_bandwidth present (bytes/s)");
-    assert!(net["outgoing_bandwidth"].is_number(), "network.outgoing_bandwidth present (bytes/s)");
-    assert!(net["rpcs"].is_array(), "network.rpcs is the RPC counters list");
-    assert!(net["syncs"].is_array(), "network.syncs is the replication list");
-    assert_eq!(net["profiling"], serde_json::json!(false), "profiling starts off");
-    assert_eq!(net["autostart"], serde_json::json!(false), "autostart starts off");
+    assert!(
+        net["incoming_bandwidth"].is_number(),
+        "network.incoming_bandwidth present (bytes/s)"
+    );
+    assert!(
+        net["outgoing_bandwidth"].is_number(),
+        "network.outgoing_bandwidth present (bytes/s)"
+    );
+    assert!(
+        net["rpcs"].is_array(),
+        "network.rpcs is the RPC counters list"
+    );
+    assert!(
+        net["syncs"].is_array(),
+        "network.syncs is the replication list"
+    );
+    assert_eq!(
+        net["profiling"],
+        serde_json::json!(false),
+        "profiling starts off"
+    );
+    assert_eq!(
+        net["autostart"],
+        serde_json::json!(false),
+        "autostart starts off"
+    );
 
     handle.stop();
 }
@@ -181,19 +225,43 @@ fn network_profiler_toolbar_actions_drive_state() {
     let (handle, port) = make_server();
 
     // Start/Stop toggle (Godot _activate_pressed → enable_profiling).
-    let r = body_json(&http_post(port, "/api/debug/network_profiler", r#"{"enable":true}"#));
-    assert_eq!(r["profiling"], serde_json::json!(true), "enable=true turns profiling on");
+    let r = body_json(&http_post(
+        port,
+        "/api/debug/network_profiler",
+        r#"{"enable":true}"#,
+    ));
+    assert_eq!(
+        r["profiling"],
+        serde_json::json!(true),
+        "enable=true turns profiling on"
+    );
     assert_eq!(
         body_json(&http_get(port, "/api/debug/info"))["network"]["profiling"],
         serde_json::json!(true),
         "profiling state is reflected in debug/info"
     );
-    let r = body_json(&http_post(port, "/api/debug/network_profiler", r#"{"enable":false}"#));
-    assert_eq!(r["profiling"], serde_json::json!(false), "enable=false turns profiling off");
+    let r = body_json(&http_post(
+        port,
+        "/api/debug/network_profiler",
+        r#"{"enable":false}"#,
+    ));
+    assert_eq!(
+        r["profiling"],
+        serde_json::json!(false),
+        "enable=false turns profiling off"
+    );
 
     // Autostart checkbox (Godot _autostart_toggled → persisted project metadata).
-    let r = body_json(&http_post(port, "/api/debug/network_autostart", r#"{"enabled":true}"#));
-    assert_eq!(r["autostart"], serde_json::json!(true), "autostart persists when checked");
+    let r = body_json(&http_post(
+        port,
+        "/api/debug/network_autostart",
+        r#"{"enabled":true}"#,
+    ));
+    assert_eq!(
+        r["autostart"],
+        serde_json::json!(true),
+        "autostart persists when checked"
+    );
     assert_eq!(
         body_json(&http_get(port, "/api/debug/info"))["network"]["autostart"],
         serde_json::json!(true),
@@ -203,8 +271,14 @@ fn network_profiler_toolbar_actions_drive_state() {
     // Clear (Godot _clear_pressed) reports the reset/empty state.
     let r = body_json(&http_post(port, "/api/debug/network_clear", "{}"));
     assert_eq!(r["ok"], serde_json::json!(true));
-    assert!(r["rpcs"].as_array().unwrap().is_empty(), "clear empties the RPC list");
-    assert!(r["syncs"].as_array().unwrap().is_empty(), "clear empties the replication list");
+    assert!(
+        r["rpcs"].as_array().unwrap().is_empty(),
+        "clear empties the RPC list"
+    );
+    assert!(
+        r["syncs"].as_array().unwrap().is_empty(),
+        "clear empties the replication list"
+    );
 
     handle.stop();
 }

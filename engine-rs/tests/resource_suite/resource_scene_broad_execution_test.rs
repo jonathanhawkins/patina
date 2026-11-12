@@ -1158,7 +1158,8 @@ fn main_loop_scene_change_mid_execution() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let old_scene = tree.add_child(root, Node::new("OldNode", "Node2D"))
+    let old_scene = tree
+        .add_child(root, Node::new("OldNode", "Node2D"))
         .unwrap();
     // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
     // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root

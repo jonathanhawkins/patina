@@ -101,7 +101,10 @@ fn classdb_characterbody3d_inherits_node3d() {
     // Godot: CharacterBody3D : PhysicsBody3D : CollisionObject3D : Node3D
     // (scene/3d/physics/character_body_3d.h).
     assert_eq!(info.parent_class.as_str(), "PhysicsBody3D");
-    assert!(gdobject::class_db::is_parent_class("CharacterBody3D", "Node3D"));
+    assert!(gdobject::class_db::is_parent_class(
+        "CharacterBody3D",
+        "Node3D"
+    ));
 }
 
 #[test]

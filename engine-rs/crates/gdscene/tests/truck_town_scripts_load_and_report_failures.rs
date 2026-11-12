@@ -111,12 +111,18 @@ fn car_base_camera_and_body_scripts_attach_with_node_initializers() {
     ml.step(1.0 / 60.0);
     let cam = "/root/CarBase/Body/CameraBase/Camera3D";
     // car_base.tscn authors `fov = 74.0` above `script = …`.
-    assert_eq!(float(script_prop(&ml, cam, "base_fov")), 74.0, "Godot: base_fov=74.0");
+    assert_eq!(
+        float(script_prop(&ml, cam, "base_fov")),
+        74.0,
+        "Godot: base_fov=74.0"
+    );
     match script_prop(&ml, cam, "initial_transform") {
         Variant::Transform3D(t) => {
             let o = t.origin;
             assert!(
-                (o.x - 0.0).abs() < 1e-5 && (o.y - 2.032).abs() < 1e-5 && (o.z + 4.394).abs() < 1e-5,
+                (o.x - 0.0).abs() < 1e-5
+                    && (o.y - 2.032).abs() < 1e-5
+                    && (o.z + 4.394).abs() < 1e-5,
                 "initial_transform must be the authored camera transform, got origin {o:?}"
             );
         }
@@ -125,7 +131,10 @@ fn car_base_camera_and_body_scripts_attach_with_node_initializers() {
     // An exported override listed after `script = …` still applies.
     assert_eq!(float(script_prop(&ml, cam, "height")), 1.25);
     // The VehicleBody3D starts at rest: linear_velocity.length() == 0.
-    assert_eq!(float(script_prop(&ml, "/root/CarBase/Body", "previous_speed")), 0.0);
+    assert_eq!(
+        float(script_prop(&ml, "/root/CarBase/Body", "previous_speed")),
+        0.0
+    );
 
     let out = ml.tree_mut().drain_script_output();
     for e in &out.errors {
@@ -175,7 +184,11 @@ fn initializers_see_the_node_before_init_and_before_exported_overrides() {
     let mut ml = boot(dir.path(), "main.tscn");
     ml.step(1.0 / 60.0);
     let out = ml.tree_mut().drain_script_output();
-    assert!(out.errors.is_empty(), "no errors expected, got {:?}", out.errors);
+    assert!(
+        out.errors.is_empty(),
+        "no errors expected, got {:?}",
+        out.errors
+    );
     assert_eq!(
         out.prints,
         vec![
@@ -191,7 +204,10 @@ fn initializers_see_the_node_before_init_and_before_exported_overrides() {
 fn a_script_that_fails_to_parse_is_reported_with_its_path_and_line() {
     let _roots = roots_lock();
     let dir = temp_project(&[
-        ("broken.gd", "extends Node\n\nfunc _ready():\n\tvar x = = 1\n"),
+        (
+            "broken.gd",
+            "extends Node\n\nfunc _ready():\n\tvar x = = 1\n",
+        ),
         (
             "main.tscn",
             concat!(
@@ -210,9 +226,18 @@ fn a_script_that_fails_to_parse_is_reported_with_its_path_and_line() {
         .iter()
         .filter(|e| e.contains("script failed to load: res://broken.gd:"))
         .collect();
-    assert_eq!(hit.len(), 1, "one load failure for broken.gd, got {:?}", out.errors);
+    assert_eq!(
+        hit.len(),
+        1,
+        "one load failure for broken.gd, got {:?}",
+        out.errors
+    );
     // Attached while the scene is still detached, so the path is `/Main`.
-    assert!(hit[0].contains("Main: script failed to load"), "names the node: {}", hit[0]);
+    assert!(
+        hit[0].contains("Main: script failed to load"),
+        "names the node: {}",
+        hit[0]
+    );
     assert!(hit[0].contains("line 4"), "names the line: {}", hit[0]);
 }
 
@@ -250,7 +275,11 @@ fn an_error_after_await_is_reported_and_does_not_drop_the_other_coroutines() {
     let mut ml = boot(dir.path(), "main.tscn");
     ml.step(1.0 / 60.0);
     let before = ml.tree_mut().drain_script_output();
-    assert!(before.errors.is_empty(), "nothing fails before the await: {:?}", before.errors);
+    assert!(
+        before.errors.is_empty(),
+        "nothing fails before the await: {:?}",
+        before.errors
+    );
     let main = ml.tree().get_node_by_path("/root/Main").unwrap();
     ml.tree_mut().emit_signal(main, "go", &[]);
     ml.step(1.0 / 60.0);
@@ -260,8 +289,17 @@ fn an_error_after_await_is_reported_and_does_not_drop_the_other_coroutines() {
         .iter()
         .filter(|e| e.starts_with("/root/Main: fails(): "))
         .collect();
-    assert_eq!(hit.len(), 1, "the resumed error is reported once, got {:?}", out.errors);
-    assert!(hit[0].contains("line 9"), "names the failing line: {}", hit[0]);
+    assert_eq!(
+        hit.len(),
+        1,
+        "the resumed error is reported once, got {:?}",
+        out.errors
+    );
+    assert!(
+        hit[0].contains("line 9"),
+        "names the failing line: {}",
+        hit[0]
+    );
     assert!(
         out.prints.iter().any(|p| p == "survivor resumed"),
         "the coroutine resumed after the failing one must still run, prints {:?}",
@@ -316,12 +354,17 @@ fn a_callee_that_raises_returns_null_and_the_caller_keeps_running() {
     let out = ml.tree_mut().drain_script_output();
     assert_eq!(
         out.prints,
-        vec!["in setup".to_string(), "caller continued <null>".to_string()],
+        vec![
+            "in setup".to_string(),
+            "caller continued <null>".to_string()
+        ],
         "errors: {:?}",
         out.errors
     );
     assert!(
-        out.errors.iter().any(|e| e.starts_with("/root/Main/Child: setup(): ")),
+        out.errors
+            .iter()
+            .any(|e| e.starts_with("/root/Main/Child: setup(): ")),
         "the callee's error is reported against the callee, got {:?}",
         out.errors
     );

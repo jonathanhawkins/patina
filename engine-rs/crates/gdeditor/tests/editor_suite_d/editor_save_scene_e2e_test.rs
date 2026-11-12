@@ -132,7 +132,11 @@ fn saving_updates_the_active_tab_filename() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("my_level.tscn");
     let path_str = path.to_str().unwrap().to_string();
-    let resp = http_post(port, "/api/scene/save", &format!(r#"{{"path":"{path_str}"}}"#));
+    let resp = http_post(
+        port,
+        "/api/scene/save",
+        &format!(r#"{{"path":"{path_str}"}}"#),
+    );
     assert!(resp.contains("200 OK"), "save succeeds: {resp}");
     assert!(path.exists(), "the scene file was written");
 
@@ -166,11 +170,21 @@ fn saving_writes_a_valid_scene_file() {
     let path = dir.path().join("scene.tscn");
     let path_str = path.to_str().unwrap().to_string();
 
-    let resp = http_post(port, "/api/scene/save", &format!(r#"{{"path":"{path_str}"}}"#));
+    let resp = http_post(
+        port,
+        "/api/scene/save",
+        &format!(r#"{{"path":"{path_str}"}}"#),
+    );
     assert!(resp.contains("200 OK"), "save ok: {resp}");
     let contents = std::fs::read_to_string(&path).unwrap();
-    assert!(contents.contains("[gd_scene"), "valid tscn header: {contents}");
-    assert!(contents.contains("Main"), "the scene root is serialized: {contents}");
+    assert!(
+        contents.contains("[gd_scene"),
+        "valid tscn header: {contents}"
+    );
+    assert!(
+        contents.contains("Main"),
+        "the scene root is serialized: {contents}"
+    );
 
     let info = json(&http_get(port, "/api/scene/info"));
     assert_eq!(

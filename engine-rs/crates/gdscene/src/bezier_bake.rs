@@ -775,6 +775,7 @@ pub fn uniform_schedule(segments: usize, steps: usize) -> Vec<Vec<f32>> {
 /// longer than `max_chord`, capped at `max_depth` levels. Godot inserts the
 /// midpoint before recursing into both halves and keeps them in a map keyed by
 /// `t`; collecting into a Vec and sorting reproduces that order.
+#[allow(clippy::too_many_arguments)] // Godot's recursive signature, kept 1:1
 fn subdivide_even_length_3d(
     out: &mut Vec<f32>,
     begin: f32,

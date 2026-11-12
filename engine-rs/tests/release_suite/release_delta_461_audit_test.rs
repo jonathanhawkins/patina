@@ -445,14 +445,12 @@ fn instanced_scene_resource_sharing_tests_exist() {
             }
         }
     }
-    let has_coverage = entries
-        .into_iter()
-        .any(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.contains("instanced_resource")
-                || name.contains("packed_scene_ext_sub")
-                || name.contains("resource_cache_subresource")
-        });
+    let has_coverage = entries.into_iter().any(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        name.contains("instanced_resource")
+            || name.contains("packed_scene_ext_sub")
+            || name.contains("resource_cache_subresource")
+    });
 
     assert!(
         has_coverage,

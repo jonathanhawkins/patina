@@ -86,18 +86,29 @@ fn tabs(port: u16) -> serde_json::Value {
 /// the crate dir, so a workspace-relative path wouldn't resolve; the server
 /// loads tabs by the exact stored path, so an absolute one is CWD-independent.
 fn fixture(name: &str) -> String {
-    format!("{}/../../fixtures/scenes/{name}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../../fixtures/scenes/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Opens `path` in a new tab and returns its tab id (also becomes active).
 fn open_tab(port: u16, path: &str) -> u64 {
-    let resp = http_post(port, "/api/scene/tabs/open", &format!(r#"{{"path":"{path}"}}"#));
+    let resp = http_post(
+        port,
+        "/api/scene/tabs/open",
+        &format!(r#"{{"path":"{path}"}}"#),
+    );
     assert!(resp.contains("200 OK"), "open {path} ok: {resp}");
     json(&resp)["tab_id"].as_u64().unwrap()
 }
 
 fn close_tab(port: u16, tab_id: u64) -> serde_json::Value {
-    let resp = http_post(port, "/api/scene/tabs/close", &format!(r#"{{"tab_id":{tab_id}}}"#));
+    let resp = http_post(
+        port,
+        "/api/scene/tabs/close",
+        &format!(r#"{{"tab_id":{tab_id}}}"#),
+    );
     assert!(resp.contains("200 OK"), "close {tab_id} ok: {resp}");
     json(&resp)
 }

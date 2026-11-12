@@ -15,7 +15,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -49,7 +53,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -66,7 +73,11 @@ fn project_settings_and_input_map_live() {
     let (handle, port) = make_server();
 
     // --- Project Settings persist a changed setting ---
-    let set = http_post(port, "/api/project_settings", r#"{"project_name":"PersistCheck123"}"#);
+    let set = http_post(
+        port,
+        "/api/project_settings",
+        r#"{"project_name":"PersistCheck123"}"#,
+    );
     assert!(set.contains("200 OK"), "POST project_settings ok");
     let after = http_get(port, "/api/project_settings");
     assert!(
@@ -77,24 +88,45 @@ fn project_settings_and_input_map_live() {
     // --- Input Map is live (model serializes actions as an object by name) ---
     // Defaults are present.
     let initial = body_json(&http_get(port, "/api/input_map"));
-    assert!(initial["actions"]["ui_left"].is_object(), "default actions present");
+    assert!(
+        initial["actions"]["ui_left"].is_object(),
+        "default actions present"
+    );
 
     // Add an action bound to a key (events carry {Key: "f"}).
-    assert!(http_post(port, "/api/input_map", r#"{"action":"fire","keys":["f"]}"#).contains("200 OK"));
+    assert!(
+        http_post(port, "/api/input_map", r#"{"action":"fire","keys":["f"]}"#).contains("200 OK")
+    );
     let fire = body_json(&http_get(port, "/api/input_map"));
-    let events = fire["actions"]["fire"]["events"].as_array().expect("fire action added with events");
+    let events = fire["actions"]["fire"]["events"]
+        .as_array()
+        .expect("fire action added with events");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["Key"], serde_json::json!("f"));
 
     // Update its keys.
-    assert!(http_post(port, "/api/input_map", r#"{"action":"fire","keys":["f","g"]}"#).contains("200 OK"));
+    assert!(http_post(
+        port,
+        "/api/input_map",
+        r#"{"action":"fire","keys":["f","g"]}"#
+    )
+    .contains("200 OK"));
     let upd = body_json(&http_get(port, "/api/input_map"));
-    assert_eq!(upd["actions"]["fire"]["events"].as_array().unwrap().len(), 2, "keys updated");
+    assert_eq!(
+        upd["actions"]["fire"]["events"].as_array().unwrap().len(),
+        2,
+        "keys updated"
+    );
 
     // Remove it.
-    assert!(http_post(port, "/api/input_map", r#"{"action":"fire","remove":true}"#).contains("200 OK"));
+    assert!(
+        http_post(port, "/api/input_map", r#"{"action":"fire","remove":true}"#).contains("200 OK")
+    );
     let final_map = body_json(&http_get(port, "/api/input_map"));
-    assert!(final_map["actions"]["fire"].is_null(), "fire action removed");
+    assert!(
+        final_map["actions"]["fire"].is_null(),
+        "fire action removed"
+    );
 
     handle.stop();
 }
