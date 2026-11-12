@@ -98,7 +98,7 @@ jobs:
           submodules: recursive
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system libraries (ALSA headers for cpal)
         if: runner.os == 'Linux'
@@ -190,7 +190,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system libraries (ALSA headers for cpal)
         if: runner.os == 'Linux'
@@ -248,7 +248,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system libraries (ALSA headers for cpal)
         if: runner.os == 'Linux'
@@ -308,7 +308,7 @@ jobs:
           submodules: recursive
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system libraries (ALSA headers for cpal)
         if: runner.os == 'Linux'
@@ -370,7 +370,7 @@ jobs:
           submodules: recursive
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system libraries (ALSA headers for cpal)
         if: runner.os == 'Linux'
