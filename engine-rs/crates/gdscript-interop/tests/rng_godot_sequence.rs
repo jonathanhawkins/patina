@@ -53,6 +53,29 @@ fn float_bits(v: &[Variant]) -> Vec<i64> {
         .collect()
 }
 
+/// `randfn` is Box-Muller over `cos`/`ln`/`sqrt` in f64, and those come from
+/// the platform's libm: macOS and glibc can round the last bit differently
+/// (CI's Linux runner gave ...193 where the macOS-captured Godot value is
+/// ...192). Real Godot inherits the same libm on each platform, so the
+/// reference itself is only defined to the last ULP — compare within 1 ULP.
+/// Every other draw stays bit-exact, so a wrong formula or stream position
+/// (which moves the value by far more than one ULP) still fails.
+fn assert_within_one_ulp(actual: &[f64], expected_bits: &[i64], what: &str) {
+    assert_eq!(actual.len(), expected_bits.len(), "{what}: draw count");
+    for (i, (&a, &e)) in actual.iter().zip(expected_bits).enumerate() {
+        let e = f64::from_bits(e as u64);
+        let ulps = (a.to_bits() as i64)
+            .wrapping_sub(e.to_bits() as i64)
+            .unsigned_abs();
+        assert!(
+            a.is_sign_negative() == e.is_sign_negative() && ulps <= 1,
+            "{what}: draw {i} is {a:e} ({:#x}), Godot gave {e:e} ({:#x}) — {ulps} ULPs apart",
+            a.to_bits(),
+            e.to_bits()
+        );
+    }
+}
+
 #[test]
 fn global_builtins_draw_godots_sequence_for_seed_12345() {
     let _guard = serial();
@@ -99,15 +122,19 @@ fn global_builtins_draw_godots_sequence_for_seed_12345() {
     let v = run_list(
         "seed(12345)\nreturn [randfn(1.0, 2.0), randfn(1.0, 2.0), randfn(1.0, 2.0), randfn(1.0, 2.0)]\n",
     );
-    assert_eq!(
-        float_bits(&v),
-        [
+    let draws: Vec<f64> = float_bits(&v)
+        .iter()
+        .map(|&b| f64::from_bits(b as u64))
+        .collect();
+    assert_within_one_ulp(
+        &draws,
+        &[
             -4611022827862630423,
             4603723601486594154,
             4612259917416913723,
-            -4628335758851322544
+            -4628335758851322544,
         ],
-        "randfn(1.0, 2.0)"
+        "randfn(1.0, 2.0)",
     );
 
     let v = run_list(

@@ -223,6 +223,13 @@ fn the_draw_items_carry_the_shader_and_the_label_flags() {
 
 #[test]
 fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
+    // Same guard as the sibling GPU tests (gpu_play_view_renders_fog_and_probes):
+    // CI runners have no GPU adapter, so the GPU entry point falls back to
+    // software and the GPU-path assertion below can never hold there.
+    if gdrender3d::wgpu_pipeline::GpuRenderer3D::new().is_none() {
+        eprintln!("SKIP: no GPU adapter, the GPU entry point renders in software anyway");
+        return;
+    }
     let (mut p, ids) = play();
     let before = gdeditor::viewport_3d_render::software_fallback_frames();
     let frame = p.render_world();

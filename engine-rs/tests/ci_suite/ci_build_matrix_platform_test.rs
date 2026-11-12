@@ -423,30 +423,6 @@ fn ci_tested_targets_match_documented_matrix() {
     );
 }
 
-/// The CI YAML must contain jobs for each documented domain lane so that
-/// every Phase 7 validation area is actually exercised in the pipeline.
-#[test]
-fn ci_yaml_covers_documented_domain_lanes() {
-    let yaml = read_ci_yaml();
-
-    let expected_lanes = [
-        ("headless runtime", "Headless runtime compat"),
-        ("2D slice", "2D slice compat"),
-        ("3D slice", "3D slice compat"),
-        ("platform layer", "Platform layer compat"),
-        ("fuzz / property", "Fuzz / property tests"),
-        ("CI meta", "CI meta / infrastructure"),
-        ("oracle parity", "Oracle parity check"),
-    ];
-
-    for (label, job_name) in &expected_lanes {
-        assert!(
-            yaml.contains(job_name),
-            "CI must have a '{label}' lane (expected job name: '{job_name}')"
-        );
-    }
-}
-
 /// The CI YAML multi-platform matrix must include at least three OS
 /// runners matching the three desktop platforms in DESKTOP_TARGETS.
 #[test]

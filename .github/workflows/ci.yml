@@ -231,6 +231,12 @@ jobs:
         with:
           tool: nextest
 
+      # Trace/oracle/headless tests run the runner binary from
+      # target/debug/patina-runner; a shard only builds its test targets.
+      - name: Build patina-runner
+        working-directory: engine-rs
+        run: cargo build -p patina-runner
+
       - name: Integration tests (this shard)
         working-directory: engine-rs
         run: python3 ../scripts/ci/nextest-shard.py $(( ${{ matrix.shard }} - 1 )) 12

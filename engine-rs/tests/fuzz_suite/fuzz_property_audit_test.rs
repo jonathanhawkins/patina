@@ -143,45 +143,20 @@ fn fuzz_integration_tests_have_sufficient_coverage() {
 // ── CI wiring ───────────────────────────────────────────────────────
 
 #[test]
-fn ci_has_fuzz_property_lane() {
+fn ci_runs_the_fuzz_suite() {
+    // The fuzz suite is an integration-test target of this package, and CI runs
+    // EVERY integration target through the `rust-tests` shards
+    // (ci_suite::ci_sharded_integration_tests_test pins that coverage). The old
+    // dedicated "Fuzz / property tests" job built every test binary on one
+    // runner and overflowed its disk.
     let yaml = read_ci_yaml();
     assert!(
-        yaml.contains("Fuzz / property tests"),
-        "CI must have a dedicated fuzz/property test lane"
+        yaml.contains("scripts/ci/nextest-shard.py"),
+        "CI must run the sharded integration tests that include fuzz_suite"
     );
-}
-
-#[test]
-fn ci_fuzz_lane_covers_key_prefixes() {
-    let yaml = read_ci_yaml();
-    // Find the fuzz lane section
-    let fuzz_section = yaml
-        .find("Fuzz / property tests")
-        .expect("CI must have fuzz lane");
-    let section = &yaml[fuzz_section..];
-
-    let expected_prefixes = [
-        "fuzz_property",
-        "fuzz_variant",
-        "fuzz_collision",
-        "fuzz_signal",
-        "fuzz_resource",
-    ];
-    for prefix in &expected_prefixes {
-        assert!(
-            section.contains(prefix),
-            "CI fuzz lane must include test prefix '{prefix}'"
-        );
-    }
-}
-
-#[test]
-fn ci_fuzz_command_is_documented() {
-    let yaml = read_ci_yaml();
-    // The fuzz lane must have an actual cargo test command
     assert!(
-        yaml.contains("cargo test $WS -- fuzz_property"),
-        "CI fuzz lane must have a concrete cargo test command"
+        workspace_root().join("tests/fuzz_suite/main.rs").exists(),
+        "fuzz_suite must stay an integration-test target so the shards pick it up"
     );
 }
 

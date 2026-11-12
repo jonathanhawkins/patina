@@ -1619,6 +1619,8 @@ mod tests {
              the keepalive-only bug this test exists for",
         );
 
+        drop(peer);
+
         let _ = server.join();
     }
 
@@ -1695,7 +1697,14 @@ mod tests {
                 for f in &frames {
                     let _ = std::io::Write::write_all(&mut sock, &encode_frame(f, None));
                 }
-                std::thread::sleep(Duration::from_millis(hold_ms));
+                // Hold the connection until the CLIENT hangs up (the test drops
+                // its peer before joining), capped at `hold_ms`. A fixed sleep
+                // raced the client on slow CI runners: the server closed
+                // before the peer had read the frames, so the test saw an
+                // abnormal close (1006) instead of the behaviour under test.
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(hold_ms)));
+                let mut sink = [0u8; 1024];
+                while matches!(std::io::Read::read(&mut sock, &mut sink), Ok(n) if n > 0) {}
             }
         });
         let mut peer = WebSocketPeer::new();
@@ -1745,7 +1754,7 @@ mod tests {
     /// queued + new bytes exceed it (`wsl_peer.cpp:784`), and `0` = unbounded.
     #[test]
     fn a_send_larger_than_outbound_buffer_size_is_refused() {
-        let (mut peer, server) = open_peer_with_server_frames(vec![], 300, |p| {
+        let (mut peer, server) = open_peer_with_server_frames(vec![], 10_000, |p| {
             p.set_outbound_buffer_size(8);
         });
         assert!(matches!(
@@ -1761,6 +1770,7 @@ mod tests {
             peer.send(&[0u8; 100], WriteMode::Binary).is_ok(),
             "0 disables the bound"
         );
+        drop(peer);
         let _ = server.join();
     }
 
@@ -1773,7 +1783,7 @@ mod tests {
             Frame::new(Opcode::Text, b"0123456789".to_vec()),
             Frame::new(Opcode::Text, vec![b'x'; 11]),
         ];
-        let (mut peer, server) = open_peer_with_server_frames(frames, 300, |p| {
+        let (mut peer, server) = open_peer_with_server_frames(frames, 10_000, |p| {
             p.set_inbound_buffer_size(10);
         });
         settle(&mut peer);
@@ -1793,6 +1803,7 @@ mod tests {
             "an 11-byte message over a 10-byte limit must fail the connection"
         );
         assert_eq!(peer.close_code, 1009, "MESSAGE_TOO_BIG");
+        drop(peer);
         let _ = server.join();
     }
 
@@ -1806,7 +1817,7 @@ mod tests {
         let frames = (0..3u8)
             .map(|i| Frame::new(Opcode::Binary, vec![i; 12]))
             .collect();
-        let (mut peer, server) = open_peer_with_server_frames(frames, 400, |p| {
+        let (mut peer, server) = open_peer_with_server_frames(frames, 10_000, |p| {
             p.set_inbound_buffer_size(16);
         });
         settle(&mut peer);
@@ -1821,6 +1832,7 @@ mod tests {
         assert_eq!(peer.get_packet(), vec![1u8; 12]);
         assert_eq!(peer.get_packet(), vec![2u8; 12], "nothing was dropped");
         assert_eq!(peer.get_ready_state(), WebSocketState::Open);
+        drop(peer);
         let _ = server.join();
     }
 
@@ -1901,6 +1913,8 @@ mod tests {
         // And it can be turned back on.
         peer.set_no_delay(false);
         assert!(!peer.stream.as_ref().unwrap().nodelay().unwrap_or(true));
+
+        drop(peer);
 
         let _ = server.join();
     }

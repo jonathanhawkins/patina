@@ -355,28 +355,6 @@ fn repin_workflow_has_at_least_7_jobs() {
 // 11. ci.yml has all 6 compat domain jobs — pat-k7d
 // ===========================================================================
 
-#[test]
-fn ci_has_all_compat_domain_jobs() {
-    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
-    let ci = fs::read_to_string(ci_path).expect("ci.yml must exist");
-
-    let required_jobs = [
-        "rust-compat-headless:",
-        "rust-compat-2d:",
-        "rust-compat-3d:",
-        "rust-compat-platform:",
-        "rust-compat-fuzz:",
-        "rust-compat-ci-meta:",
-    ];
-
-    for job in &required_jobs {
-        assert!(
-            ci.contains(job),
-            "ci.yml must have compat domain job '{job}'"
-        );
-    }
-}
-
 // ===========================================================================
 // 12. ci.yml rust job has multi-platform matrix — pat-k7d
 // ===========================================================================

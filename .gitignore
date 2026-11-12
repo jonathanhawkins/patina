@@ -12,8 +12,9 @@ target-verifier/
 target-redcheck/
 .shadertest-target/
 
-# Large regenerable Godot ClassDB dump (recreate: godot --headless --dump-extension-api)
-engine-rs/fixtures/editor_oracle/godot_extension_api.json
+# Godot ClassDB dump (recreate: godot --headless --dump-extension-api).
+# TRACKED on purpose: classdb_instantiability_matches_godot reads it as its
+# oracle and CI cannot run Godot to regenerate it (~460 KB compressed in git).
 
 # Environment
 .env

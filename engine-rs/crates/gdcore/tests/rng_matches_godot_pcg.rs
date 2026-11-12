@@ -29,6 +29,29 @@ fn f64_bits(v: impl IntoIterator<Item = f64>) -> Vec<u64> {
     v.into_iter().map(f64::to_bits).collect()
 }
 
+/// `randfn` is Box-Muller over `cos`/`ln`/`sqrt` in f64, and those come from
+/// the platform's libm: macOS and glibc can round the last bit differently
+/// (CI's Linux runner gave ...193 where the macOS-captured Godot value is
+/// ...192). Real Godot inherits the same libm on each platform, so the
+/// reference itself is only defined to the last ULP — compare within 1 ULP.
+/// Every other draw stays bit-exact, so a wrong formula or stream position
+/// (which moves the value by far more than one ULP) still fails.
+fn assert_within_one_ulp(actual: &[f64], expected_bits: &[i64], what: &str) {
+    assert_eq!(actual.len(), expected_bits.len(), "{what}: draw count");
+    for (i, (&a, &e)) in actual.iter().zip(expected_bits).enumerate() {
+        let e = f64::from_bits(e as u64);
+        let ulps = (a.to_bits() as i64)
+            .wrapping_sub(e.to_bits() as i64)
+            .unsigned_abs();
+        assert!(
+            a.is_sign_negative() == e.is_sign_negative() && ulps <= 1,
+            "{what}: draw {i} is {a:e} ({:#x}), Godot gave {e:e} ({:#x}) — {ulps} ULPs apart",
+            a.to_bits(),
+            e.to_bits()
+        );
+    }
+}
+
 #[test]
 fn random_number_generator_instance_matches_godot_for_seed_12345() {
     let mut r = Rng::with_seed(SEED);
@@ -142,15 +165,16 @@ fn global_random_functions_match_godot_for_seed_12345() {
     assert_eq!(ri, [79, 72, 89, 15, 56, 47], "randi_range(-10, 100)");
 
     rng::seed(SEED);
-    assert_eq!(
-        f64_bits((0..4).map(|_| rng::randfn(1.0, 2.0))),
-        bits(&[
+    let draws: Vec<f64> = (0..4).map(|_| rng::randfn(1.0, 2.0)).collect();
+    assert_within_one_ulp(
+        &draws,
+        &[
             -4611022827862630423,
             4603723601486594154,
             4612259917416913723,
-            -4628335758851322544
-        ]),
-        "randfn(1.0, 2.0)"
+            -4628335758851322544,
+        ],
+        "randfn(1.0, 2.0)",
     );
 
     rng::seed(SEED);
